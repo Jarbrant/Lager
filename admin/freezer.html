@@ -8,6 +8,10 @@ Syfte (BLOCK 2/4):
 - Lägger till debug-panel DOM (AO-02 valfri) som render kan använda
 - Ingen redesign utanför AO: endast ny panel i Dashboard-vyn
 
+PATCH (REFAC-STORE-SPLIT):
+- Script-ordning uppdaterad för split: Core -> Contract -> Store -> Render -> Dashboard -> Page
+- Tar bort gamla UI/freezer-store.js include (ersätts av UI/pages/freezer/03-store.js)
+
 OBS:
 - RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
 - Inga nya storage-keys
@@ -251,8 +255,12 @@ OBS:
     </div>
   </main>
 
-  <!-- Script order (KRITISK) -->
-  <script src="../UI/freezer-store.js"></script>
+  <!-- Script order (KRITISK): Core -> Contract -> Store -> Render -> Dashboard -> Page -->
+  <!-- OBS: Om din FreezerCore-fil INTE ligger här, justera endast denna src så att FreezerCore laddas först. -->
+  <script src="../UI/pages/freezer/02-core.js"></script>
+  <script src="../UI/pages/freezer/04-contract.js"></script>
+  <script src="../UI/pages/freezer/03-store.js"></script>
+
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
   <script src="./freezer.js"></script>
