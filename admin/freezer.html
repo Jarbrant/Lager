@@ -4,13 +4,9 @@ AUTOPATCH | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
 Syfte (BLOCK 2/4):
-- Lägger till Users UI containers (form + lista + editläge)
-- Lägger till debug-panel DOM (AO-02 valfri) som render kan använda
+- Users UI containers (form + lista + editläge) i Dashboard
+- Debug-panel DOM (AO-02 valfri)
 - Ingen redesign utanför AO: endast ny panel i Dashboard-vyn
-
-OBS:
-- RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
-- Inga nya storage-keys
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -151,7 +147,7 @@ OBS:
 
         <div class="hr"></div>
 
-        <!-- AO-03: Users CRUD panel (RBAC: visas bara för admin i render/controller) -->
+        <!-- AO-03: Users CRUD panel -->
         <section id="frzUsersPanel" class="panel" style="background:#fff;" hidden>
           <div class="row">
             <div>
@@ -202,7 +198,6 @@ OBS:
               <label class="chk"><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
             </div>
 
-            <!-- Hidden fields for edit mode -->
             <input id="frzUserEditingId" type="hidden" value="" />
           </div>
 
