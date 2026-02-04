@@ -1,379 +1,260 @@
-/* ============================================================
-AO-02/15 — Statuspanel + Read-only UX + felkoder | BLOCK 1/3
-AUTOPATCH | FIL: UI/freezer-render.js
+<!-- ============================================================
+AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 2/4
+AUTOPATCH | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
-Syfte (AO-02):
-- Statusbanner: OK / TOM / KORRUPT + felorsak + felkod
-- Read-only UX: disable actions + “varför”
-- Debug-ruta (valfri): storageKey + schemaVersion (+ rawWasEmpty/demoCreated)
+Syfte (BLOCK 2/4):
+- Lägger till Users UI containers (form + lista + editläge)
+- Lägger till debug-panel DOM (AO-02 valfri) som render kan använda
+- Ingen redesign utanför AO: endast ny panel i Dashboard-vyn
 
 OBS:
-- XSS-safe: endast textContent, inga osäkra innerHTML
-- Render använder FreezerStore.getStatus() (utökad i AO-02 store)
-============================================================ */
+- RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
+- Inga nya storage-keys
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freezer – Admin</title>
 
-const FreezerRender = {
-  renderAll,
-  renderStatus,
-  renderMode,
-  renderLockPanel,
-  renderTabs,
-  renderSaldo,
-  renderHistory,
-  renderDebug,
-  setActiveTabUI
-};
+  <style>
+    :root { color-scheme: light; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header { border-bottom:1px solid #e6e6e6; background:#fff; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .brand { font-weight:700; }
+    nav a { text-decoration:none; color:inherit; opacity:.8; }
+    nav a:hover { opacity:1; }
+    .spacer { flex: 1; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fafafa; font-size: 13px; }
+    .pill b { font-weight:600; }
+    .muted { opacity:.75; }
+    .panel { border:1px solid #e6e6e6; border-radius: 12px; padding: 12px; background:#fff; }
+    main { background:#f6f7f8; min-height: calc(100vh - 64px); }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .tabBtn { border:1px solid #e6e6e6; background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; font-size: 14px; }
+    .tabBtn[aria-selected="true"] { font-weight:700; }
+    .grid2 { display:grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 900px){ .grid2 { grid-template-columns: 1fr 1fr; } }
+    .danger { border-color:#f2b8b5; background:#fff5f5; }
+    .ok { border-color:#cfe9cf; background:#f4fff4; }
+    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    select, input[type="text"] { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
+    footer { padding: 16px 0; }
 
-window.FreezerRender = FreezerRender;
+    /* AO-03: Users UI small helpers */
+    .hr { height:1px; background:#eee; margin:10px 0; }
+    .badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid #e6e6e6; font-size:12px; background:#fafafa; }
+    .badge.off { opacity:.7; }
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .userRow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px; border:1px solid #e6e6e6; border-radius:10px; background:#fff; }
+    .userRow .name { font-weight:700; }
+    .userRow .meta { font-size:12px; }
+    .chkRow { display:flex; gap:10px; flex-wrap:wrap; }
+    .chk { display:flex; gap:6px; align-items:center; font-size:13px; }
+    .warn { border-color:#f2b8b5; background:#fff5f5; }
+  </style>
+</head>
 
-/* -----------------------------
-  DOM GETTERS (fail-soft)
------------------------------ */
-function el(id) { return document.getElementById(id); }
+<body>
+  <header>
+    <div class="wrap">
+      <div class="row">
+        <div class="brand">🧊 Freezer</div>
 
-/* -----------------------------
-  MAIN
------------------------------ */
-function renderAll(state) {
-  const st = state || null;
-  renderStatus(st);
-  renderMode(st);
-  renderLockPanel(st);
-  renderDebug(st);
-  renderTabs(st);
-  renderSaldo(st);
-  renderHistory(st);
-}
+        <nav class="row" aria-label="Admin navigation">
+          <a href="./index.html" class="muted">Admin Hem</a>
+          <span class="muted">/</span>
+          <a href="./freezer.html"><b>Fryslager</b></a>
+        </nav>
 
-/* -----------------------------
-  STATUS / MODE / LOCK
------------------------------ */
-function renderStatus(state) {
-  const pill = el("frzStatusPill");
-  const txt = el("frzStatusText");
-  if (!pill || !txt) return;
+        <div class="spacer"></div>
 
-  const status = getStatusSafe();
+        <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
+          <span class="muted">Status:</span>
+          <b id="frzStatusText">Laddar…</b>
+        </div>
 
-  // Label: OK / TOM / KORRUPT
-  const label = status.status || (status.locked ? "KORRUPT" : "OK");
-  txt.textContent = label;
+        <label class="pill" for="frzUserSelect" title="Välj demo-roll (påverkar read-only)">
+          <span class="muted">Roll:</span>
+          <select id="frzUserSelect" aria-label="Välj roll">
+            <option value="ADMIN">ADMIN</option>
+            <option value="BUYER">INKÖPARE</option>
+            <option value="PICKER">PLOCK</option>
+            <option value="SYSTEM_ADMIN">SYSTEM_ADMIN (read-only)</option>
+          </select>
+        </label>
 
-  // Color hint (via class)
-  pill.classList.remove("danger", "ok");
-  if (label === "KORRUPT" || status.locked) pill.classList.add("danger");
-  else pill.classList.add("ok");
+        <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data (endast om ej read-only)">
+          Återställ demo
+        </button>
+      </div>
+    </div>
+  </header>
 
-  // aria label includes error code + reason (if any)
-  const parts = [];
-  parts.push(`Status: ${label}`);
-  if (status.errorCode) parts.push(`Kod: ${status.errorCode}`);
-  if (status.reason) parts.push(`Orsak: ${status.reason}`);
-  pill.setAttribute("aria-label", parts.join(" • "));
-}
+  <main>
+    <div class="wrap">
+      <!-- Fail-closed -->
+      <section id="frzLockPanel" class="panel danger" hidden>
+        <div class="row">
+          <div>
+            <b>Import stoppad / Låst läge</b>
+            <div class="muted" id="frzLockReason">Orsak: okänd</div>
+          </div>
+        </div>
+      </section>
 
-function renderMode(state) {
-  const mode = el("frzModeText");
-  const userSelect = el("frzUserSelect");
-  const resetBtn = el("frzResetDemoBtn");
+      <!-- AO-02 optional debug -->
+      <section id="frzDebugPanel" class="panel" hidden>
+        <div class="row">
+          <b>Debug</b>
+          <div class="spacer"></div>
+          <div class="muted" id="frzDebugText">—</div>
+        </div>
+      </section>
 
-  const status = getStatusSafe();
+      <section class="panel">
+        <div class="row">
+          <div class="tabs" role="tablist" aria-label="Vy">
+            <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
+            <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
+            <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
+          </div>
+          <div class="spacer"></div>
+          <div class="pill" title="Visar om sidan är read-only">
+            <span class="muted">Läge:</span>
+            <b id="frzModeText">—</b>
+          </div>
+        </div>
+      </section>
 
-  if (mode) {
-    const label = status.locked ? "Låst"
-      : (status.readOnly ? "Read-only" : "Skrivbar");
-    mode.textContent = label;
-    mode.title = status.whyReadOnly ? status.whyReadOnly : "";
-  }
+      <!-- Dashboard -->
+      <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
+        <div class="grid2">
+          <div>
+            <h2 style="margin:0 0 8px 0;">Översikt</h2>
+            <div class="muted" style="margin-bottom:12px;">
+              Snabb vy för inköp/admin. (Baslinje: beräkningar kan vara stub.)
+            </div>
+            <div id="frzDashCards" class="grid2"></div>
+          </div>
 
-  if (userSelect) {
-    // Keep UI selection aligned
-    if (status.role && userSelect.value !== status.role) {
-      userSelect.value = status.role;
-    }
-    // Role select allowed even in locked; but give hint
-    userSelect.disabled = false;
-    userSelect.title = status.locked ? "Låst läge: roll kan ändras, men inget kan sparas." : "";
-  }
+          <div>
+            <h2 style="margin:0 0 8px 0;">Noteringar</h2>
+            <div class="muted" id="frzDashNotes">—</div>
+          </div>
+        </div>
 
-  if (resetBtn) {
-    // AO-02: disable with "why" text
-    const disabled = !!status.locked || !!status.readOnly;
-    resetBtn.disabled = disabled;
+        <div class="hr"></div>
 
-    if (status.locked) {
-      resetBtn.title = `Spärrad: ${status.reason ? status.reason : "Låst läge"} (${status.errorCode || "kod saknas"})`;
-    } else if (status.readOnly) {
-      resetBtn.title = `Spärrad: ${status.whyReadOnly || "Read-only"}`;
-    } else {
-      resetBtn.title = "Återställ demo-data";
-    }
-  }
-}
+        <!-- AO-03: Users CRUD panel (RBAC: visas bara för admin i render/controller) -->
+        <section id="frzUsersPanel" class="panel" style="background:#fff;" hidden>
+          <div class="row">
+            <div>
+              <h2 style="margin:0;">Användare & behörigheter</h2>
+              <div class="muted" style="margin-top:4px;">
+                Endast ADMIN får skapa/redigera/inaktivera användare.
+              </div>
+            </div>
+            <div class="spacer"></div>
+            <div class="pill" title="Antal användare (inkl inaktiva)">
+              <span class="muted">Users:</span>
+              <b id="frzUsersCount">0</b>
+            </div>
+          </div>
 
-function renderLockPanel(state) {
-  const panel = el("frzLockPanel");
-  const reasonEl = el("frzLockReason");
-  if (!panel || !reasonEl) return;
+          <div class="hr"></div>
 
-  const status = getStatusSafe();
+          <!-- Error/feedback -->
+          <div id="frzUsersMsg" class="panel warn" hidden>
+            <b id="frzUsersMsgTitle">Fel</b>
+            <div class="muted" id="frzUsersMsgText">—</div>
+          </div>
 
-  if (status.locked) {
-    panel.hidden = false;
+          <!-- Form (create/edit) -->
+          <div class="panel" style="background:#fafafa;">
+            <div class="row" style="margin-bottom:10px;">
+              <b id="frzUserFormTitle">Skapa användare</b>
+              <div class="spacer"></div>
+              <span class="muted" id="frzUserFormMode">—</span>
+            </div>
 
-    // AO-02: include errorCode
-    const code = status.errorCode ? ` (${status.errorCode})` : "";
-    const reason = status.reason || "Okänd";
-    reasonEl.textContent = `Orsak: ${reason}${code}`;
-  } else {
-    panel.hidden = true;
-    reasonEl.textContent = "";
-  }
-}
+            <div class="row" style="margin-bottom:10px;">
+              <label class="pill" for="frzUserFirstName">
+                <span class="muted">Förnamn:</span>
+                <input id="frzUserFirstName" type="text" placeholder="t.ex. Anna" maxlength="32" />
+              </label>
 
-/* -----------------------------
-  DEBUG (optional UI)
-  - If DOM ids exist, we render them. If not, we do nothing.
-  - Expected ids (optional):
-    - frzDebugPanel, frzDebugText
------------------------------ */
-function renderDebug(state) {
-  const panel = el("frzDebugPanel");
-  const txt = el("frzDebugText");
-  if (!panel || !txt) return;
+              <div class="spacer"></div>
 
-  const status = getStatusSafe();
-  const d = status.debug || {};
+              <button id="frzUserSaveBtn" class="btn" type="button">Spara</button>
+              <button id="frzUserCancelBtn" class="btn" type="button">Avbryt</button>
+            </div>
 
-  // Keep debug hidden in locked? No: show it always if present
-  panel.hidden = false;
+            <div class="chkRow" aria-label="Behörigheter">
+              <label class="chk"><input id="perm_users_manage" type="checkbox" /> users_manage</label>
+              <label class="chk"><input id="perm_inventory_write" type="checkbox" /> inventory_write</label>
+              <label class="chk"><input id="perm_history_write" type="checkbox" /> history_write</label>
+              <label class="chk"><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
+            </div>
 
-  const lines = [];
-  lines.push(`key: ${safeText(d.storageKey || "")}`);
-  lines.push(`schema: ${safeText(String(d.schemaVersion ?? ""))}`);
-  lines.push(`rawEmpty: ${safeText(String(d.rawWasEmpty ?? ""))}`);
-  lines.push(`demo: ${safeText(String(d.demoCreated ?? ""))}`);
-  if (status.errorCode) lines.push(`error: ${safeText(status.errorCode)}`);
-  if (d.lastLoadError) lines.push(`lastLoadError: ${safeText(String(d.lastLoadError))}`);
+            <!-- Hidden fields for edit mode -->
+            <input id="frzUserEditingId" type="hidden" value="" />
+          </div>
 
-  txt.textContent = lines.join(" • ");
-}
+          <div class="hr"></div>
 
-/* -----------------------------
-  TABS (just count + safety)
------------------------------ */
-function renderTabs(state) {
-  const saldoCount = el("frzSaldoCount");
-  const histCount = el("frzHistoryCount");
+          <!-- Users list -->
+          <div class="list" id="frzUsersList" aria-label="Users list">
+            <!-- Rendered by freezer-render.js (XSS-safe) -->
+          </div>
+        </section>
+      </section>
 
-  const items = (state && state.data && Array.isArray(state.data.items)) ? state.data.items : [];
-  const hist = (state && state.data && Array.isArray(state.data.history)) ? state.data.history : [];
+      <!-- Saldo -->
+      <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
+        <div class="row" style="margin-bottom:10px;">
+          <h2 style="margin:0;">Lagersaldo</h2>
+          <div class="spacer"></div>
+          <div class="pill">
+            <span class="muted">Artiklar:</span>
+            <b id="frzSaldoCount">0</b>
+          </div>
+        </div>
+        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;">
+          <!-- Renderas XSS-safe -->
+        </div>
+      </section>
 
-  if (saldoCount) saldoCount.textContent = String(items.length);
-  if (histCount) histCount.textContent = String(hist.length);
-}
+      <!-- Historik -->
+      <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
+        <div class="row" style="margin-bottom:10px;">
+          <h2 style="margin:0;">Historik</h2>
+          <div class="spacer"></div>
+          <div class="pill">
+            <span class="muted">Händelser:</span>
+            <b id="frzHistoryCount">0</b>
+          </div>
+        </div>
+        <div id="frzHistoryList" class="panel" style="background:#fafafa;">
+          <!-- Renderas XSS-safe -->
+        </div>
+      </section>
 
-/* -----------------------------
-  SALDO TABLE (XSS-safe)
------------------------------ */
-function renderSaldo(state) {
-  const wrap = el("frzSaldoTableWrap");
-  if (!wrap) return;
+      <footer class="muted">
+        Baseline AO-01/15 • UI-only • localStorage-first • fail-closed
+      </footer>
+    </div>
+  </main>
 
-  clear(wrap);
-
-  const items = (state && state.data && Array.isArray(state.data.items)) ? state.data.items : [];
-  if (items.length === 0) {
-    // AO-02: show TOM hint if status says TOM
-    const status = getStatusSafe();
-    if (status.status === "TOM") {
-      wrap.appendChild(pMuted("Tomt läge: inga artiklar i lagringen ännu."));
-    } else {
-      wrap.appendChild(pMuted("Inga artiklar ännu."));
-    }
-    return;
-  }
-
-  const table = document.createElement("table");
-  table.style.width = "100%";
-  table.style.borderCollapse = "collapse";
-  table.setAttribute("aria-label", "Lagersaldo tabell");
-
-  const thead = document.createElement("thead");
-  const trh = document.createElement("tr");
-  ["SKU", "Artikel", "I lager", "Min", "Enhet", "Uppdaterad"].forEach(h => {
-    const th = document.createElement("th");
-    th.textContent = h;
-    th.style.textAlign = "left";
-    th.style.padding = "8px";
-    th.style.borderBottom = "1px solid #e6e6e6";
-    trh.appendChild(th);
-  });
-  thead.appendChild(trh);
-  table.appendChild(thead);
-
-  const tbody = document.createElement("tbody");
-  items
-    .slice()
-    .sort((a,b) => String(a.sku).localeCompare(String(b.sku), "sv"))
-    .forEach(it => {
-      const tr = document.createElement("tr");
-      tr.appendChild(td(String(it.sku)));
-      tr.appendChild(td(String(it.name)));
-      tr.appendChild(td(String(num(it.onHand))));
-      tr.appendChild(td(String(num(it.min))));
-      tr.appendChild(td(String(it.unit || "")));
-      tr.appendChild(td(fmtDate(it.updatedAt)));
-      tbody.appendChild(tr);
-    });
-
-  table.appendChild(tbody);
-  wrap.appendChild(table);
-}
-
-/* -----------------------------
-  HISTORY LIST (XSS-safe)
------------------------------ */
-function renderHistory(state) {
-  const wrap = el("frzHistoryList");
-  if (!wrap) return;
-
-  clear(wrap);
-
-  const hist = (state && state.data && Array.isArray(state.data.history)) ? state.data.history : [];
-  if (hist.length === 0) {
-    wrap.appendChild(pMuted("Ingen historik ännu."));
-    return;
-  }
-
-  const ul = document.createElement("ul");
-  ul.style.listStyle = "none";
-  ul.style.padding = "0";
-  ul.style.margin = "0";
-
-  hist
-    .slice()
-    .sort((a,b) => String(b.ts).localeCompare(String(a.ts)))
-    .forEach(h => {
-      const li = document.createElement("li");
-      li.style.padding = "10px 8px";
-      li.style.borderBottom = "1px solid #e6e6e6";
-
-      const top = document.createElement("div");
-      top.style.display = "flex";
-      top.style.gap = "10px";
-      top.style.flexWrap = "wrap";
-      top.style.alignItems = "baseline";
-
-      const ts = document.createElement("b");
-      ts.textContent = fmtDateTime(h.ts);
-
-      const type = document.createElement("span");
-      type.textContent = `• ${String(h.type || "note")}`;
-
-      const who = document.createElement("span");
-      who.className = "muted";
-      who.textContent = h.by ? `• ${String(h.by)}` : "";
-
-      top.appendChild(ts);
-      top.appendChild(type);
-      if (who.textContent) top.appendChild(who);
-
-      const msg = document.createElement("div");
-      msg.className = "muted";
-      msg.style.marginTop = "4px";
-      msg.textContent = buildHistoryLine(h);
-
-      li.appendChild(top);
-      li.appendChild(msg);
-
-      ul.appendChild(li);
-    });
-
-  wrap.appendChild(ul);
-}
-
-function buildHistoryLine(h) {
-  const sku = h.sku ? `SKU ${h.sku}` : "";
-  const qty = (typeof h.qty === "number" && isFinite(h.qty) && h.qty !== 0) ? `qty ${h.qty}` : "";
-  const note = h.note ? String(h.note) : "";
-  return [sku, qty, note].filter(Boolean).join(" • ") || "—";
-}
-
-/* -----------------------------
-  TAB UI (controller will call)
------------------------------ */
-function setActiveTabUI(tabKey) {
-  const tabs = [
-    { key: "dashboard", btn: el("tabDashboard"), view: el("viewDashboard") },
-    { key: "saldo", btn: el("tabSaldo"), view: el("viewSaldo") },
-    { key: "history", btn: el("tabHistorik"), view: el("viewHistorik") }
-  ];
-
-  tabs.forEach(t => {
-    const active = t.key === tabKey;
-    if (t.btn) t.btn.setAttribute("aria-selected", active ? "true" : "false");
-    if (t.view) t.view.hidden = !active;
-  });
-}
-
-/* -----------------------------
-  HELPERS
------------------------------ */
-function getStatusSafe() {
-  try {
-    if (!window.FreezerStore || typeof window.FreezerStore.getStatus !== "function") {
-      return { status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason: "Store saknas." };
-    }
-    return window.FreezerStore.getStatus();
-  } catch {
-    return { status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason: "Store-status kunde inte läsas." };
-  }
-}
-
-function safeText(s) {
-  // Only used to normalize debug strings; rendering is still textContent.
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-
-/* -----------------------------
-  SMALL DOM HELPERS
------------------------------ */
-function td(text) {
-  const cell = document.createElement("td");
-  cell.textContent = text;
-  cell.style.padding = "8px";
-  cell.style.borderBottom = "1px solid #f0f0f0";
-  return cell;
-}
-
-function pMuted(text) {
-  const p = document.createElement("div");
-  p.className = "muted";
-  p.textContent = text;
-  return p;
-}
-
-function clear(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
-}
-
-function num(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function fmtDate(iso) {
-  if (!iso || typeof iso !== "string") return "—";
-  const d = new Date(iso);
-  if (!isFinite(d.getTime())) return "—";
-  return d.toLocaleDateString("sv-SE");
-}
-
-function fmtDateTime(iso) {
-  if (!iso || typeof iso !== "string") return "—";
-  const d = new Date(iso);
-  if (!isFinite(d.getTime())) return "—";
-  return d.toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
-}
+  <!-- Script order (KRITISK) -->
+  <script src="../UI/freezer-store.js"></script>
+  <script src="../UI/freezer-render.js"></script>
+  <script src="../UI/freezer-dashboard.js"></script>
+  <script src="./freezer.js"></script>
+</body>
+</html>
