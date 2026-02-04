@@ -1,22 +1,22 @@
 /* ============================================================
-AO-02/15 — Statuspanel + Read-only UX + felkoder | BLOCK 1/3
-+ AO-03/15 — Users CRUD + rättigheter (Admin) | STORE-DEL (för att UI ska funka)
-AUTOPATCH | FIL: UI/freezer-store.js
+AO-01/15 — NY-BASELINE | BLOCK 1/5 | FIL: UI/freezer-store.js
++ AO-02/15 — Statuspanel + Read-only UX + felkoder | BLOCK 1/3
++ AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 1/4
+AUTOPATCH (hel fil)
 Projekt: Freezer (UI-only / localStorage-first)
 
 Syfte:
-AO-02:
-- Status: OK / TOM / KORRUPT + felorsak
-- Read-only: tydlig “varför”
-- Debug (ej känsligt): storageKey + schemaVersion
-- Felkoder (stabila)
-- Korrupt storage => fail-closed (LOCKED) + KORRUPT-status
+- Store + storage-guards + demo-init + status/readOnly + local adapter
+- AO-02: Status OK/TOM/KORRUPT + felkoder + debug
+- AO-03: Users CRUD (förnamn unikt + perms + audit + active/inactive)
+  - RBAC: endast ADMIN med users_manage får CRUD
+  - Inaktiva users syns i listan men får inte vara aktiv user
+  - Inga nya storage-keys (fortsätter AO-FREEZER_V1)
 
-AO-03 (för att Admin ska kunna skapa/redigera users):
-- Users shape: förnamn unikt + perms + audit + active
-- Users CRUD: create/update/activate/deactivate (endast om can('users_manage'))
-- can(perm): baseras på aktiv user (kopplad till roll) + fail-closed
-- Inaktiva users kan inte väljas (setActiveUser fail-closed)
+DoD:
+- Tom storage -> demo-data skapas
+- Korrupt storage -> fail-closed (LOCKED) och inga writes till storage
+- SYSTEM_ADMIN -> read-only
 ============================================================ */
 
 /* -----------------------------
@@ -42,12 +42,24 @@ const FRZ_ERR = /** @type {const} */ ({
   INVALID_SHAPE: "FRZ_E_INVALID_SHAPE",
   STORAGE_WRITE_BLOCKED: "FRZ_E_STORAGE_WRITE_BLOCKED",
 
-  // AO-03 users
+  // AO-03 (users)
   USER_NAME_NOT_UNIQUE: "FRZ_E_USER_NAME_NOT_UNIQUE",
-  USER_NOT_FOUND: "FRZ_E_USER_NOT_FOUND",
+  USER_INVALID: "FRZ_E_USER_INVALID",
   USER_INACTIVE: "FRZ_E_USER_INACTIVE",
   FORBIDDEN: "FRZ_E_FORBIDDEN"
 });
+
+/* -----------------------------
+  PERMISSIONS (AO-03)
+----------------------------- */
+const FRZ_PERMS = /** @type {const} */ ([
+  "users_manage",
+  "inventory_write",
+  "history_write",
+  "dashboard_view"
+]);
+
+function isValidPermKey(k) { return FRZ_PERMS.includes(k); }
 
 /* -----------------------------
   LOCAL STORAGE ADAPTER
@@ -58,6 +70,7 @@ const StorageAdapter = {
     catch { return null; }
   },
   setRaw(raw) {
+    // NOTE: may throw if storage is blocked/quota
     window.localStorage.setItem(FRZ_STORAGE_KEY, raw);
   },
   remove() {
@@ -72,6 +85,7 @@ let _state = null;
 let _subscribers = [];
 let _lastLoadError = null;
 
+// AO-02: boot facts for status (OK/TOM/KORRUPT)
 let _boot = {
   rawWasEmpty: true,
   demoCreated: false,
@@ -90,16 +104,15 @@ const FreezerStore = {
   resetDemo,
   trySave,
 
-  // AO-03 users
+  // AO-03: Users CRUD + RBAC helpers
   can,
   listUsers,
-  getActiveUser,
-  setActiveUser,
   createUser,
   updateUser,
   setUserActive
 };
 
+// Expose globally (UI-only baseline)
 window.FreezerStore = FreezerStore;
 
 /* -----------------------------
@@ -108,6 +121,7 @@ window.FreezerStore = FreezerStore;
 function init(opts = {}) {
   const role = isValidRole(opts.role) ? opts.role : "ADMIN";
 
+  // Reset boot markers each init
   _boot = { rawWasEmpty: true, demoCreated: false, loadErrorCode: FRZ_ERR.NONE };
   _lastLoadError = null;
 
@@ -116,7 +130,12 @@ function init(opts = {}) {
   _boot.loadErrorCode = loadRes.errorCode || FRZ_ERR.NONE;
 
   if (!loadRes.ok) {
-    _state = createLockedState(role, loadRes.reason || "Korrupt eller ogiltig lagring.", loadRes.errorCode || FRZ_ERR.CORRUPT_JSON);
+    // fail-closed: lock in memory, DO NOT write anything back
+    _state = createLockedState(
+      role,
+      loadRes.reason || "Korrupt eller ogiltig lagring.",
+      loadRes.errorCode || FRZ_ERR.CORRUPT_JSON
+    );
     notify();
     return getStatus();
   }
@@ -127,23 +146,38 @@ function init(opts = {}) {
   _state.user.role = role;
   _state.flags.readOnly = computeReadOnly(role);
 
-  // Empty -> demo
+  // AO-03: ensure users exist and activeUserId is valid
+  ensureUsersBaseline();
+
+  // If empty -> init demo (only if not locked)
   if (isEmptyDataset(_state) && !_state.flags.locked) {
     const demo = createDemoState(role);
+
+    // Keep any existing users if already present (but demo normally starts fresh)
+    demo.data.users = _state.data && Array.isArray(_state.data.users) && _state.data.users.length
+      ? _state.data.users
+      : demo.data.users;
+
+    // Align active user with role
+    demo.user.activeUserId = pickActiveUserForRole(role, demo.data.users);
+
+    // Try to write demo; if write fails -> lock
     const w = safeWriteToStorage(demo);
     if (!w.ok) {
-      _state = createLockedState(role, w.reason || "Kunde inte skriva demo-data till lagring.", w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED);
+      _state = createLockedState(
+        role,
+        w.reason || "Kunde inte skriva demo-data till lagring.",
+        w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED
+      );
     } else {
       _boot.demoCreated = true;
       _state = demo;
     }
+  } else {
+    // Align active user with role if current active user is missing/inactive
+    const picked = pickActiveUserForRole(role, _state.data.users);
+    _state.user.activeUserId = picked;
   }
-
-  // AO-03: Ensure users exist (back-compat if old storage saknar users)
-  ensureUsersBaseline();
-
-  // AO-03: Align active user with role (fail-closed if inactive/missing)
-  alignActiveUserToRole();
 
   notify();
   return getStatus();
@@ -160,22 +194,36 @@ function loadFromStorage() {
   try {
     const parsed = JSON.parse(raw);
     const validated = validateAndNormalize(parsed);
-    if (!validated.ok) return { ok: false, reason: validated.reason, rawWasEmpty: false, errorCode: validated.errorCode || FRZ_ERR.INVALID_SHAPE };
+    if (!validated.ok) {
+      return {
+        ok: false,
+        reason: validated.reason,
+        rawWasEmpty: false,
+        errorCode: validated.errorCode || FRZ_ERR.INVALID_SHAPE
+      };
+    }
     return { ok: true, state: validated.state, rawWasEmpty: false, errorCode: FRZ_ERR.NONE };
   } catch (e) {
     _lastLoadError = String(e && e.message ? e.message : e);
-    return { ok: false, reason: "JSON-parse misslyckades (korrupt data).", rawWasEmpty: false, errorCode: FRZ_ERR.CORRUPT_JSON };
+    return {
+      ok: false,
+      reason: "JSON-parse misslyckades (korrupt data).",
+      rawWasEmpty: false,
+      errorCode: FRZ_ERR.CORRUPT_JSON
+    };
   }
 }
 
 /* -----------------------------
-  STATUS / SUBSCRIBE
+  STATE HELPERS
 ----------------------------- */
 function getState() {
+  // Defensive copy; caller should treat as read-only
   return _state ? JSON.parse(JSON.stringify(_state)) : null;
 }
 
 function getStatus() {
+  // AO-02: stable status object for UI banner/debug
   if (!_state) {
     return {
       ok: false,
@@ -199,12 +247,14 @@ function getStatus() {
   const locked = !!_state.flags.locked;
   const readOnly = !!_state.flags.readOnly;
 
+  // Status: KORRUPT om locked, annars TOM om tom data (och inte demo), annars OK
   let status = "OK";
   if (locked) status = "KORRUPT";
   else if (isEmptyDataset(_state) && !_boot.demoCreated) status = "TOM";
 
   const role = _state.user.role;
 
+  // whyReadOnly (för UI)
   let whyReadOnly = null;
   if (locked) whyReadOnly = "Låst läge (korrupt/ogiltig lagring).";
   else if (readOnly && role === "SYSTEM_ADMIN") whyReadOnly = "SYSTEM_ADMIN är read-only enligt policy.";
@@ -239,18 +289,20 @@ function getStatus() {
 function subscribe(fn) {
   if (typeof fn !== "function") return () => {};
   _subscribers.push(fn);
+  // call immediately with current state
   try { fn(getState()); } catch {}
-  return () => { _subscribers = _subscribers.filter(x => x !== fn); };
+  return () => {
+    _subscribers = _subscribers.filter(x => x !== fn);
+  };
 }
 
 function notify() {
   const snapshot = getState();
-  _subscribers.forEach(fn => { try { fn(snapshot); } catch {} });
+  _subscribers.forEach(fn => {
+    try { fn(snapshot); } catch {}
+  });
 }
 
-/* -----------------------------
-  ROLE / RESET / SAVE
------------------------------ */
 function setRole(role) {
   if (!_state) return getStatus();
   if (!isValidRole(role)) return getStatus();
@@ -258,9 +310,12 @@ function setRole(role) {
   _state.user.role = role;
   _state.flags.readOnly = computeReadOnly(role);
 
-  // AO-03: align active user to new role (even if locked/readOnly: in-memory only)
-  alignActiveUserToRole();
+  // AO-03: never leave activeUserId pointing to inactive/missing user
+  ensureUsersBaseline();
+  _state.user.activeUserId = pickActiveUserForRole(role, _state.data.users);
 
+  // Role change is allowed even in locked mode (in-memory only).
+  // But we do not write to storage if locked/readOnly.
   trySave();
   notify();
   return getStatus();
@@ -272,34 +327,43 @@ function resetDemo() {
   if (_state.flags.readOnly) return { ok: false, reason: "Read-only: kan inte återställa." };
 
   const demo = createDemoState(_state.user.role);
+
   const w = safeWriteToStorage(demo);
   if (!w.ok) {
-    _state = createLockedState(_state.user.role, w.reason || "Kunde inte skriva demo-data.", w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED);
+    _state = createLockedState(
+      _state.user.role,
+      w.reason || "Kunde inte skriva demo-data.",
+      w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED
+    );
     notify();
     return { ok: false, reason: _state.flags.lockReason };
   }
 
   _boot.demoCreated = true;
   _state = demo;
-
-  // AO-03: ensure + align (fresh demo)
-  ensureUsersBaseline();
-  alignActiveUserToRole();
-
   notify();
   return { ok: true };
 }
 
+/**
+ * Attempt to persist current in-memory state, respecting fail-closed + read-only.
+ * Returns status object.
+ */
 function trySave() {
   if (!_state) return { ok: false, reason: "Ej initierad." };
   if (_state.flags.locked) return { ok: false, reason: "Låst läge." };
   if (_state.flags.readOnly) return { ok: false, reason: "Read-only." };
 
+  // Update meta
   _state.meta.updatedAt = new Date().toISOString();
 
   const w = safeWriteToStorage(_state);
   if (!w.ok) {
-    _state = createLockedState(_state.user.role, w.reason || "Lagring misslyckades.", w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED);
+    _state = createLockedState(
+      _state.user.role,
+      w.reason || "Lagring misslyckades.",
+      w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED
+    );
     notify();
     return { ok: false, reason: _state.flags.lockReason };
   }
@@ -312,306 +376,347 @@ function safeWriteToStorage(stateObj) {
     StorageAdapter.setRaw(raw);
     return { ok: true };
   } catch (e) {
-    return { ok: false, reason: "localStorage write misslyckades (blockerad/quota/privat läge).", errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED };
+    return {
+      ok: false,
+      reason: "localStorage write misslyckades (blockerad/quota/privat läge).",
+      errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED
+    };
   }
 }
 
 /* -----------------------------
-  AO-03: PERMISSIONS + USERS
+  AO-03: RBAC + USERS CRUD
 ----------------------------- */
-function can(perm) {
-  // Fail-closed
+function can(permKey) {
   if (!_state) return false;
+  if (!isValidPermKey(permKey)) return false;
   if (_state.flags.locked) return false;
+  if (_state.flags.readOnly) return false;
 
-  const role = _state.user.role;
-  if (role === "SYSTEM_ADMIN") return false;
-
-  // Always allow admin baseline to manage users (but still via perms on active user)
-  const au = getActiveUser();
-  if (!au || !au.active) return false;
-
-  const perms = au.perms || {};
-  return !!perms[perm];
+  const u = getActiveUser();
+  if (!u || !u.active) return false;
+  return !!(u.perms && u.perms[permKey]);
 }
 
 function listUsers() {
-  if (!_state || !_state.data) return [];
-  const users = Array.isArray(_state.data.users) ? _state.data.users : [];
-  return users.map(u => JSON.parse(JSON.stringify(u)));
+  if (!_state || !_state.data || !Array.isArray(_state.data.users)) return [];
+  // Return a safe copy
+  return JSON.parse(JSON.stringify(_state.data.users));
 }
 
-function getActiveUser() {
-  if (!_state || !_state.data) return null;
-  const users = Array.isArray(_state.data.users) ? _state.data.users : [];
-  const id = _state.user.activeUserId || "";
-  const u = users.find(x => x && x.id === id) || null;
-  return u ? JSON.parse(JSON.stringify(u)) : null;
-}
+function createUser(input) {
+  if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+  if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+  if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+  if (!can("users_manage")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (users_manage)." };
 
-function setActiveUser(userId) {
-  if (!_state) return { ok: false, reason: "Ej initierad.", errorCode: FRZ_ERR.NOT_INIT };
-  if (_state.flags.locked) return { ok: false, reason: "Låst läge.", errorCode: _state.flags.lockCode || FRZ_ERR.INVALID_SHAPE };
+  ensureUsersBaseline();
 
-  const users = Array.isArray(_state.data.users) ? _state.data.users : [];
-  const u = users.find(x => x && x.id === userId) || null;
-  if (!u) return { ok: false, reason: "User hittades inte.", errorCode: FRZ_ERR.USER_NOT_FOUND };
-  if (!u.active) return { ok: false, reason: "User är inaktiv.", errorCode: FRZ_ERR.USER_INACTIVE };
+  const firstName = safeUserName(input && input.firstName);
+  if (!firstName) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "Förnamn krävs." };
 
-  _state.user.activeUserId = u.id;
-
-  // Save only if allowed
-  const s = trySave();
-  notify();
-  return { ok: true, status: s };
-}
-
-function createUser({ firstName, perms }) {
-  if (!_state) return { ok: false, reason: "Ej initierad.", errorCode: FRZ_ERR.NOT_INIT };
-  const status = getStatus();
-  if (status.locked) return { ok: false, reason: "Låst läge.", errorCode: status.errorCode };
-  if (status.readOnly) return { ok: false, reason: status.whyReadOnly || "Read-only.", errorCode: FRZ_ERR.FORBIDDEN };
-  if (!can("users_manage")) return { ok: false, reason: "Saknar behörighet (users_manage).", errorCode: FRZ_ERR.FORBIDDEN };
-
-  const name = normalizeFirstName(firstName);
-  if (!name) return { ok: false, reason: "Förnamn krävs.", errorCode: FRZ_ERR.INVALID_SHAPE };
-
-  const users = ensureUsersArray();
-  if (!isFirstNameUnique(users, name, null)) {
-    return { ok: false, reason: "Förnamn måste vara unikt.", errorCode: FRZ_ERR.USER_NAME_NOT_UNIQUE };
+  if (!isUserNameUnique(firstName, null)) {
+    return { ok: false, errorCode: FRZ_ERR.USER_NAME_NOT_UNIQUE, reason: "Förnamn måste vara unikt." };
   }
 
   const now = new Date().toISOString();
-  const actor = safeStr((_state.user.role || "")) || "ADMIN";
+  const id = makeId("u");
+  const createdBy = getAuditActor();
 
-  const u = {
-    id: makeId("u"),
-    firstName: name,
+  const user = {
+    id,
+    firstName,
     active: true,
-    perms: normalizePerms(perms),
+    perms: normalizePerms(input && input.perms),
     audit: {
       createdAt: now,
-      createdBy: actor,
       updatedAt: now,
-      updatedBy: actor
+      createdBy,
+      updatedBy: createdBy
     }
   };
 
-  users.push(u);
+  _state.data.users.push(user);
+
+  // Audit/history (non-sensitive)
+  pushHistory("users_create", "", 0, createdBy, `User skapad: ${firstName}`);
 
   const s = trySave();
   notify();
-  return { ok: true, id: u.id, status: s };
+  if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+  return { ok: true, id };
 }
 
-function updateUser(userId, { firstName, perms }) {
-  if (!_state) return { ok: false, reason: "Ej initierad.", errorCode: FRZ_ERR.NOT_INIT };
-  const status = getStatus();
-  if (status.locked) return { ok: false, reason: "Låst läge.", errorCode: status.errorCode };
-  if (status.readOnly) return { ok: false, reason: status.whyReadOnly || "Read-only.", errorCode: FRZ_ERR.FORBIDDEN };
-  if (!can("users_manage")) return { ok: false, reason: "Saknar behörighet (users_manage).", errorCode: FRZ_ERR.FORBIDDEN };
+function updateUser(userId, patch) {
+  if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+  if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+  if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+  if (!can("users_manage")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (users_manage)." };
 
-  const users = ensureUsersArray();
-  const idx = users.findIndex(x => x && x.id === userId);
-  if (idx < 0) return { ok: false, reason: "User hittades inte.", errorCode: FRZ_ERR.USER_NOT_FOUND };
+  ensureUsersBaseline();
 
-  const name = normalizeFirstName(firstName);
-  if (!name) return { ok: false, reason: "Förnamn krävs.", errorCode: FRZ_ERR.INVALID_SHAPE };
+  const u = _state.data.users.find(x => x && x.id === userId);
+  if (!u) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "User hittades inte." };
 
-  if (!isFirstNameUnique(users, name, userId)) {
-    return { ok: false, reason: "Förnamn måste vara unikt.", errorCode: FRZ_ERR.USER_NAME_NOT_UNIQUE };
+  const nextName = safeUserName(patch && patch.firstName);
+  if (!nextName) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "Förnamn krävs." };
+
+  if (!isUserNameUnique(nextName, userId)) {
+    return { ok: false, errorCode: FRZ_ERR.USER_NAME_NOT_UNIQUE, reason: "Förnamn måste vara unikt." };
   }
 
   const now = new Date().toISOString();
-  const actor = safeStr((_state.user.role || "")) || "ADMIN";
+  const actor = getAuditActor();
 
-  users[idx].firstName = name;
-  users[idx].perms = normalizePerms(perms);
-  users[idx].audit = users[idx].audit && typeof users[idx].audit === "object" ? users[idx].audit : {};
-  users[idx].audit.updatedAt = now;
-  users[idx].audit.updatedBy = actor;
+  const nameChanged = (String(u.firstName || "") !== nextName);
+
+  u.firstName = nextName;
+  u.perms = normalizePerms(patch && patch.perms);
+  u.audit = u.audit && typeof u.audit === "object" ? u.audit : {};
+  u.audit.updatedAt = now;
+  u.audit.updatedBy = actor;
+
+  if (nameChanged) {
+    pushHistory("users_update", "", 0, actor, `User uppdaterad: ${nextName}`);
+  } else {
+    pushHistory("users_update", "", 0, actor, `Behörigheter uppdaterade: ${nextName}`);
+  }
 
   const s = trySave();
   notify();
-  return { ok: true, status: s };
+  if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+  return { ok: true };
 }
 
 function setUserActive(userId, active) {
-  if (!_state) return { ok: false, reason: "Ej initierad.", errorCode: FRZ_ERR.NOT_INIT };
-  const status = getStatus();
-  if (status.locked) return { ok: false, reason: "Låst läge.", errorCode: status.errorCode };
-  if (status.readOnly) return { ok: false, reason: status.whyReadOnly || "Read-only.", errorCode: FRZ_ERR.FORBIDDEN };
-  if (!can("users_manage")) return { ok: false, reason: "Saknar behörighet (users_manage).", errorCode: FRZ_ERR.FORBIDDEN };
+  if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+  if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+  if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+  if (!can("users_manage")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (users_manage)." };
 
-  const users = ensureUsersArray();
-  const idx = users.findIndex(x => x && x.id === userId);
-  if (idx < 0) return { ok: false, reason: "User hittades inte.", errorCode: FRZ_ERR.USER_NOT_FOUND };
+  ensureUsersBaseline();
 
-  users[idx].active = !!active;
+  const u = _state.data.users.find(x => x && x.id === userId);
+  if (!u) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "User hittades inte." };
+
+  const next = !!active;
+
+  // Fail-closed: allow deactivating anyone, but never leave system with 0 active users
+  if (!next) {
+    const activeCount = _state.data.users.filter(x => x && x.active).length;
+    if (activeCount <= 1 && u.active) {
+      return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "Minst en aktiv användare krävs." };
+    }
+  }
 
   const now = new Date().toISOString();
-  const actor = safeStr((_state.user.role || "")) || "ADMIN";
-  users[idx].audit = users[idx].audit && typeof users[idx].audit === "object" ? users[idx].audit : {};
-  users[idx].audit.updatedAt = now;
-  users[idx].audit.updatedBy = actor;
+  const actor = getAuditActor();
 
-  // If we deactivated active user -> fail-closed to admin
-  if (!users[idx].active && _state.user.activeUserId === userId) {
-    alignActiveUserToRole(true /*forceAdminFallback*/);
+  u.active = next;
+  u.audit = u.audit && typeof u.audit === "object" ? u.audit : {};
+  u.audit.updatedAt = now;
+  u.audit.updatedBy = actor;
+
+  pushHistory("users_toggle", "", 0, actor, `${u.firstName} är nu ${next ? "aktiv" : "inaktiv"}.`);
+
+  // If we inactivated the currently active user -> fallback to a valid active user for role
+  if (!u.active && _state.user && _state.user.activeUserId === u.id) {
+    _state.user.activeUserId = pickActiveUserForRole(_state.user.role, _state.data.users);
   }
 
   const s = trySave();
   notify();
-  return { ok: true, status: s };
+  if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+  return { ok: true };
 }
 
 /* -----------------------------
-  AO-03: INTERNAL HELPERS
+  USERS HELPERS (AO-03)
 ----------------------------- */
-function ensureUsersArray() {
-  if (!_state.data) _state.data = {};
-  if (!Array.isArray(_state.data.users)) _state.data.users = [];
-  return _state.data.users;
-}
-
 function ensureUsersBaseline() {
   if (!_state || !_state.data) return;
+  if (!Array.isArray(_state.data.users)) _state.data.users = [];
 
-  const users = ensureUsersArray();
-
-  // If already has at least one user, keep, but ensure each user normalized
-  if (users.length > 0) {
-    _state.data.users = users.map(normalizeUser).filter(Boolean);
-    if (!_state.user.activeUserId) {
-      // try pick first active
-      const firstActive = _state.data.users.find(u => u && u.active);
-      if (firstActive) _state.user.activeUserId = firstActive.id;
-    }
-    return;
+  // If storage existed but had no users -> create minimal baseline users (safe/back-compat)
+  if (_state.data.users.length === 0) {
+    _state.data.users = createDefaultUsers();
+  } else {
+    // Normalize each user entry defensively
+    _state.data.users = _state.data.users.map(normalizeUser).filter(Boolean);
+    if (_state.data.users.length === 0) _state.data.users = createDefaultUsers();
   }
 
-  // Create baseline demo users (active)
-  const now = new Date().toISOString();
-  const mk = (firstName, perms) => ({
-    id: makeId("u"),
-    firstName,
-    active: true,
-    perms: normalizePerms(perms),
-    audit: { createdAt: now, createdBy: "SYSTEM", updatedAt: now, updatedBy: "SYSTEM" }
-  });
+  // Ensure there is at least one active user
+  if (!_state.data.users.some(u => u && u.active)) {
+    // force-activate first user (fail-closed but recoverable)
+    _state.data.users[0].active = true;
+  }
 
-  // IMPORTANT: Admin MUST have users_manage to create/edit users
-  const admin = mk("Admin", { users_manage: true, inventory_write: true, history_write: true, dashboard_view: true });
-  const buyer = mk("Inköp", { users_manage: false, inventory_write: true, history_write: false, dashboard_view: true });
-  const picker = mk("Plock", { users_manage: false, inventory_write: false, history_write: true, dashboard_view: true });
-
-  _state.data.users = [admin, buyer, picker];
-
-  // Default active user aligns with role
-  _state.user.activeUserId = admin.id;
-
-  // Try save (only if allowed)
-  trySave();
+  // Ensure activeUserId exists and points to an active user
+  const picked = pickActiveUserForRole(_state.user.role, _state.data.users);
+  _state.user.activeUserId = picked;
 }
 
-function alignActiveUserToRole(forceAdminFallback = false) {
-  if (!_state || !_state.data) return;
+function getActiveUser() {
+  try {
+    if (!_state || !_state.data || !Array.isArray(_state.data.users)) return null;
+    const id = _state.user && _state.user.activeUserId ? _state.user.activeUserId : "";
+    const u = _state.data.users.find(x => x && x.id === id) || null;
+    if (!u || !u.active) return null;
+    return u;
+  } catch {
+    return null;
+  }
+}
 
-  const role = _state.user.role;
-  const users = Array.isArray(_state.data.users) ? _state.data.users : [];
+function pickActiveUserForRole(role, users) {
+  const list = Array.isArray(users) ? users : [];
+  // Preferred mapping by roleKey on user (if present)
+  const byRole = list.find(u => u && u.active && u.roleKey === role);
+  if (byRole && byRole.id) return byRole.id;
 
-  // If SYSTEM_ADMIN -> keep activeUserId but can() will always be false anyway
-  if (role === "SYSTEM_ADMIN") return;
-
-  const current = users.find(u => u && u.id === _state.user.activeUserId) || null;
-  if (!forceAdminFallback && current && current.active) {
-    // keep current if active
-    return;
+  // Fallback: first active ADMIN-mapped user if role is ADMIN
+  if (role === "ADMIN") {
+    const admin = list.find(u => u && u.active && (u.roleKey === "ADMIN" || String(u.firstName || "").toLowerCase() === "admin"));
+    if (admin && admin.id) return admin.id;
   }
 
-  // Map role -> preferred user by firstName (demo) OR fall back to first active admin-like
-  let target = null;
+  // Fallback: any active user
+  const any = list.find(u => u && u.active);
+  return any && any.id ? any.id : "";
+}
 
-  if (!forceAdminFallback) {
-    if (role === "BUYER") target = users.find(u => u && u.active && normalizeFirstName(u.firstName) === "Inköp") || null;
-    if (role === "PICKER") target = users.find(u => u && u.active && normalizeFirstName(u.firstName) === "Plock") || null;
-    if (role === "ADMIN") target = users.find(u => u && u.active && normalizeFirstName(u.firstName) === "Admin") || null;
-  }
+function isUserNameUnique(firstName, excludeId) {
+  const nameKey = normNameKey(firstName);
+  const users = _state && _state.data && Array.isArray(_state.data.users) ? _state.data.users : [];
+  return !users.some(u => {
+    if (!u || !u.firstName) return false;
+    if (excludeId && u.id === excludeId) return false;
+    return normNameKey(u.firstName) === nameKey;
+  });
+}
 
-  // Admin fallback (must be active)
-  if (!target) {
-    target = users.find(u => u && u.active && u.perms && u.perms.users_manage) || null;
-  }
-  if (!target) {
-    target = users.find(u => u && u.active) || null;
-  }
+function normNameKey(s) {
+  return String(s || "")
+    .trim()
+    .toLocaleLowerCase("sv-SE");
+}
 
-  if (target) {
-    _state.user.activeUserId = target.id;
-  }
+function safeUserName(v) {
+  const s = safeStr(v);
+  if (!s) return "";
+  // Keep simple (UI-only): allow letters, space, dash, apostrophe
+  const cleaned = s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿÅÄÖåäö '\-]/g, "").trim();
+  if (!cleaned) return "";
+  return cleaned.slice(0, 32);
+}
+
+function normalizePerms(perms) {
+  const out = { users_manage: false, inventory_write: false, history_write: false, dashboard_view: true };
+  const p = perms && typeof perms === "object" ? perms : {};
+  FRZ_PERMS.forEach(k => {
+    if (k === "dashboard_view") out[k] = ("dashboard_view" in p) ? !!p[k] : true;
+    else out[k] = !!p[k];
+  });
+  return out;
 }
 
 function normalizeUser(u) {
   if (!u || typeof u !== "object") return null;
-  const id = safeStr(u.id);
-  const firstName = normalizeFirstName(u.firstName);
-  if (!id || !firstName) return null;
+  const id = safeStr(u.id) || makeId("u");
+  const firstName = safeUserName(u.firstName);
+  if (!firstName) return null;
 
-  const active = !!u.active;
-  const perms = normalizePerms(u.perms);
+  const active = ("active" in u) ? !!u.active : true;
 
-  const a = u.audit && typeof u.audit === "object" ? u.audit : {};
+  const auditIn = u.audit && typeof u.audit === "object" ? u.audit : {};
   const now = new Date().toISOString();
 
   return {
     id,
     firstName,
     active,
-    perms,
+    // Optional internal mapping helper
+    roleKey: isValidRole(u.roleKey) ? u.roleKey : (isValidRole(u.role) ? u.role : (safeStr(u.roleKey) || "")),
+    perms: normalizePerms(u.perms),
     audit: {
-      createdAt: typeof a.createdAt === "string" ? a.createdAt : now,
-      createdBy: typeof a.createdBy === "string" ? a.createdBy : "",
-      updatedAt: typeof a.updatedAt === "string" ? a.updatedAt : now,
-      updatedBy: typeof a.updatedBy === "string" ? a.updatedBy : ""
+      createdAt: typeof auditIn.createdAt === "string" ? auditIn.createdAt : now,
+      updatedAt: typeof auditIn.updatedAt === "string" ? auditIn.updatedAt : now,
+      createdBy: safeStr(auditIn.createdBy) || "",
+      updatedBy: safeStr(auditIn.updatedBy) || ""
     }
   };
 }
 
-function normalizePerms(p) {
-  const x = (p && typeof p === "object") ? p : {};
-  return {
-    users_manage: !!x.users_manage,
-    inventory_write: !!x.inventory_write,
-    history_write: !!x.history_write,
-    dashboard_view: ("dashboard_view" in x) ? !!x.dashboard_view : true
-  };
+function createDefaultUsers() {
+  const now = new Date().toISOString();
+  return [
+    {
+      id: makeId("u"),
+      firstName: "Admin",
+      active: true,
+      roleKey: "ADMIN",
+      perms: { users_manage: true, inventory_write: true, history_write: true, dashboard_view: true },
+      audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" }
+    },
+    {
+      id: makeId("u"),
+      firstName: "Inköp",
+      active: true,
+      roleKey: "BUYER",
+      perms: { users_manage: false, inventory_write: true, history_write: false, dashboard_view: true },
+      audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" }
+    },
+    {
+      id: makeId("u"),
+      firstName: "Plock",
+      active: true,
+      roleKey: "PICKER",
+      perms: { users_manage: false, inventory_write: true, history_write: true, dashboard_view: true },
+      audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" }
+    },
+    {
+      id: makeId("u"),
+      firstName: "System",
+      active: true,
+      roleKey: "SYSTEM_ADMIN",
+      perms: { users_manage: false, inventory_write: false, history_write: false, dashboard_view: true },
+      audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" }
+    }
+  ];
 }
 
-function normalizeFirstName(v) {
-  const s = safeStr(String(v || ""));
-  if (!s) return "";
-  // Keep human readable, but enforce max length
-  return s.slice(0, 32);
+function getAuditActor() {
+  // Non-sensitive: role + active user name
+  try {
+    const role = _state && _state.user ? _state.user.role : "ADMIN";
+    const u = getActiveUser();
+    const who = u && u.firstName ? u.firstName : role;
+    return `${who}`;
+  } catch {
+    return "system";
+  }
 }
 
-function isFirstNameUnique(users, name, excludeId) {
-  const n = name.toLocaleLowerCase("sv-SE");
-  return !users.some(u => {
-    if (!u) return false;
-    if (excludeId && u.id === excludeId) return false;
-    const fn = normalizeFirstName(u.firstName).toLocaleLowerCase("sv-SE");
-    return fn === n;
-  });
-}
-
-function makeId(prefix) {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
+function pushHistory(type, sku, qty, by, note) {
+  try {
+    if (!_state || !_state.data || !Array.isArray(_state.data.history)) return;
+    _state.data.history.push({
+      ts: new Date().toISOString(),
+      type: safeStr(type) || "note",
+      sku: safeStr(sku) || "",
+      qty: safeNum(qty, 0),
+      by: safeStr(by) || "",
+      note: safeStr(note) || ""
+    });
+  } catch {}
 }
 
 /* -----------------------------
   VALIDATION / NORMALIZATION
 ----------------------------- */
 function validateAndNormalize(obj) {
+  // Strict-ish validation to detect corruption
   if (!obj || typeof obj !== "object") return { ok: false, reason: "Ogiltig root.", errorCode: FRZ_ERR.INVALID_ROOT };
 
   const meta = obj.meta;
@@ -630,9 +735,7 @@ function validateAndNormalize(obj) {
   if (!Array.isArray(data.items)) return { ok: false, reason: "items måste vara array.", errorCode: FRZ_ERR.INVALID_SHAPE };
   if (!Array.isArray(data.history)) return { ok: false, reason: "history måste vara array.", errorCode: FRZ_ERR.INVALID_SHAPE };
 
-  const normUsers = Array.isArray(data.users) ? data.users.map(normalizeUser).filter(Boolean) : [];
-  const activeUserId = (typeof user.activeUserId === "string") ? user.activeUserId : "";
-
+  // flags may be missing -> normalize (back-compat + AO-02 lockCode)
   const norm = {
     meta: {
       schemaVersion: FRZ_SCHEMA_VERSION,
@@ -641,7 +744,8 @@ function validateAndNormalize(obj) {
     },
     user: {
       role,
-      activeUserId
+      // AO-03: back-compat: may be missing
+      activeUserId: (user && typeof user.activeUserId === "string") ? user.activeUserId : ""
     },
     flags: {
       locked: !!(flags && flags.locked),
@@ -652,14 +756,25 @@ function validateAndNormalize(obj) {
     data: {
       items: data.items.map(normalizeItem).filter(Boolean),
       history: data.history.map(normalizeHistory).filter(Boolean),
-      users: normUsers
+
+      // AO-03: users array (optional back-compat)
+      users: Array.isArray(data.users) ? data.users.map(normalizeUser).filter(Boolean) : []
     }
   };
 
+  // If storage says locked, keep it locked
   if (norm.flags.locked) {
     norm.flags.readOnly = true;
     if (!norm.flags.lockCode) norm.flags.lockCode = FRZ_ERR.INVALID_SHAPE;
   }
+
+  // AO-03: ensure users exist even for older saves
+  if (!Array.isArray(norm.data.users) || norm.data.users.length === 0) {
+    norm.data.users = createDefaultUsers();
+  }
+
+  // Ensure activeUserId points to active user
+  norm.user.activeUserId = pickActiveUserForRole(norm.user.role, norm.data.users);
 
   return { ok: true, state: norm, errorCode: FRZ_ERR.NONE };
 }
@@ -694,28 +809,32 @@ function normalizeHistory(h) {
   DEFAULT STATES
 ----------------------------- */
 function createEmptyState(role) {
-  return {
+  const r = isValidRole(role) ? role : "ADMIN";
+  const state = {
     meta: {
       schemaVersion: FRZ_SCHEMA_VERSION,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     },
     user: {
-      role: isValidRole(role) ? role : "ADMIN",
+      role: r,
       activeUserId: ""
     },
     flags: {
       locked: false,
       lockReason: "",
       lockCode: "",
-      readOnly: computeReadOnly(role)
+      readOnly: computeReadOnly(r)
     },
     data: {
       items: [],
       history: [],
-      users: []
+      users: createDefaultUsers()
     }
   };
+
+  state.user.activeUserId = pickActiveUserForRole(r, state.data.users);
+  return state;
 }
 
 function createDemoState(role) {
@@ -733,7 +852,8 @@ function createDemoState(role) {
     { ts: now, type: "init_demo", sku: "", qty: 0, by: r, note: "Demo-data skapad." }
   ];
 
-  // Users created in ensureUsersBaseline()
+  // Users baseline already exists from createEmptyState
+  state.user.activeUserId = pickActiveUserForRole(r, state.data.users);
 
   return state;
 }
@@ -748,7 +868,7 @@ function createLockedState(role, reason, code) {
     },
     user: {
       role: r,
-      activeUserId: ""
+      activeUserId: "" // keep empty; locked anyway
     },
     flags: {
       locked: true,
@@ -756,7 +876,12 @@ function createLockedState(role, reason, code) {
       lockCode: safeStr(code) || FRZ_ERR.INVALID_SHAPE,
       readOnly: true
     },
-    data: { items: [], history: [], users: [] }
+    data: {
+      items: [],
+      history: [],
+      // keep users for UI visibility, but no writes allowed anyway
+      users: createDefaultUsers()
+    }
   };
 }
 
@@ -779,4 +904,11 @@ function safeStr(v) {
 function safeNum(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function makeId(prefix) {
+  // UI-only id: stable-enough (not crypto)
+  const a = Math.random().toString(16).slice(2);
+  const b = Date.now().toString(16);
+  return `${prefix}_${b}_${a}`;
 }
