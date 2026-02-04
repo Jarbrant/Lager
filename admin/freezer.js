@@ -3,18 +3,16 @@ AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 4/4
 AUTOPATCH | FIL: admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
 
-Syfte (BLOCK 4/4):
-- Wire Users CRUD UI (create/edit/save/cancel + activate/deactivate)
-- RBAC: endast ADMIN (users_manage) får CRUD (fail-closed även i store)
-- Inaktiva users syns men kan inte väljas i “Välj användare” (roll/user-select)
-  - Här implementerat som: role-select får inte hamna i läge som mappas till inaktiv user
-    (store blockerar även setActiveUser(inaktiv) om senare används)
-- Visar felmeddelanden i Users-panel (unik firstName, m.m.)
-- Behåller baseline tabs + demo reset + render loop
+AO-04/15 — Produktregister (Items) CRUD (Admin) — LÅST fältkontrakt
+BLOCK 1/6 (stort AO):
+- Wire Items CRUD UI (renderas i Saldo-vyn av freezer-render.js)
+- Sök + sort + kategori-filter
+- Create/Update/Archive/Delete(guarded)
+- Arkivera är standard-action; delete kräver confirm och kan blockeras av guard
 
-OBS:
-- Vi använder befintliga DOM-id från admin/freezer.html (AO-03 BLOCK 2/4).
-- Inga nya storage-keys.
+Policy:
+- Inga nya storage-keys/datamodell
+- XSS-safe (render sköter textContent)
 ============================================================ */
 
 (function () {
@@ -24,13 +22,12 @@ OBS:
   const tabSaldo = byId("tabSaldo");
   const tabHistorik = byId("tabHistorik");
 
-  const userSelect = byId("frzUserSelect");     // legacy role selector
+  const userSelect = byId("frzUserSelect");
   const resetBtn = byId("frzResetDemoBtn");
 
   // Users UI
   const usersPanel = byId("frzUsersPanel");
   const usersList = byId("frzUsersList");
-  const usersCount = byId("frzUsersCount");
 
   const msgBox = byId("frzUsersMsg");
   const msgTitle = byId("frzUsersMsgTitle");
@@ -51,6 +48,29 @@ OBS:
   // Page state
   let activeTab = "dashboard";
 
+  // AO-04: Items UI state (in-memory only)
+  const itemsUI = {
+    itemsQ: "",
+    itemsCategory: "",
+    itemsSortKey: "articleNo",
+    itemsSortDir: "asc",
+    itemsIncludeInactive: false,
+
+    itemsEditingArticleNo: "",
+
+    formArticleNo: "",
+    formPackSize: "",
+    formSupplier: "",
+    formCategory: "",
+    formPricePerKg: "",
+    formMinLevel: "",
+    formTempClass: "",
+    formRequiresExpiry: true,
+    formIsActive: true,
+
+    itemsMsg: "—"
+  };
+
   if (!window.FreezerStore || !window.FreezerRender) {
     console.error("Freezer baseline saknar FreezerStore eller FreezerRender.");
     return;
@@ -63,11 +83,10 @@ OBS:
   window.FreezerStore.init({ role: initialRole });
 
   window.FreezerStore.subscribe((state) => {
-    window.FreezerRender.renderAll(state);
+    window.FreezerRender.renderAll(state, itemsUI);
     window.FreezerRender.setActiveTabUI(activeTab);
-    // keep users UI form consistent
+
     if (usersPanel && !usersPanel.hidden) {
-      // ensure edit-mode label is coherent
       refreshFormHeader();
     }
   });
@@ -83,9 +102,6 @@ OBS:
       const role = userSelect.value || "ADMIN";
       window.FreezerStore.setRole(role);
 
-      // AO-03: block selecting inactive user via role mapping:
-      // If after role-change active user ended up missing/invalid, store will fallback.
-      // We also re-sync UI selection via renderMode().
       const st = window.FreezerStore.getStatus();
       if (st && userSelect.value !== st.role) userSelect.value = st.role;
     });
@@ -103,6 +119,8 @@ OBS:
         showUsersMsg("Reset misslyckades", res.reason || "Okänt fel.");
       } else {
         resetUserForm();
+        resetItemsForm();
+        setItemsMsg("Demo återställd.");
       }
     });
   }
@@ -110,6 +128,9 @@ OBS:
   // Users actions
   wireUsersForm();
   wireUsersListDelegation();
+
+  // AO-04: Items actions (delegation on saldo wrap)
+  wireItemsDelegation();
 
   // Initial UI
   window.FreezerRender.setActiveTabUI(activeTab);
@@ -224,12 +245,10 @@ OBS:
         const u = findUserById(userId);
         if (!u) return showUsersMsg("Fel", "User hittades inte.");
 
-        // Load into form
         if (editingIdInput) editingIdInput.value = u.id || "";
         if (firstNameInput) firstNameInput.value = String(u.firstName || "");
         setPermsToUI(u.perms || {});
         refreshFormHeader();
-        // Scroll into view (nice)
         if (firstNameInput) firstNameInput.focus();
         return;
       }
@@ -242,10 +261,7 @@ OBS:
         const r = window.FreezerStore.setUserActive(userId, next);
         if (!r.ok) return showUsersMsg("Fel", r.reason || "Kunde inte uppdatera.");
 
-        // If we deactivated a user that maps to current role-selection, store may fallback.
-        // Role UI sync handled by renderMode() automatically.
         if (editingIdInput && editingIdInput.value === userId && !next) {
-          // if editing user got deactivated, clear edit mode
           resetUserForm();
         }
         return;
@@ -260,6 +276,225 @@ OBS:
     } catch {
       return null;
     }
+  }
+
+  // -----------------------------
+  // AO-04: ITEMS (delegation)
+  // -----------------------------
+  function wireItemsDelegation() {
+    document.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!t || !(t instanceof HTMLElement)) return;
+
+      const btn = t.closest("button[data-action]");
+      if (!btn) return;
+
+      const action = btn.getAttribute("data-action") || "";
+      const articleNo = btn.getAttribute("data-article-no") || "";
+
+      const status = window.FreezerStore.getStatus();
+      if (!action) return;
+      if (status.locked) return setItemsMsg("Låst läge.");
+
+      if (action === "item-new") {
+        if (status.readOnly || !window.FreezerStore.can("inventory_write")) return setItemsMsg("Saknar behörighet (inventory_write) eller read-only.");
+        resetItemsForm();
+        itemsUI.itemsEditingArticleNo = "";
+        setItemsMsg("Ny produkt.");
+        rerender();
+        return;
+      }
+
+      if (action === "item-cancel") {
+        resetItemsForm();
+        itemsUI.itemsEditingArticleNo = "";
+        setItemsMsg("Avbrutet.");
+        rerender();
+        return;
+      }
+
+      if (action === "item-save") {
+        if (status.readOnly || !window.FreezerStore.can("inventory_write")) return setItemsMsg("Saknar behörighet (inventory_write) eller read-only.");
+
+        // read fields from DOM (render creates these ids)
+        readItemsFormFromDOM();
+
+        const payload = buildItemPayloadFromUI();
+
+        if (itemsUI.itemsEditingArticleNo) {
+          const r = window.FreezerStore.updateItem(itemsUI.itemsEditingArticleNo, payload);
+          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte spara.");
+          setItemsMsg("Uppdaterad.");
+          rerender();
+          return;
+        }
+
+        const r = window.FreezerStore.createItem(payload);
+        if (!r.ok) return setItemsMsg(r.reason || "Kunde inte skapa.");
+        setItemsMsg("Skapad.");
+        resetItemsForm();
+        rerender();
+        return;
+      }
+
+      if (action === "item-edit") {
+        itemsUI.itemsEditingArticleNo = String(articleNo || "");
+        loadItemToForm(itemsUI.itemsEditingArticleNo);
+        setItemsMsg("Editläge.");
+        rerender();
+        return;
+      }
+
+      if (action === "item-archive") {
+        if (status.readOnly || !window.FreezerStore.can("inventory_write")) return setItemsMsg("Saknar behörighet (inventory_write) eller read-only.");
+        if (!articleNo) return;
+
+        const r = window.FreezerStore.archiveItem(articleNo);
+        if (!r.ok) return setItemsMsg(r.reason || "Kunde inte arkivera.");
+        setItemsMsg("Arkiverad.");
+        rerender();
+        return;
+      }
+
+      if (action === "item-delete") {
+        if (status.readOnly || !window.FreezerStore.can("inventory_write")) return setItemsMsg("Saknar behörighet (inventory_write) eller read-only.");
+        if (!articleNo) return;
+
+        const ok = window.confirm(`Radera ${articleNo} permanent?\n(Detta kan blockeras om referenser finns.)`);
+        if (!ok) return;
+
+        const r = window.FreezerStore.deleteItem(articleNo);
+        if (!r.ok) return setItemsMsg(r.reason || "Radering blockerad.");
+        if (itemsUI.itemsEditingArticleNo === articleNo) {
+          resetItemsForm();
+          itemsUI.itemsEditingArticleNo = "";
+        }
+        setItemsMsg("Raderad.");
+        rerender();
+        return;
+      }
+    });
+
+    // Inputs/selects inside saldo wrap
+    document.addEventListener("change", (ev) => {
+      const t = ev.target;
+      if (!t || !(t instanceof HTMLElement)) return;
+
+      const id = t.id || "";
+      if (!id) return;
+
+      if (id === "frzItemsQ") {
+        itemsUI.itemsQ = String(t.value || "");
+        rerender();
+        return;
+      }
+      if (id === "frzItemsCategory") {
+        itemsUI.itemsCategory = String(t.value || "");
+        rerender();
+        return;
+      }
+      if (id === "frzItemsSortKey") {
+        itemsUI.itemsSortKey = String(t.value || "articleNo");
+        rerender();
+        return;
+      }
+      if (id === "frzItemsSortDir") {
+        itemsUI.itemsSortDir = String(t.value || "asc");
+        rerender();
+        return;
+      }
+      if (id === "frzItemsIncludeInactive") {
+        // checkbox
+        itemsUI.itemsIncludeInactive = !!(t.checked);
+        rerender();
+        return;
+      }
+    });
+
+    document.addEventListener("input", (ev) => {
+      const t = ev.target;
+      if (!t || !(t instanceof HTMLElement)) return;
+      if (t.id === "frzItemsQ") {
+        itemsUI.itemsQ = String(t.value || "");
+        rerender();
+      }
+    });
+  }
+
+  function readItemsFormFromDOM() {
+    itemsUI.formArticleNo = readVal("frzItemArticleNo");
+    itemsUI.formPackSize = readVal("frzItemPackSize");
+    itemsUI.formSupplier = readVal("frzItemSupplier");
+    itemsUI.formCategory = readVal("frzItemCategory");
+    itemsUI.formPricePerKg = readVal("frzItemPricePerKg");
+    itemsUI.formMinLevel = readVal("frzItemMinLevel");
+    itemsUI.formTempClass = readVal("frzItemTempClass");
+    itemsUI.formRequiresExpiry = (readVal("frzItemRequiresExpiry") === "true");
+    itemsUI.formIsActive = (readVal("frzItemIsActive") === "true");
+  }
+
+  function readVal(id) {
+    const el = document.getElementById(id);
+    if (!el) return "";
+    // select + input both have value
+    return String(el.value || "");
+  }
+
+  function buildItemPayloadFromUI() {
+    return {
+      articleNo: String(itemsUI.formArticleNo || "").trim(),
+      packSize: String(itemsUI.formPackSize || "").trim(),
+      supplier: String(itemsUI.formSupplier || "").trim(),
+      category: String(itemsUI.formCategory || "").trim(),
+      pricePerKg: (itemsUI.formPricePerKg === "") ? "" : Number(itemsUI.formPricePerKg),
+      minLevel: (itemsUI.formMinLevel === "") ? "" : Number(itemsUI.formMinLevel),
+      tempClass: String(itemsUI.formTempClass || "").trim(),
+      requiresExpiry: !!itemsUI.formRequiresExpiry,
+      isActive: !!itemsUI.formIsActive
+    };
+  }
+
+  function loadItemToForm(articleNo) {
+    try {
+      const all = window.FreezerStore.listItems({ includeInactive: true });
+      const it = all.find(x => x && String(x.articleNo || "") === String(articleNo || "")) || null;
+      if (!it) return;
+
+      itemsUI.formArticleNo = String(it.articleNo || "");
+      itemsUI.formPackSize = String(it.packSize || "");
+      itemsUI.formSupplier = String(it.supplier || "");
+      itemsUI.formCategory = String(it.category || "");
+      itemsUI.formPricePerKg = (typeof it.pricePerKg !== "undefined" && it.pricePerKg !== null) ? String(it.pricePerKg) : "";
+      itemsUI.formMinLevel = (typeof it.minLevel !== "undefined" && it.minLevel !== null) ? String(it.minLevel) : "";
+      itemsUI.formTempClass = String(it.tempClass || "");
+      itemsUI.formRequiresExpiry = !!it.requiresExpiry;
+      itemsUI.formIsActive = !!it.isActive;
+    } catch {}
+  }
+
+  function resetItemsForm() {
+    itemsUI.formArticleNo = "";
+    itemsUI.formPackSize = "";
+    itemsUI.formSupplier = "";
+    itemsUI.formCategory = "";
+    itemsUI.formPricePerKg = "";
+    itemsUI.formMinLevel = "";
+    itemsUI.formTempClass = "FROZEN";
+    itemsUI.formRequiresExpiry = true;
+    itemsUI.formIsActive = true;
+  }
+
+  function setItemsMsg(text) {
+    itemsUI.itemsMsg = String(text || "—");
+    rerender();
+  }
+
+  function rerender() {
+    try {
+      const state = window.FreezerStore.getState();
+      window.FreezerRender.renderAll(state, itemsUI);
+      window.FreezerRender.setActiveTabUI(activeTab);
+    } catch {}
   }
 
   // -----------------------------
@@ -293,6 +528,9 @@ OBS:
       window.FreezerRender.renderMode(state);
       window.FreezerRender.renderLockPanel(state);
       window.FreezerRender.renderDebug(state);
+
+      // AO-04: keep items panel updated when entering saldo
+      window.FreezerRender.renderAll(state, itemsUI);
     });
   }
 
