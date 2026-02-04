@@ -1,12 +1,16 @@
 /* ============================================================
-AO-01/15 — NY-BASELINE | BLOCK 1/5 | FIL: UI/freezer-store.js
+AO-02/15 — Statuspanel + Read-only UX + felkoder | BLOCK 1/3
+AUTOPATCH | FIL: UI/freezer-store.js
 Projekt: Freezer (UI-only / localStorage-first)
-Syfte: Store + storage-guards + demo-init + status/readOnly + local adapter
 
-DoD:
-- Tom storage -> demo-data skapas
-- Korrupt storage -> fail-closed (LOCKED) och inga writes till storage
-- SYSTEM_ADMIN -> read-only
+Syfte (AO-02):
+- Status: OK / TOM / KORRUPT + felorsak
+- Read-only: tydlig “varför” (SYSTEM_ADMIN / LOCKED / etc.)
+- Debug (ej känsligt): storageKey + schemaVersion
+- Felkoder (enkla, stabila)
+
+DoD påverkan:
+- Korrupt storage => fail-closed (LOCKED) + KORRUPT-status
 ============================================================ */
 
 /* -----------------------------
@@ -17,6 +21,21 @@ const FRZ_SCHEMA_VERSION = 1;
 
 const FRZ_ROLES = /** @type {const} */ (["ADMIN", "BUYER", "PICKER", "SYSTEM_ADMIN"]);
 function isValidRole(v) { return FRZ_ROLES.includes(v); }
+
+/* -----------------------------
+  STATUS + ERROR CODES (AO-02)
+----------------------------- */
+const FRZ_STATUS = /** @type {const} */ (["OK", "TOM", "KORRUPT"]);
+const FRZ_ERR = /** @type {const} */ ({
+  NONE: "FRZ_E_NONE",
+  NOT_INIT: "FRZ_E_NOT_INIT",
+  CORRUPT_JSON: "FRZ_E_CORRUPT_JSON",
+  INVALID_ROOT: "FRZ_E_INVALID_ROOT",
+  INVALID_SCHEMA: "FRZ_E_INVALID_SCHEMA",
+  INVALID_ROLE: "FRZ_E_INVALID_ROLE",
+  INVALID_SHAPE: "FRZ_E_INVALID_SHAPE",
+  STORAGE_WRITE_BLOCKED: "FRZ_E_STORAGE_WRITE_BLOCKED"
+});
 
 /* -----------------------------
   LOCAL STORAGE ADAPTER
@@ -42,6 +61,13 @@ let _state = null;
 let _subscribers = [];
 let _lastLoadError = null;
 
+// AO-02: boot facts for status (OK/TOM/KORRUPT)
+let _boot = {
+  rawWasEmpty: true,
+  demoCreated: false,
+  loadErrorCode: FRZ_ERR.NONE
+};
+
 /* -----------------------------
   PUBLIC API
 ----------------------------- */
@@ -64,10 +90,17 @@ window.FreezerStore = FreezerStore;
 function init(opts = {}) {
   const role = isValidRole(opts.role) ? opts.role : "ADMIN";
 
+  // Reset boot markers each init
+  _boot = { rawWasEmpty: true, demoCreated: false, loadErrorCode: FRZ_ERR.NONE };
+  _lastLoadError = null;
+
   const loadRes = loadFromStorage();
+  _boot.rawWasEmpty = !!loadRes.rawWasEmpty;
+  _boot.loadErrorCode = loadRes.errorCode || FRZ_ERR.NONE;
+
   if (!loadRes.ok) {
     // fail-closed: lock in memory, DO NOT write anything back
-    _state = createLockedState(role, loadRes.reason || "Korrupt eller ogiltig lagring.");
+    _state = createLockedState(role, loadRes.reason || "Korrupt eller ogiltig lagring.", loadRes.errorCode || FRZ_ERR.CORRUPT_JSON);
     notify();
     return getStatus();
   }
@@ -84,8 +117,9 @@ function init(opts = {}) {
     // Try to write demo; if write fails -> lock
     const w = safeWriteToStorage(demo);
     if (!w.ok) {
-      _state = createLockedState(role, w.reason || "Kunde inte skriva demo-data till lagring.");
+      _state = createLockedState(role, w.reason || "Kunde inte skriva demo-data till lagring.", w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED);
     } else {
+      _boot.demoCreated = true;
       _state = demo;
     }
   }
@@ -96,18 +130,20 @@ function init(opts = {}) {
 
 function loadFromStorage() {
   const raw = StorageAdapter.getRaw();
-  if (!raw || raw.trim() === "") {
-    return { ok: true, state: createEmptyState("ADMIN") };
+  const rawWasEmpty = (!raw || raw.trim() === "");
+
+  if (rawWasEmpty) {
+    return { ok: true, state: createEmptyState("ADMIN"), rawWasEmpty: true, errorCode: FRZ_ERR.NONE };
   }
 
   try {
     const parsed = JSON.parse(raw);
     const validated = validateAndNormalize(parsed);
-    if (!validated.ok) return { ok: false, reason: validated.reason };
-    return { ok: true, state: validated.state };
+    if (!validated.ok) return { ok: false, reason: validated.reason, rawWasEmpty: false, errorCode: validated.errorCode || FRZ_ERR.INVALID_SHAPE };
+    return { ok: true, state: validated.state, rawWasEmpty: false, errorCode: FRZ_ERR.NONE };
   } catch (e) {
     _lastLoadError = String(e && e.message ? e.message : e);
-    return { ok: false, reason: "JSON-parse misslyckades (korrupt data)." };
+    return { ok: false, reason: "JSON-parse misslyckades (korrupt data).", rawWasEmpty: false, errorCode: FRZ_ERR.CORRUPT_JSON };
   }
 }
 
@@ -115,27 +151,71 @@ function loadFromStorage() {
   STATE HELPERS
 ----------------------------- */
 function getState() {
-  // Defensive copy (shallow); caller should treat as read-only
+  // Defensive copy; caller should treat as read-only
   return _state ? JSON.parse(JSON.stringify(_state)) : null;
 }
 
 function getStatus() {
+  // AO-02: stable status object for UI banner/debug
   if (!_state) {
     return {
       ok: false,
+      status: "KORRUPT",
+      errorCode: FRZ_ERR.NOT_INIT,
       locked: true,
       readOnly: true,
       role: "ADMIN",
-      reason: "Ej initierad."
+      reason: "Ej initierad.",
+      whyReadOnly: "Store ej initierad.",
+      debug: {
+        storageKey: FRZ_STORAGE_KEY,
+        schemaVersion: FRZ_SCHEMA_VERSION,
+        rawWasEmpty: null,
+        demoCreated: null,
+        lastLoadError: _lastLoadError || null
+      }
     };
   }
+
+  const locked = !!_state.flags.locked;
+  const readOnly = !!_state.flags.readOnly;
+
+  // Status: KORRUPT om locked, annars TOM om tom data (och inte demo), annars OK
+  let status = "OK";
+  if (locked) status = "KORRUPT";
+  else if (isEmptyDataset(_state) && !_boot.demoCreated) status = "TOM";
+
+  const role = _state.user.role;
+
+  // whyReadOnly (för UI)
+  let whyReadOnly = null;
+  if (locked) whyReadOnly = "Låst läge (korrupt/ogiltig lagring).";
+  else if (readOnly && role === "SYSTEM_ADMIN") whyReadOnly = "SYSTEM_ADMIN är read-only enligt policy.";
+  else if (readOnly) whyReadOnly = "Read-only är aktivt.";
+
+  const errCode = locked
+    ? (_state.flags.lockCode || _boot.loadErrorCode || FRZ_ERR.INVALID_SHAPE)
+    : FRZ_ERR.NONE;
+
+  const reason = locked ? (_state.flags.lockReason || "Låst läge.") : null;
+
   return {
-    ok: !_state.flags.locked,
-    locked: !!_state.flags.locked,
-    readOnly: !!_state.flags.readOnly,
-    role: _state.user.role,
-    reason: _state.flags.lockReason || null,
-    lastLoadError: _lastLoadError || null
+    ok: !locked,
+    status,
+    errorCode: errCode,
+    locked,
+    readOnly,
+    role,
+    reason,
+    whyReadOnly,
+    lastLoadError: _lastLoadError || null,
+    debug: {
+      storageKey: FRZ_STORAGE_KEY,
+      schemaVersion: FRZ_SCHEMA_VERSION,
+      rawWasEmpty: !!_boot.rawWasEmpty,
+      demoCreated: !!_boot.demoCreated,
+      lastLoadError: _lastLoadError || null
+    }
   };
 }
 
@@ -178,11 +258,12 @@ function resetDemo() {
   const demo = createDemoState(_state.user.role);
   const w = safeWriteToStorage(demo);
   if (!w.ok) {
-    _state = createLockedState(_state.user.role, w.reason || "Kunde inte skriva demo-data.");
+    _state = createLockedState(_state.user.role, w.reason || "Kunde inte skriva demo-data.", w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED);
     notify();
     return { ok: false, reason: _state.flags.lockReason };
   }
 
+  _boot.demoCreated = true;
   _state = demo;
   notify();
   return { ok: true };
@@ -202,7 +283,7 @@ function trySave() {
 
   const w = safeWriteToStorage(_state);
   if (!w.ok) {
-    _state = createLockedState(_state.user.role, w.reason || "Lagring misslyckades.");
+    _state = createLockedState(_state.user.role, w.reason || "Lagring misslyckades.", w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED);
     notify();
     return { ok: false, reason: _state.flags.lockReason };
   }
@@ -215,7 +296,7 @@ function safeWriteToStorage(stateObj) {
     StorageAdapter.setRaw(raw);
     return { ok: true };
   } catch (e) {
-    return { ok: false, reason: "localStorage write misslyckades (blockerad/quota/privat läge)." };
+    return { ok: false, reason: "localStorage write misslyckades (blockerad/quota/privat läge).", errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED };
   }
 }
 
@@ -224,25 +305,25 @@ function safeWriteToStorage(stateObj) {
 ----------------------------- */
 function validateAndNormalize(obj) {
   // Strict-ish validation to detect corruption
-  if (!obj || typeof obj !== "object") return { ok: false, reason: "Ogiltig root." };
+  if (!obj || typeof obj !== "object") return { ok: false, reason: "Ogiltig root.", errorCode: FRZ_ERR.INVALID_ROOT };
 
   const meta = obj.meta;
   const user = obj.user;
   const data = obj.data;
   const flags = obj.flags;
 
-  if (!meta || typeof meta !== "object") return { ok: false, reason: "Saknar meta." };
-  if (meta.schemaVersion !== FRZ_SCHEMA_VERSION) return { ok: false, reason: "Fel schemaVersion." };
+  if (!meta || typeof meta !== "object") return { ok: false, reason: "Saknar meta.", errorCode: FRZ_ERR.INVALID_SHAPE };
+  if (meta.schemaVersion !== FRZ_SCHEMA_VERSION) return { ok: false, reason: "Fel schemaVersion.", errorCode: FRZ_ERR.INVALID_SCHEMA };
 
-  if (!user || typeof user !== "object") return { ok: false, reason: "Saknar user." };
+  if (!user || typeof user !== "object") return { ok: false, reason: "Saknar user.", errorCode: FRZ_ERR.INVALID_SHAPE };
   const role = user.role;
-  if (!isValidRole(role)) return { ok: false, reason: "Ogiltig roll i lagring." };
+  if (!isValidRole(role)) return { ok: false, reason: "Ogiltig roll i lagring.", errorCode: FRZ_ERR.INVALID_ROLE };
 
-  if (!data || typeof data !== "object") return { ok: false, reason: "Saknar data." };
-  if (!Array.isArray(data.items)) return { ok: false, reason: "items måste vara array." };
-  if (!Array.isArray(data.history)) return { ok: false, reason: "history måste vara array." };
+  if (!data || typeof data !== "object") return { ok: false, reason: "Saknar data.", errorCode: FRZ_ERR.INVALID_SHAPE };
+  if (!Array.isArray(data.items)) return { ok: false, reason: "items måste vara array.", errorCode: FRZ_ERR.INVALID_SHAPE };
+  if (!Array.isArray(data.history)) return { ok: false, reason: "history måste vara array.", errorCode: FRZ_ERR.INVALID_SHAPE };
 
-  // flags may be missing -> normalize
+  // flags may be missing -> normalize (back-compat + AO-02 lockCode)
   const norm = {
     meta: {
       schemaVersion: FRZ_SCHEMA_VERSION,
@@ -253,6 +334,7 @@ function validateAndNormalize(obj) {
     flags: {
       locked: !!(flags && flags.locked),
       lockReason: (flags && typeof flags.lockReason === "string") ? flags.lockReason : "",
+      lockCode: (flags && typeof flags.lockCode === "string") ? flags.lockCode : "",
       readOnly: computeReadOnly(role)
     },
     data: {
@@ -264,9 +346,10 @@ function validateAndNormalize(obj) {
   // If storage says locked, keep it locked
   if (norm.flags.locked) {
     norm.flags.readOnly = true;
+    if (!norm.flags.lockCode) norm.flags.lockCode = FRZ_ERR.INVALID_SHAPE;
   }
 
-  return { ok: true, state: norm };
+  return { ok: true, state: norm, errorCode: FRZ_ERR.NONE };
 }
 
 function normalizeItem(it) {
@@ -309,6 +392,7 @@ function createEmptyState(role) {
     flags: {
       locked: false,
       lockReason: "",
+      lockCode: "",
       readOnly: computeReadOnly(role)
     },
     data: {
@@ -336,7 +420,7 @@ function createDemoState(role) {
   return state;
 }
 
-function createLockedState(role, reason) {
+function createLockedState(role, reason, code) {
   const r = isValidRole(role) ? role : "ADMIN";
   return {
     meta: {
@@ -348,6 +432,7 @@ function createLockedState(role, reason) {
     flags: {
       locked: true,
       lockReason: safeStr(reason) || "Låst läge.",
+      lockCode: safeStr(code) || FRZ_ERR.INVALID_SHAPE,
       readOnly: true
     },
     data: { items: [], history: [] }
@@ -374,4 +459,3 @@ function safeNum(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
-
