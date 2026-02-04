@@ -1,1 +1,43 @@
+<!-- ============================================================
+FIX-404-ROOT-01 | FIL: index.html (repo-root)
+Syfte: Göra /Lager/ körbart på GitHub Pages genom att ha en startsida.
+Beteende: Redirectar till /admin/freezer.html + visar fallback-länk.
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lager – Start</title>
+
+  <!-- Snabb redirect (fungerar på GitHub Pages) -->
+  <meta http-equiv="refresh" content="0; url=./admin/freezer.html" />
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
+    a { color: inherit; }
+    .muted { opacity: .75; }
+    .card { border:1px solid #e6e6e6; border-radius: 12px; padding: 14px; max-width: 720px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 style="margin:0 0 8px 0;">Lager</h1>
+    <p class="muted" style="margin:0 0 12px 0;">
+      Startar demo…
+    </p>
+    <p style="margin:0;">
+      Om du inte skickas vidare automatiskt, klicka här:
+      <a href="./admin/freezer.html"><b>Öppna fryslager</b></a>
+    </p>
+  </div>
+
+  <script>
+    // JS-redirect som backup (om meta refresh blockas)
+    (function(){
+      try { window.location.replace("./admin/freezer.html"); } catch {}
+    })();
+  </script>
+</body>
+</html>
 
