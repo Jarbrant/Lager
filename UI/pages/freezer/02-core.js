@@ -1,10 +1,11 @@
 /* ============================================================
 AO-REFAC-STORE-SPLIT-01 (PROD) | FIL: UI/pages/freezer/02-core.js
 Projekt: Freezer (UI-only / localStorage-first)
+
 Syfte:
 - (KRAV 4) Core utils: id, time, safe parse, små helpers
 - Refactor-only: ingen funktionsförändring
-- Inga storage-keys här (STORE äger lagring)
+- Policy: store ska inte rendera (core är bara hjälpfunktioner)
 
 Taggar:
 - GUARD / STORAGE / RBAC / FLOW / DEBUG
@@ -13,26 +14,18 @@ Taggar:
 (function () {
   "use strict";
 
+  // Version-guard (stabil hook)
   if (window.FreezerCore && window.FreezerCore.version === "AO-REFAC-STORE-SPLIT-01:02-core@1") return;
 
   /* -----------------------------
-    BLOCK 1/6 — Time + ids
+    BLOCK 1/8 — Time + basic helpers
   ----------------------------- */
   function nowIso() {
     return new Date().toISOString();
   }
 
-  function makeId(prefix) {
-    // UI-only id: "stable-enough" (inte crypto). Refactor-only => behåll beteendet.
-    const a = Math.random().toString(16).slice(2);
-    const b = Date.now().toString(16);
-    return `${prefix}_${b}_${a}`;
-  }
-
-  /* -----------------------------
-    BLOCK 2/6 — Safe primitives
-  ----------------------------- */
   function safeStr(v) {
+    // Behåller baseline-beteende: endast string -> trim, annars ""
     if (typeof v !== "string") return "";
     return v.trim();
   }
@@ -48,42 +41,35 @@ Taggar:
     return Math.trunc(n);
   }
 
-  function safeBool(v, fallback) {
-    if (typeof v === "boolean") return v;
-    if (typeof v === "number") return v !== 0;
-    if (typeof v === "string") {
-      const s = v.trim().toLowerCase();
-      if (s === "true" || s === "1" || s === "yes") return true;
-      if (s === "false" || s === "0" || s === "no") return false;
-    }
-    return fallback;
+  function deepClone(obj) {
+    try { return JSON.parse(JSON.stringify(obj)); } catch { return null; }
   }
 
   /* -----------------------------
-    BLOCK 3/6 — Key / name normalization
+    BLOCK 2/8 — IDs (UI-only)
   ----------------------------- */
-  function normKey(s) {
-    return String(s || "")
-      .trim()
-      .toLocaleLowerCase("sv-SE");
+  function makeId(prefix) {
+    // UI-only id: stable-enough (not crypto) — matchar baseline-stilen
+    const a = Math.random().toString(16).slice(2);
+    const b = Date.now().toString(16);
+    return `${prefix}_${b}_${a}`;
   }
 
-  function normNameKey(s) {
-    return String(s || "")
-      .trim()
-      .toLocaleLowerCase("sv-SE");
+  /* -----------------------------
+    BLOCK 3/8 — Safe JSON parse
+  ----------------------------- */
+  function safeJsonParse(raw) {
+    try {
+      const v = JSON.parse(raw);
+      return { ok: true, value: v, error: null };
+    } catch (e) {
+      return { ok: false, value: null, error: String(e && e.message ? e.message : e) };
+    }
   }
 
-  function safeUserName(v) {
-    const s = safeStr(v);
-    if (!s) return "";
-
-    // Keep simple: allow letters, space, dash, apostrophe (samma som baseline)
-    const cleaned = s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿÅÄÖåäö '\-]/g, "").trim();
-    if (!cleaned) return "";
-    return cleaned.slice(0, 32);
-  }
-
+  /* -----------------------------
+    BLOCK 4/8 — Normalizers (items/users)
+  ----------------------------- */
   function normalizeArticleNo(v) {
     const s = safeStr(v);
     if (!s) return "";
@@ -92,86 +78,77 @@ Taggar:
     return cleaned.slice(0, 32);
   }
 
+  function safeUserName(v) {
+    const s = safeStr(v);
+    if (!s) return "";
+    // Keep simple (UI-only): allow letters, space, dash, apostrophe
+    const cleaned = s.replace(/[^A-Za-zÀ-ÖØ-öø-ÿÅÄÖåäö '\-]/g, "").trim();
+    if (!cleaned) return "";
+    return cleaned.slice(0, 32);
+  }
+
+  function normNameKey(s) {
+    return String(s || "").trim().toLocaleLowerCase("sv-SE");
+  }
+
+  function normKey(s) {
+    return String(s || "").trim().toLocaleLowerCase("sv-SE");
+  }
+
   /* -----------------------------
-    BLOCK 4/6 — Safe JSON + cloning
+    BLOCK 5/8 — Locale helpers
   ----------------------------- */
-  function safeJsonParse(raw) {
-    // GUARD: return {ok, value, error}
-    try {
-      if (typeof raw !== "string" || raw.trim() === "") return { ok: false, value: null, error: "EMPTY" };
-      return { ok: true, value: JSON.parse(raw), error: null };
-    } catch (e) {
-      return { ok: false, value: null, error: String(e && e.message ? e.message : e) };
-    }
-  }
-
-  function safeJsonStringify(obj) {
-    try {
-      return { ok: true, raw: JSON.stringify(obj), error: null };
-    } catch (e) {
-      return { ok: false, raw: "", error: String(e && e.message ? e.message : e) };
-    }
-  }
-
-  function deepClone(obj) {
-    // FLOW/DEBUG: används för “safe snapshots” i store
-    try {
-      return JSON.parse(JSON.stringify(obj));
-    } catch {
-      return null;
-    }
+  function toLowerSv(s) {
+    return String(s || "").toLocaleLowerCase("sv-SE");
   }
 
   /* -----------------------------
-    BLOCK 5/6 — Small helpers
+    BLOCK 6/8 — Defensive object checks
   ----------------------------- */
-  function isPlainObject(x) {
-    return !!x && typeof x === "object" && !Array.isArray(x);
-  }
-
-  function pick(obj, keys) {
-    const out = {};
-    if (!isPlainObject(obj) || !Array.isArray(keys)) return out;
-    keys.forEach(k => { if (k in obj) out[k] = obj[k]; });
-    return out;
-  }
-
-  function clamp(n, min, max) {
-    const x = Number(n);
-    if (!Number.isFinite(x)) return min;
-    return Math.min(max, Math.max(min, x));
-  }
+  function isObj(x) { return !!x && typeof x === "object"; }
+  function isArr(x) { return Array.isArray(x); }
 
   /* -----------------------------
-    BLOCK 6/6 — Export
+    BLOCK 7/8 — No-op logger (debug hook)
+  ----------------------------- */
+  function noop() {}
+
+  // (DEBUG) framtida: byt ut till riktig logger i page/controller om ni vill.
+  const log = { info: noop, warn: noop, error: noop };
+
+  /* -----------------------------
+    BLOCK 8/8 — Export (stable global)
   ----------------------------- */
   window.FreezerCore = {
     version: "AO-REFAC-STORE-SPLIT-01:02-core@1",
 
-    // time/id
+    // time
     nowIso,
-    makeId,
 
-    // safe primitives
+    // primitives
     safeStr,
     safeNum,
     safeInt,
-    safeBool,
-
-    // normalization
-    normKey,
-    normNameKey,
-    safeUserName,
-    normalizeArticleNo,
-
-    // json/clone
-    safeJsonParse,
-    safeJsonStringify,
     deepClone,
 
-    // misc
-    isPlainObject,
-    pick,
-    clamp
+    // json
+    safeJsonParse,
+
+    // ids
+    makeId,
+
+    // normalizers
+    normalizeArticleNo,
+    safeUserName,
+    normNameKey,
+    normKey,
+    toLowerSv,
+
+    // guards
+    isObj,
+    isArr,
+
+    // debug
+    log
   };
 })();
