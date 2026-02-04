@@ -1,1 +1,182 @@
+<!-- ============================================================
+AO-01/15 — NY-BASELINE | BLOCK 1/5 | FIL: admin/freezer.html
+Projekt: Freezer (UI-only / localStorage-first)
+Syfte: Tunn DOM + nav + containers + korrekt script-ordning
+
+DoD-stöd i DOM:
+- Statusrad (ok/readonly/locked)
+- Rollväljare (ADMIN/BUYER/PICKER + SYSTEM_ADMIN read-only)
+- Flikar: Dashboard / Saldo / Historik
+- Felruta för fail-closed (korrupt storage => lås)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freezer – Admin</title>
+
+  <!-- Minimal baseline: inga externa beroenden krävs.
+       Om du har gemensam CSS kan du lägga till den här. -->
+  <style>
+    :root { color-scheme: light; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header { border-bottom:1px solid #e6e6e6; background:#fff; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .brand { font-weight:700; }
+    nav a { text-decoration:none; color:inherit; opacity:.8; }
+    nav a:hover { opacity:1; }
+    .spacer { flex: 1; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fafafa; font-size: 13px; }
+    .pill b { font-weight:600; }
+    .muted { opacity:.75; }
+    .panel { border:1px solid #e6e6e6; border-radius: 12px; padding: 12px; background:#fff; }
+    main { background:#f6f7f8; min-height: calc(100vh - 64px); }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .tabBtn { border:1px solid #e6e6e6; background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; font-size: 14px; }
+    .tabBtn[aria-selected="true"] { font-weight:700; }
+    .grid2 { display:grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 900px){ .grid2 { grid-template-columns: 1fr 1fr; } }
+    .danger { border-color:#f2b8b5; background:#fff5f5; }
+    .ok { border-color:#cfe9cf; background:#f4fff4; }
+    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
+    select { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
+    footer { padding: 16px 0; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="wrap">
+      <div class="row">
+        <div class="brand">🧊 Freezer</div>
+
+        <nav class="row" aria-label="Admin navigation">
+          <a href="./index.html" class="muted">Admin Hem</a>
+          <span class="muted">/</span>
+          <a href="./freezer.html"><b>Fryslager</b></a>
+        </nav>
+
+        <div class="spacer"></div>
+
+        <!-- Statusrad (renderas av UI/freezer-render.js) -->
+        <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
+          <span class="muted">Status:</span>
+          <b id="frzStatusText">Laddar…</b>
+        </div>
+
+        <!-- Roll / användare (styr readOnly) -->
+        <label class="pill" for="frzUserSelect" title="Välj demo-roll (påverkar read-only)">
+          <span class="muted">Roll:</span>
+          <select id="frzUserSelect" aria-label="Välj roll">
+            <option value="ADMIN">ADMIN</option>
+            <option value="BUYER">INKÖPARE</option>
+            <option value="PICKER">PLOCK</option>
+            <option value="SYSTEM_ADMIN">SYSTEM_ADMIN (read-only)</option>
+          </select>
+        </label>
+
+        <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data (endast om ej read-only)">
+          Återställ demo
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <!-- Fail-closed: syns endast vid lock/korrupt data -->
+      <section id="frzLockPanel" class="panel danger" hidden>
+        <div class="row">
+          <div>
+            <b>Import stoppad / Låst läge</b>
+            <div class="muted" id="frzLockReason">
+              Orsak: okänd
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <div class="tabs" role="tablist" aria-label="Vy">
+            <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
+            <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
+            <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
+          </div>
+          <div class="spacer"></div>
+          <div class="pill" title="Visar om sidan är read-only">
+            <span class="muted">Läge:</span>
+            <b id="frzModeText">—</b>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dashboard -->
+      <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
+        <div class="grid2">
+          <div>
+            <h2 style="margin:0 0 8px 0;">Översikt</h2>
+            <div class="muted" style="margin-bottom:12px;">
+              Snabb vy för inköp/admin. (Baslinje: beräkningar kan vara stub.)
+            </div>
+            <div id="frzDashCards" class="grid2"></div>
+          </div>
+          <div>
+            <h2 style="margin:0 0 8px 0;">Noteringar</h2>
+            <div class="muted" id="frzDashNotes">—</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Saldo -->
+      <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
+        <div class="row" style="margin-bottom:10px;">
+          <h2 style="margin:0;">Lagersaldo</h2>
+          <div class="spacer"></div>
+          <div class="pill">
+            <span class="muted">Artiklar:</span>
+            <b id="frzSaldoCount">0</b>
+          </div>
+        </div>
+        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;">
+          <!-- Renderas XSS-safe -->
+        </div>
+      </section>
+
+      <!-- Historik -->
+      <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
+        <div class="row" style="margin-bottom:10px;">
+          <h2 style="margin:0;">Historik</h2>
+          <div class="spacer"></div>
+          <div class="pill">
+            <span class="muted">Händelser:</span>
+            <b id="frzHistoryCount">0</b>
+          </div>
+        </div>
+        <div id="frzHistoryList" class="panel" style="background:#fafafa;">
+          <!-- Renderas XSS-safe -->
+        </div>
+      </section>
+
+      <footer class="muted">
+        Baseline AO-01/15 • UI-only • localStorage-first • fail-closed
+      </footer>
+    </div>
+  </main>
+
+  <!-- ============================================================
+  Script-ordning (KRITISK):
+  1) Store (state + storage-guards)
+  2) Render (XSS-safe render)
+  3) Dashboard (beräkningar)
+  4) Page/controller (boot + tabs + events)
+  ============================================================ -->
+  <script src="../UI/freezer-store.js"></script>
+  <script src="../UI/freezer-render.js"></script>
+  <script src="../UI/freezer-dashboard.js"></script>
+  <script src="./freezer.js"></script>
+</body>
+</html>
 
