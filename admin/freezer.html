@@ -1,13 +1,16 @@
 <!-- ============================================================
-AO-01/15 — NY-BASELINE | BLOCK 1/5 | FIL: admin/freezer.html
+AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 2/4
+AUTOPATCH | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
-Syfte: Tunn DOM + nav + containers + korrekt script-ordning
 
-DoD-stöd i DOM:
-- Statusrad (ok/readonly/locked)
-- Rollväljare (ADMIN/BUYER/PICKER + SYSTEM_ADMIN read-only)
-- Flikar: Dashboard / Saldo / Historik
-- Felruta för fail-closed (korrupt storage => lås)
+Syfte (BLOCK 2/4):
+- Lägger till Users UI containers (form + lista + editläge)
+- Lägger till debug-panel DOM (AO-02 valfri) som render kan använda
+- Ingen redesign utanför AO: endast ny panel i Dashboard-vyn
+
+OBS:
+- RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
+- Inga nya storage-keys
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -16,8 +19,6 @@ DoD-stöd i DOM:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Freezer – Admin</title>
 
-  <!-- Minimal baseline: inga externa beroenden krävs.
-       Om du har gemensam CSS kan du lägga till den här. -->
   <style>
     :root { color-scheme: light; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
@@ -41,8 +42,21 @@ DoD-stöd i DOM:
     .danger { border-color:#f2b8b5; background:#fff5f5; }
     .ok { border-color:#cfe9cf; background:#f4fff4; }
     .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
-    select { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    select, input[type="text"] { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
     footer { padding: 16px 0; }
+
+    /* AO-03: Users UI small helpers */
+    .hr { height:1px; background:#eee; margin:10px 0; }
+    .badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid #e6e6e6; font-size:12px; background:#fafafa; }
+    .badge.off { opacity:.7; }
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .userRow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px; border:1px solid #e6e6e6; border-radius:10px; background:#fff; }
+    .userRow .name { font-weight:700; }
+    .userRow .meta { font-size:12px; }
+    .chkRow { display:flex; gap:10px; flex-wrap:wrap; }
+    .chk { display:flex; gap:6px; align-items:center; font-size:13px; }
+    .warn { border-color:#f2b8b5; background:#fff5f5; }
   </style>
 </head>
 
@@ -60,13 +74,11 @@ DoD-stöd i DOM:
 
         <div class="spacer"></div>
 
-        <!-- Statusrad (renderas av UI/freezer-render.js) -->
         <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
           <span class="muted">Status:</span>
           <b id="frzStatusText">Laddar…</b>
         </div>
 
-        <!-- Roll / användare (styr readOnly) -->
         <label class="pill" for="frzUserSelect" title="Välj demo-roll (påverkar read-only)">
           <span class="muted">Roll:</span>
           <select id="frzUserSelect" aria-label="Välj roll">
@@ -86,15 +98,22 @@ DoD-stöd i DOM:
 
   <main>
     <div class="wrap">
-      <!-- Fail-closed: syns endast vid lock/korrupt data -->
+      <!-- Fail-closed -->
       <section id="frzLockPanel" class="panel danger" hidden>
         <div class="row">
           <div>
             <b>Import stoppad / Låst läge</b>
-            <div class="muted" id="frzLockReason">
-              Orsak: okänd
-            </div>
+            <div class="muted" id="frzLockReason">Orsak: okänd</div>
           </div>
+        </div>
+      </section>
+
+      <!-- AO-02 optional debug -->
+      <section id="frzDebugPanel" class="panel" hidden>
+        <div class="row">
+          <b>Debug</b>
+          <div class="spacer"></div>
+          <div class="muted" id="frzDebugText">—</div>
         </div>
       </section>
 
@@ -123,11 +142,77 @@ DoD-stöd i DOM:
             </div>
             <div id="frzDashCards" class="grid2"></div>
           </div>
+
           <div>
             <h2 style="margin:0 0 8px 0;">Noteringar</h2>
             <div class="muted" id="frzDashNotes">—</div>
           </div>
         </div>
+
+        <div class="hr"></div>
+
+        <!-- AO-03: Users CRUD panel (RBAC: visas bara för admin i render/controller) -->
+        <section id="frzUsersPanel" class="panel" style="background:#fff;" hidden>
+          <div class="row">
+            <div>
+              <h2 style="margin:0;">Användare & behörigheter</h2>
+              <div class="muted" style="margin-top:4px;">
+                Endast ADMIN får skapa/redigera/inaktivera användare.
+              </div>
+            </div>
+            <div class="spacer"></div>
+            <div class="pill" title="Antal användare (inkl inaktiva)">
+              <span class="muted">Users:</span>
+              <b id="frzUsersCount">0</b>
+            </div>
+          </div>
+
+          <div class="hr"></div>
+
+          <!-- Error/feedback -->
+          <div id="frzUsersMsg" class="panel warn" hidden>
+            <b id="frzUsersMsgTitle">Fel</b>
+            <div class="muted" id="frzUsersMsgText">—</div>
+          </div>
+
+          <!-- Form (create/edit) -->
+          <div class="panel" style="background:#fafafa;">
+            <div class="row" style="margin-bottom:10px;">
+              <b id="frzUserFormTitle">Skapa användare</b>
+              <div class="spacer"></div>
+              <span class="muted" id="frzUserFormMode">—</span>
+            </div>
+
+            <div class="row" style="margin-bottom:10px;">
+              <label class="pill" for="frzUserFirstName">
+                <span class="muted">Förnamn:</span>
+                <input id="frzUserFirstName" type="text" placeholder="t.ex. Anna" maxlength="32" />
+              </label>
+
+              <div class="spacer"></div>
+
+              <button id="frzUserSaveBtn" class="btn" type="button">Spara</button>
+              <button id="frzUserCancelBtn" class="btn" type="button">Avbryt</button>
+            </div>
+
+            <div class="chkRow" aria-label="Behörigheter">
+              <label class="chk"><input id="perm_users_manage" type="checkbox" /> users_manage</label>
+              <label class="chk"><input id="perm_inventory_write" type="checkbox" /> inventory_write</label>
+              <label class="chk"><input id="perm_history_write" type="checkbox" /> history_write</label>
+              <label class="chk"><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
+            </div>
+
+            <!-- Hidden fields for edit mode -->
+            <input id="frzUserEditingId" type="hidden" value="" />
+          </div>
+
+          <div class="hr"></div>
+
+          <!-- Users list -->
+          <div class="list" id="frzUsersList" aria-label="Users list">
+            <!-- Rendered by freezer-render.js (XSS-safe) -->
+          </div>
+        </section>
       </section>
 
       <!-- Saldo -->
@@ -166,17 +251,10 @@ DoD-stöd i DOM:
     </div>
   </main>
 
-  <!-- ============================================================
-  Script-ordning (KRITISK):
-  1) Store (state + storage-guards)
-  2) Render (XSS-safe render)
-  3) Dashboard (beräkningar)
-  4) Page/controller (boot + tabs + events)
-  ============================================================ -->
+  <!-- Script order (KRITISK) -->
   <script src="../UI/freezer-store.js"></script>
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
   <script src="./freezer.js"></script>
 </body>
 </html>
-
