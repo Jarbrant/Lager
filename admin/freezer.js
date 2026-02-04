@@ -1,11 +1,16 @@
 /* ============================================================
-AO-01/15 — NY-BASELINE | BLOCK 1/5 | FIL: admin/freezer.js
+AO-02/15 — Statuspanel + Read-only UX + felkoder | BLOCK 1/3
+AUTOPATCH | FIL: admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
-Syfte: Page/controller (boot + tabs + userSelect + renderAll)
-Krav:
-- Init store (demo vid tom storage)
-- Fail-closed: om locked -> visa lockpanel och blockera reset
-- Tabs: dashboard/saldo/history
+
+Syfte (AO-02):
+- Koppla statusbanner (OK/TOM/KORRUPT) + felorsak/felkod till UI-refresh
+- Read-only UX: actions spärras med “varför” (via renderMode i render.js)
+- Debug-ruta (valfri) renderas om DOM finns (renderDebug i render.js)
+
+OBS:
+- Inga UX/redesign utanför AO
+- Inga nya storage-keys/datamodell
 ============================================================ */
 
 (function () {
@@ -42,8 +47,19 @@ Krav:
 
   // Subscribe -> render all
   window.FreezerStore.subscribe((state) => {
+    // Full render pass (includes AO-02 status/mode/lock/debug)
     window.FreezerRender.renderAll(state);
     window.FreezerRender.setActiveTabUI(activeTab);
+
+    // AO-02: ensure debug renders if available (no-op if DOM missing)
+    if (typeof window.FreezerRender.renderDebug === "function") {
+      try { window.FreezerRender.renderDebug(state); } catch {}
+    }
+
+    // AO-02: keep action UX aligned (titles/disabled handled in renderMode)
+    if (typeof window.FreezerRender.renderMode === "function") {
+      try { window.FreezerRender.renderMode(state); } catch {}
+    }
   });
 
   // Wire tabs
@@ -64,8 +80,10 @@ Krav:
   if (resetBtn) {
     resetBtn.addEventListener("click", () => {
       const status = window.FreezerStore.getStatus();
-      if (status.locked) return;      // fail-closed
-      if (status.readOnly) return;    // fail-closed
+
+      // AO-02: fail-closed + rely on renderMode tooltip for "why"
+      if (status.locked) return;
+      if (status.readOnly) return;
 
       const res = window.FreezerStore.resetDemo();
       if (!res.ok) {
@@ -77,6 +95,8 @@ Krav:
 
   // Initial UI
   window.FreezerRender.setActiveTabUI(activeTab);
+  // AO-02: ensure first paint includes status/mode/lock/debug even before first subscribe tick
+  forceRenderOnce();
 
   // -----------------------------
   // HELPERS
@@ -84,20 +104,33 @@ Krav:
   function bindTab(btn, key) {
     if (!btn) return;
     btn.addEventListener("click", () => {
-      const status = window.FreezerStore.getStatus();
       // Tabs allowed even when locked/readOnly
       activeTab = key;
       window.FreezerRender.setActiveTabUI(activeTab);
 
-      // Ensure status/mode up to date
+      // Ensure status/mode/lock/debug up to date
       const state = window.FreezerStore.getState();
       window.FreezerRender.renderStatus(state);
       window.FreezerRender.renderMode(state);
       window.FreezerRender.renderLockPanel(state);
+      if (typeof window.FreezerRender.renderDebug === "function") {
+        try { window.FreezerRender.renderDebug(state); } catch {}
+      }
     });
+  }
+
+  function forceRenderOnce() {
+    try {
+      const state = window.FreezerStore.getState();
+      window.FreezerRender.renderStatus(state);
+      window.FreezerRender.renderMode(state);
+      window.FreezerRender.renderLockPanel(state);
+      if (typeof window.FreezerRender.renderDebug === "function") {
+        try { window.FreezerRender.renderDebug(state); } catch {}
+      }
+    } catch {}
   }
 
   function byId(id) { return document.getElementById(id); }
 
 })();
-
