@@ -1,11 +1,15 @@
 /* ============================================================
 AO-REFAC-STORE-SPLIT-01 (PROD) | FIL: UI/pages/freezer/04-contract.js
 Projekt: Freezer (UI-only / localStorage-first)
-Syfte:
-- (KRAV 4) Contract: schema + validate/normalize + constants (actions/status/errors/perms)
+
+Syfte (KRAV 4):
+- Contract/schema + validate/normalize
+- Constants: roles/perms/status/err/tempClass/schemaVersion
 - Refactor-only: ingen funktionsförändring
-- Policy: 1 storage key AO-FREEZER_V1, fail-closed vid korrupt data
-- Store ska inte rendera (contract innehåller bara format/regler)
+
+Policy:
+- Inga storage-keys här (store äger STORAGE)
+- Store ska inte rendera (contract renderar inte heller)
 
 Taggar:
 - GUARD / STORAGE / RBAC / FLOW / DEBUG
@@ -15,18 +19,23 @@ Taggar:
   "use strict";
 
   if (!window.FreezerCore) {
-    // Fail-closed: core måste finnas före contract.
-    window.FreezerContract = { ok: false, reason: "FreezerCore saknas. Ladda 02-core.js före 04-contract.js." };
+    // Fail-closed: Contract kräver core först (KRAV 5 import-ordning)
+    window.FreezerContract = window.FreezerContract || {
+      version: "AO-REFAC-STORE-SPLIT-01:04-contract@1",
+      ok: false,
+      reason: "FreezerCore saknas (import-ordning fel)."
+    };
     return;
   }
-  const C = window.FreezerCore;
 
+  // Version-guard (stabil hook)
   if (window.FreezerContract && window.FreezerContract.version === "AO-REFAC-STORE-SPLIT-01:04-contract@1") return;
 
+  const C = window.FreezerCore;
+
   /* -----------------------------
-    BLOCK 1/8 — Constants (CONFIG / RBAC / STATUS / ERR)
+    BLOCK 1/10 — Constants (schema + enums)
   ----------------------------- */
-  const FRZ_STORAGE_KEY = "AO-FREEZER_V1";
   const FRZ_SCHEMA_VERSION = 1;
 
   const FRZ_ROLES = /** @type {const} */ (["ADMIN", "BUYER", "PICKER", "SYSTEM_ADMIN"]);
@@ -44,13 +53,13 @@ Taggar:
     INVALID_SHAPE: "FRZ_E_INVALID_SHAPE",
     STORAGE_WRITE_BLOCKED: "FRZ_E_STORAGE_WRITE_BLOCKED",
 
-    // Users (AO-03)
+    // AO-03 (users)
     USER_NAME_NOT_UNIQUE: "FRZ_E_USER_NAME_NOT_UNIQUE",
     USER_INVALID: "FRZ_E_USER_INVALID",
     USER_INACTIVE: "FRZ_E_USER_INACTIVE",
     FORBIDDEN: "FRZ_E_FORBIDDEN",
 
-    // Items (AO-04)
+    // AO-04 (items)
     ITEM_INVALID: "FRZ_E_ITEM_INVALID",
     ITEM_ARTICLE_NO_NOT_UNIQUE: "FRZ_E_ITEM_ARTICLE_NO_NOT_UNIQUE",
     ITEM_ARTICLE_NO_IMMUTABLE: "FRZ_E_ITEM_ARTICLE_NO_IMMUTABLE",
@@ -67,27 +76,20 @@ Taggar:
 
   const FRZ_TEMP_CLASSES = /** @type {const} */ (["FROZEN", "CHILLED", "AMBIENT"]);
 
-  // Optional: actions/status constants (för framtida moves). Inga funktionskrav här.
-  const FRZ_ACTIONS = /** @type {const} */ ({
-    USERS_CREATE: "users_create",
-    USERS_UPDATE: "users_update",
-    USERS_TOGGLE: "users_toggle",
-    ITEM_CREATE: "item_create",
-    ITEM_UPDATE: "item_update",
-    ITEM_DELETE: "item_delete",
-    INIT_DEMO: "init_demo"
-  });
-
+  /* -----------------------------
+    BLOCK 2/10 — ReadOnly policy
+  ----------------------------- */
   function computeReadOnly(role) {
     return role === "SYSTEM_ADMIN";
   }
 
   /* -----------------------------
-    BLOCK 2/8 — Users normalize/validate
+    BLOCK 3/10 — Permissions normalize
   ----------------------------- */
   function normalizePerms(perms) {
+    // Match baseline: dashboard_view default true, others default false
     const out = { users_manage: false, inventory_write: false, history_write: false, dashboard_view: true };
-    const p = perms && typeof perms === "object" ? perms : {};
+    const p = (perms && typeof perms === "object") ? perms : {};
     FRZ_PERMS.forEach(k => {
       if (k === "dashboard_view") out[k] = ("dashboard_view" in p) ? !!p[k] : true;
       else out[k] = !!p[k];
@@ -95,27 +97,34 @@ Taggar:
     return out;
   }
 
+  /* -----------------------------
+    BLOCK 4/10 — Users normalize + defaults
+  ----------------------------- */
   function normalizeUser(u) {
     if (!u || typeof u !== "object") return null;
+
     const id = C.safeStr(u.id) || C.makeId("u");
     const firstName = C.safeUserName(u.firstName);
     if (!firstName) return null;
 
     const active = ("active" in u) ? !!u.active : true;
 
-    const auditIn = u.audit && typeof u.audit === "object" ? u.audit : {};
+    const auditIn = (u.audit && typeof u.audit === "object") ? u.audit : {};
     const now = C.nowIso();
+
+    // Optional internal mapping helper
+    const roleKey = isValidRole(u.roleKey) ? u.roleKey
+      : (isValidRole(u.role) ? u.role : (C.safeStr(u.roleKey) || ""));
 
     return {
       id,
       firstName,
       active,
-      // Optional internal mapping helper
-      roleKey: isValidRole(u.roleKey) ? u.roleKey : (isValidRole(u.role) ? u.role : (C.safeStr(u.roleKey) || "")),
+      roleKey,
       perms: normalizePerms(u.perms),
       audit: {
-        createdAt: typeof auditIn.createdAt === "string" ? auditIn.createdAt : now,
-        updatedAt: typeof auditIn.updatedAt === "string" ? auditIn.updatedAt : now,
+        createdAt: (typeof auditIn.createdAt === "string") ? auditIn.createdAt : now,
+        updatedAt: (typeof auditIn.updatedAt === "string") ? auditIn.updatedAt : now,
         createdBy: C.safeStr(auditIn.createdBy) || "",
         updatedBy: C.safeStr(auditIn.updatedBy) || ""
       }
@@ -160,27 +169,13 @@ Taggar:
     ];
   }
 
-  function pickActiveUserForRole(role, users) {
-    const list = Array.isArray(users) ? users : [];
-    const byRole = list.find(u => u && u.active && u.roleKey === role);
-    if (byRole && byRole.id) return byRole.id;
-
-    if (role === "ADMIN") {
-      const admin = list.find(u => u && u.active && (u.roleKey === "ADMIN" || String(u.firstName || "").toLowerCase() === "admin"));
-      if (admin && admin.id) return admin.id;
-    }
-
-    const any = list.find(u => u && u.active);
-    return any && any.id ? any.id : "";
-  }
-
   /* -----------------------------
-    BLOCK 3/8 — Items normalize/validate
+    BLOCK 5/10 — Items normalize (legacy + new)
   ----------------------------- */
   function normalizeTempClass(v) {
     const s = C.safeStr(v).toUpperCase();
     if (FRZ_TEMP_CLASSES.includes(s)) return s;
-    // default (fail-soft) för legacy
+    // default (fail-soft) for legacy
     if (!s) return "FROZEN";
     return "";
   }
@@ -217,19 +212,19 @@ Taggar:
     const requiresExpiry = !!it.requiresExpiry;
     const isActive = ("isActive" in it) ? !!it.isActive : true;
 
-    const auditIn = it.audit && typeof it.audit === "object" ? it.audit : {};
+    const auditIn = (it.audit && typeof it.audit === "object") ? it.audit : {};
     const now = C.nowIso();
 
     const audit = {
-      createdAt: typeof auditIn.createdAt === "string" ? auditIn.createdAt : now,
-      updatedAt: typeof auditIn.updatedAt === "string" ? auditIn.updatedAt : now,
+      createdAt: (typeof auditIn.createdAt === "string") ? auditIn.createdAt : now,
+      updatedAt: (typeof auditIn.updatedAt === "string") ? auditIn.updatedAt : now,
       createdBy: C.safeStr(auditIn.createdBy) || "",
       updatedBy: C.safeStr(auditIn.updatedBy) || ""
     };
 
+    // Back-compat extras (if already present, keep; else derive)
     const legacyName = C.safeStr(it.name) || deriveLegacyName({ supplier, category, packSize });
     const legacyUnit = C.safeStr(it.unit) || deriveLegacyUnit({ packSize });
-
     const updatedAt = C.safeStr(it.updatedAt) || audit.updatedAt || now;
 
     return {
@@ -259,9 +254,11 @@ Taggar:
     // Accept new: { articleNo, packSize, supplier, category, pricePerKg, minLevel, tempClass, requiresExpiry, isActive, audit }
     if (!it || typeof it !== "object") return null;
 
+    // New shape first
     const aNo = C.safeStr(it.articleNo);
     if (aNo) return normalizeItemNew(it);
 
+    // Legacy shape
     const sku = C.safeStr(it.sku);
     const name = C.safeStr(it.name);
     if (!sku || !name) return null;
@@ -269,6 +266,7 @@ Taggar:
     const now = C.nowIso();
     const actor = "migrate";
 
+    // Map minimal legacy -> contract fields
     const mapped = {
       articleNo: sku,
       packSize: "",
@@ -286,19 +284,23 @@ Taggar:
         updatedBy: actor
       },
 
-      sku: sku,
-      name: name,
+      // keep legacy extras
+      sku,
+      name,
       unit: C.safeStr(it.unit) || "—",
       onHand: C.safeNum(it.onHand, 0),
       min: C.safeInt(it.min, 0),
-      updatedAt: typeof it.updatedAt === "string" ? it.updatedAt : now
+      updatedAt: (typeof it.updatedAt === "string") ? it.updatedAt : now
     };
 
     return normalizeItemNew(mapped);
   }
 
+  /* -----------------------------
+    BLOCK 6/10 — Item validator (create/update)
+  ----------------------------- */
   function validateNewItem(input) {
-    const x = input && typeof input === "object" ? input : null;
+    const x = (input && typeof input === "object") ? input : null;
     if (!x) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "Ogiltigt input." };
 
     const articleNo = C.normalizeArticleNo(x.articleNo);
@@ -308,7 +310,7 @@ Taggar:
     const supplier = C.safeStr(x.supplier);
     const category = C.safeStr(x.category);
 
-    // Baseline-policy: supplier+category krävs (packSize kan vara tom)
+    // Fail-closed: kräver minst supplier+category (packSize får vara tomt)
     if (!supplier) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "supplier krävs." };
     if (!category) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "category krävs." };
 
@@ -330,16 +332,26 @@ Taggar:
 
     return {
       ok: true,
-      item: { articleNo, packSize, supplier, category, pricePerKg, minLevel, tempClass, requiresExpiry, isActive }
+      item: {
+        articleNo,
+        packSize,
+        supplier,
+        category,
+        pricePerKg,
+        minLevel,
+        tempClass,
+        requiresExpiry,
+        isActive
+      }
     };
   }
 
   /* -----------------------------
-    BLOCK 4/8 — History normalize
+    BLOCK 7/10 — History normalize
   ----------------------------- */
   function normalizeHistory(h) {
     if (!h || typeof h !== "object") return null;
-    const ts = typeof h.ts === "string" ? h.ts : C.nowIso();
+    const ts = (typeof h.ts === "string") ? h.ts : C.nowIso();
     const type = C.safeStr(h.type) || "note";
     const sku = C.safeStr(h.sku) || "";
     const qty = C.safeNum(h.qty, 0);
@@ -349,8 +361,26 @@ Taggar:
   }
 
   /* -----------------------------
-    BLOCK 5/8 — Root validate + normalize (fail-closed)
+    BLOCK 8/10 — validate + normalize whole state
   ----------------------------- */
+  function pickActiveUserForRole(role, users) {
+    const list = Array.isArray(users) ? users : [];
+
+    // Preferred mapping by roleKey on user (if present)
+    const byRole = list.find(u => u && u.active && u.roleKey === role);
+    if (byRole && byRole.id) return byRole.id;
+
+    // Fallback: admin-named user for ADMIN
+    if (role === "ADMIN") {
+      const admin = list.find(u => u && u.active && (u.roleKey === "ADMIN" || String(u.firstName || "").toLowerCase() === "admin"));
+      if (admin && admin.id) return admin.id;
+    }
+
+    // Fallback: any active user
+    const any = list.find(u => u && u.active);
+    return any && any.id ? any.id : "";
+  }
+
   function validateAndNormalize(obj) {
     // Strict-ish validation to detect corruption
     if (!obj || typeof obj !== "object") return { ok: false, reason: "Ogiltig root.", errorCode: FRZ_ERR.INVALID_ROOT };
@@ -371,11 +401,14 @@ Taggar:
     if (!Array.isArray(data.items)) return { ok: false, reason: "items måste vara array.", errorCode: FRZ_ERR.INVALID_SHAPE };
     if (!Array.isArray(data.history)) return { ok: false, reason: "history måste vara array.", errorCode: FRZ_ERR.INVALID_SHAPE };
 
+    const now = C.nowIso();
+
+    // flags may be missing -> normalize (back-compat + AO-02 lockCode)
     const norm = {
       meta: {
         schemaVersion: FRZ_SCHEMA_VERSION,
-        createdAt: typeof meta.createdAt === "string" ? meta.createdAt : C.nowIso(),
-        updatedAt: typeof meta.updatedAt === "string" ? meta.updatedAt : C.nowIso()
+        createdAt: (typeof meta.createdAt === "string") ? meta.createdAt : now,
+        updatedAt: (typeof meta.updatedAt === "string") ? meta.updatedAt : now
       },
       user: {
         role,
@@ -405,8 +438,13 @@ Taggar:
       norm.data.users = createDefaultUsers();
     }
 
-    // Ensure items array exists (even if all invalid)
+    // Ensure items array exists
     if (!Array.isArray(norm.data.items)) norm.data.items = [];
+
+    // Ensure there is at least one active user
+    if (!norm.data.users.some(u => u && u.active)) {
+      norm.data.users[0].active = true;
+    }
 
     // Ensure activeUserId points to active user
     norm.user.activeUserId = pickActiveUserForRole(norm.user.role, norm.data.users);
@@ -415,208 +453,70 @@ Taggar:
   }
 
   /* -----------------------------
-    BLOCK 6/8 — Convenience creators (used by store)
+    BLOCK 9/10 — Misc helpers for store
   ----------------------------- */
-  function createEmptyState(role) {
-    const r = isValidRole(role) ? role : "ADMIN";
-    const state = {
-      meta: {
-        schemaVersion: FRZ_SCHEMA_VERSION,
-        createdAt: C.nowIso(),
-        updatedAt: C.nowIso()
-      },
-      user: {
-        role: r,
-        activeUserId: ""
-      },
-      flags: {
-        locked: false,
-        lockReason: "",
-        lockCode: "",
-        readOnly: computeReadOnly(r)
-      },
-      data: {
-        items: [],
-        history: [],
-        users: createDefaultUsers()
-      }
-    };
-
-    state.user.activeUserId = pickActiveUserForRole(r, state.data.users);
-    return state;
+  function isUserNameUnique(firstName, excludeId, users) {
+    const nameKey = C.normNameKey(firstName);
+    const list = Array.isArray(users) ? users : [];
+    return !list.some(u => {
+      if (!u || !u.firstName) return false;
+      if (excludeId && u.id === excludeId) return false;
+      return C.normNameKey(u.firstName) === nameKey;
+    });
   }
 
-  function createDemoState(role) {
-    const now = C.nowIso();
-    const r = isValidRole(role) ? role : "ADMIN";
-    const state = createEmptyState(r);
-
-    state.data.items = [
-      {
-        articleNo: "FZ-001",
-        packSize: "2kg",
-        supplier: "FoodSupplier AB",
-        category: "Kyckling",
-        pricePerKg: 89.0,
-        minLevel: 6,
-        tempClass: "FROZEN",
-        requiresExpiry: true,
-        isActive: true,
-        audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" },
-
-        sku: "FZ-001",
-        name: "FoodSupplier AB • Kyckling • 2kg",
-        unit: "fp",
-        onHand: 12,
-        min: 6,
-        updatedAt: now
-      },
-      {
-        articleNo: "FZ-002",
-        packSize: "150g",
-        supplier: "SeaTrade",
-        category: "Lax",
-        pricePerKg: 199.0,
-        minLevel: 30,
-        tempClass: "FROZEN",
-        requiresExpiry: true,
-        isActive: true,
-        audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" },
-
-        sku: "FZ-002",
-        name: "SeaTrade • Lax • 150g",
-        unit: "st",
-        onHand: 48,
-        min: 30,
-        updatedAt: now
-      },
-      {
-        articleNo: "FZ-003",
-        packSize: "1kg",
-        supplier: "VeggieCo",
-        category: "Grönsaker",
-        pricePerKg: 35.0,
-        minLevel: 10,
-        tempClass: "FROZEN",
-        requiresExpiry: false,
-        isActive: true,
-        audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" },
-
-        sku: "FZ-003",
-        name: "VeggieCo • Grönsaker • 1kg",
-        unit: "fp",
-        onHand: 20,
-        min: 10,
-        updatedAt: now
-      }
-    ].map(normalizeItemAny).filter(Boolean);
-
-    state.data.history = [
-      { ts: now, type: "init_demo", sku: "", qty: 0, by: r, note: "Demo-data skapad." }
-    ];
-
-    state.user.activeUserId = pickActiveUserForRole(r, state.data.users);
-
-    return state;
-  }
-
-  function createLockedState(role, reason, code) {
-    const r = isValidRole(role) ? role : "ADMIN";
-    return {
-      meta: {
-        schemaVersion: FRZ_SCHEMA_VERSION,
-        createdAt: C.nowIso(),
-        updatedAt: C.nowIso()
-      },
-      user: {
-        role: r,
-        activeUserId: ""
-      },
-      flags: {
-        locked: true,
-        lockReason: C.safeStr(reason) || "Låst läge.",
-        lockCode: C.safeStr(code) || FRZ_ERR.INVALID_SHAPE,
-        readOnly: true
-      },
-      data: {
-        items: [],
-        history: [],
-        users: createDefaultUsers()
-      }
-    };
+  function isArticleNoUnique(articleNo, excludeArticleNo, items) {
+    const key = C.normKey(articleNo);
+    const list = Array.isArray(items) ? items : [];
+    return !list.some(it => {
+      if (!it) return false;
+      const a = C.normKey(it.articleNo || it.sku);
+      if (!a) return false;
+      if (excludeArticleNo && C.normKey(excludeArticleNo) === a) return false;
+      return a === key;
+    });
   }
 
   /* -----------------------------
-    BLOCK 7/8 — Export helpers (for store)
-  ----------------------------- */
-  function ensureItemsBaseline(state) {
-    if (!state || !state.data) return;
-    if (!Array.isArray(state.data.items)) state.data.items = [];
-    state.data.items = state.data.items.map(normalizeItemAny).filter(Boolean);
-  }
-
-  function ensureUsersBaseline(state) {
-    if (!state || !state.data) return;
-    if (!Array.isArray(state.data.users)) state.data.users = [];
-
-    if (state.data.users.length === 0) {
-      state.data.users = createDefaultUsers();
-    } else {
-      state.data.users = state.data.users.map(normalizeUser).filter(Boolean);
-      if (state.data.users.length === 0) state.data.users = createDefaultUsers();
-    }
-
-    if (!state.data.users.some(u => u && u.active)) {
-      state.data.users[0].active = true;
-    }
-
-    const picked = pickActiveUserForRole(state.user && state.user.role, state.data.users);
-    if (state.user) state.user.activeUserId = picked;
-  }
-
-  /* -----------------------------
-    BLOCK 8/8 — Public API
+    BLOCK 10/10 — Export
   ----------------------------- */
   window.FreezerContract = {
     version: "AO-REFAC-STORE-SPLIT-01:04-contract@1",
+    ok: true,
 
-    // config/constants
-    FRZ_STORAGE_KEY,
+    // schema/const
     FRZ_SCHEMA_VERSION,
     FRZ_ROLES,
     FRZ_STATUS,
     FRZ_ERR,
     FRZ_PERMS,
     FRZ_TEMP_CLASSES,
-    FRZ_ACTIONS,
 
-    // validators/helpers
+    // validators / policy
+    computeReadOnly,
     isValidRole,
     isValidPermKey,
-    computeReadOnly,
 
+    // users
     normalizePerms,
     normalizeUser,
     createDefaultUsers,
     pickActiveUserForRole,
+    isUserNameUnique,
 
+    // items
     normalizeTempClass,
+    deriveLegacyName,
+    deriveLegacyUnit,
     normalizeItemAny,
     normalizeItemNew,
     validateNewItem,
-    deriveLegacyName,
-    deriveLegacyUnit,
+    isArticleNoUnique,
 
+    // history
     normalizeHistory,
-    validateAndNormalize,
 
-    // state factories (used by store)
-    createEmptyState,
-    createDemoState,
-    createLockedState,
-
-    // baseline ensure (used by store)
-    ensureItemsBaseline,
-    ensureUsersBaseline
+    // state validation
+    validateAndNormalize
   };
 })();
