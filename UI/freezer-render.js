@@ -1,11 +1,16 @@
 /* ============================================================
-AO-01/15 — NY-BASELINE | BLOCK 1/5 | FIL: UI/freezer-render.js
+AO-02/15 — Statuspanel + Read-only UX + felkoder | BLOCK 1/3
+AUTOPATCH | FIL: UI/freezer-render.js
 Projekt: Freezer (UI-only / localStorage-first)
-Syfte: Render helpers (status/role + saldo + historik) — XSS-safe (textContent)
-Krav:
-- Renderar status + lockpanel + readOnly-läge
-- Renderar saldo-tabell och historiklista
-- Inga innerHTML med osäkert innehåll
+
+Syfte (AO-02):
+- Statusbanner: OK / TOM / KORRUPT + felorsak + felkod
+- Read-only UX: disable actions + “varför”
+- Debug-ruta (valfri): storageKey + schemaVersion (+ rawWasEmpty/demoCreated)
+
+OBS:
+- XSS-safe: endast textContent, inga osäkra innerHTML
+- Render använder FreezerStore.getStatus() (utökad i AO-02 store)
 ============================================================ */
 
 const FreezerRender = {
@@ -16,6 +21,7 @@ const FreezerRender = {
   renderTabs,
   renderSaldo,
   renderHistory,
+  renderDebug,
   setActiveTabUI
 };
 
@@ -30,11 +36,11 @@ function el(id) { return document.getElementById(id); }
   MAIN
 ----------------------------- */
 function renderAll(state) {
-  // State may be null during boot; be defensive.
   const st = state || null;
   renderStatus(st);
   renderMode(st);
   renderLockPanel(st);
+  renderDebug(st);
   renderTabs(st);
   renderSaldo(st);
   renderHistory(st);
@@ -48,19 +54,23 @@ function renderStatus(state) {
   const txt = el("frzStatusText");
   if (!pill || !txt) return;
 
-  const status = window.FreezerStore ? window.FreezerStore.getStatus() : { ok:false, locked:true, readOnly:true, role:"ADMIN", reason:"Store saknas." };
+  const status = getStatusSafe();
 
-  // Text
-  txt.textContent = status.locked ? "LÅST" : "OK";
+  // Label: OK / TOM / KORRUPT
+  const label = status.status || (status.locked ? "KORRUPT" : "OK");
+  txt.textContent = label;
 
   // Color hint (via class)
   pill.classList.remove("danger", "ok");
-  if (status.locked) pill.classList.add("danger");
+  if (label === "KORRUPT" || status.locked) pill.classList.add("danger");
   else pill.classList.add("ok");
 
-  // Tooltip-ish reason in aria label
-  const reason = status.reason ? ` • ${status.reason}` : "";
-  pill.setAttribute("aria-label", `Status: ${txt.textContent}${reason}`);
+  // aria label includes error code + reason (if any)
+  const parts = [];
+  parts.push(`Status: ${label}`);
+  if (status.errorCode) parts.push(`Kod: ${status.errorCode}`);
+  if (status.reason) parts.push(`Orsak: ${status.reason}`);
+  pill.setAttribute("aria-label", parts.join(" • "));
 }
 
 function renderMode(state) {
@@ -68,11 +78,13 @@ function renderMode(state) {
   const userSelect = el("frzUserSelect");
   const resetBtn = el("frzResetDemoBtn");
 
-  const status = window.FreezerStore ? window.FreezerStore.getStatus() : { locked:true, readOnly:true, role:"ADMIN" };
+  const status = getStatusSafe();
 
   if (mode) {
-    const label = status.locked ? "Låst" : (status.readOnly ? "Read-only" : "Skrivbar");
+    const label = status.locked ? "Låst"
+      : (status.readOnly ? "Read-only" : "Skrivbar");
     mode.textContent = label;
+    mode.title = status.whyReadOnly ? status.whyReadOnly : "";
   }
 
   if (userSelect) {
@@ -80,11 +92,23 @@ function renderMode(state) {
     if (status.role && userSelect.value !== status.role) {
       userSelect.value = status.role;
     }
+    // Role select allowed even in locked; but give hint
+    userSelect.disabled = false;
+    userSelect.title = status.locked ? "Låst läge: roll kan ändras, men inget kan sparas." : "";
   }
 
   if (resetBtn) {
-    resetBtn.disabled = !!status.locked || !!status.readOnly;
-    resetBtn.title = status.locked ? "Låst läge: kan inte återställa" : (status.readOnly ? "Read-only: kan inte återställa" : "Återställ demo-data");
+    // AO-02: disable with "why" text
+    const disabled = !!status.locked || !!status.readOnly;
+    resetBtn.disabled = disabled;
+
+    if (status.locked) {
+      resetBtn.title = `Spärrad: ${status.reason ? status.reason : "Låst läge"} (${status.errorCode || "kod saknas"})`;
+    } else if (status.readOnly) {
+      resetBtn.title = `Spärrad: ${status.whyReadOnly || "Read-only"}`;
+    } else {
+      resetBtn.title = "Återställ demo-data";
+    }
   }
 }
 
@@ -93,11 +117,15 @@ function renderLockPanel(state) {
   const reasonEl = el("frzLockReason");
   if (!panel || !reasonEl) return;
 
-  const status = window.FreezerStore ? window.FreezerStore.getStatus() : { locked:true, reason:"Store saknas." };
+  const status = getStatusSafe();
 
   if (status.locked) {
     panel.hidden = false;
-    reasonEl.textContent = `Orsak: ${status.reason || "Okänd"}`;
+
+    // AO-02: include errorCode
+    const code = status.errorCode ? ` (${status.errorCode})` : "";
+    const reason = status.reason || "Okänd";
+    reasonEl.textContent = `Orsak: ${reason}${code}`;
   } else {
     panel.hidden = true;
     reasonEl.textContent = "";
@@ -105,10 +133,37 @@ function renderLockPanel(state) {
 }
 
 /* -----------------------------
+  DEBUG (optional UI)
+  - If DOM ids exist, we render them. If not, we do nothing.
+  - Expected ids (optional):
+    - frzDebugPanel, frzDebugText
+----------------------------- */
+function renderDebug(state) {
+  const panel = el("frzDebugPanel");
+  const txt = el("frzDebugText");
+  if (!panel || !txt) return;
+
+  const status = getStatusSafe();
+  const d = status.debug || {};
+
+  // Keep debug hidden in locked? No: show it always if present
+  panel.hidden = false;
+
+  const lines = [];
+  lines.push(`key: ${safeText(d.storageKey || "")}`);
+  lines.push(`schema: ${safeText(String(d.schemaVersion ?? ""))}`);
+  lines.push(`rawEmpty: ${safeText(String(d.rawWasEmpty ?? ""))}`);
+  lines.push(`demo: ${safeText(String(d.demoCreated ?? ""))}`);
+  if (status.errorCode) lines.push(`error: ${safeText(status.errorCode)}`);
+  if (d.lastLoadError) lines.push(`lastLoadError: ${safeText(String(d.lastLoadError))}`);
+
+  txt.textContent = lines.join(" • ");
+}
+
+/* -----------------------------
   TABS (just count + safety)
 ----------------------------- */
 function renderTabs(state) {
-  // counts in saldo/historik headers
   const saldoCount = el("frzSaldoCount");
   const histCount = el("frzHistoryCount");
 
@@ -126,12 +181,17 @@ function renderSaldo(state) {
   const wrap = el("frzSaldoTableWrap");
   if (!wrap) return;
 
-  // Clear
   clear(wrap);
 
   const items = (state && state.data && Array.isArray(state.data.items)) ? state.data.items : [];
   if (items.length === 0) {
-    wrap.appendChild(pMuted("Inga artiklar ännu."));
+    // AO-02: show TOM hint if status says TOM
+    const status = getStatusSafe();
+    if (status.status === "TOM") {
+      wrap.appendChild(pMuted("Tomt läge: inga artiklar i lagringen ännu."));
+    } else {
+      wrap.appendChild(pMuted("Inga artiklar ännu."));
+    }
     return;
   }
 
@@ -238,8 +298,6 @@ function buildHistoryLine(h) {
   const sku = h.sku ? `SKU ${h.sku}` : "";
   const qty = (typeof h.qty === "number" && isFinite(h.qty) && h.qty !== 0) ? `qty ${h.qty}` : "";
   const note = h.note ? String(h.note) : "";
-
-  // Join only non-empty
   return [sku, qty, note].filter(Boolean).join(" • ") || "—";
 }
 
@@ -258,6 +316,25 @@ function setActiveTabUI(tabKey) {
     if (t.btn) t.btn.setAttribute("aria-selected", active ? "true" : "false");
     if (t.view) t.view.hidden = !active;
   });
+}
+
+/* -----------------------------
+  HELPERS
+----------------------------- */
+function getStatusSafe() {
+  try {
+    if (!window.FreezerStore || typeof window.FreezerStore.getStatus !== "function") {
+      return { status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason: "Store saknas." };
+    }
+    return window.FreezerStore.getStatus();
+  } catch {
+    return { status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason: "Store-status kunde inte läsas." };
+  }
+}
+
+function safeText(s) {
+  // Only used to normalize debug strings; rendering is still textContent.
+  return String(s || "").replace(/\s+/g, " ").trim();
 }
 
 /* -----------------------------
@@ -300,4 +377,3 @@ function fmtDateTime(iso) {
   if (!isFinite(d.getTime())) return "—";
   return d.toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
 }
-
