@@ -3,39 +3,12 @@ AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 2/4
 AUTOPATCH | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
-Syfte (BLOCK 2/4):
-- Lägger till Users UI containers (form + lista + editläge)
-- Lägger till debug-panel DOM (AO-02 valfri) som render kan använda
-- Ingen redesign utanför AO: endast ny panel i Dashboard-vyn
-
-PATCH (REFAC-STORE-SPLIT):
-- Script-ordning uppdaterad för split: Core -> Contract -> Store -> Render -> Dashboard -> Page
-- Tar bort gamla UI/freezer-store.js include (ersätts av UI/pages/freezer/03-store.js)
-
-AO-02/15 (PATCH I DENNA FIL):
-- Lägger till #freezerViewMenu + #freezerViewRoot (för kommande router/vyer)
-- Script-ordning uppdaterad: Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router
-
-P0-FIX (I DENNA PATCH):
-- 00-view-interface.js och 01-view-registry.js använder "export" → måste laddas som module.
-  Därför laddas de med <script type="module"> för att undvika syntax error.
-
-AO-05/15 (I DENNA PATCH):
-- Laddar admin-vyer (placeholders) som ESM modules:
-  - UI/pages/freezer/admin/admin-dashboard.js
-  - UI/pages/freezer/admin/admin-items.js
-
-AO-12/15 (KOPPLING / HELHET):
-- admin-items.js exponerar window.FreezerAdminItems (createController)
-- Den måste laddas före admin/freezer.js (page/controller) för att Items CRUD ska wire:as.
-
-P0 (DENNA AUTOPATCH):
-- Göm router-menyn (#freezerViewMenu) och root (#freezerViewRoot) tills router är aktiv,
-  för att undvika dubbla “Saldo/Historik”-knappar (legacy tabs + router menu).
+P0 FIX (DENNA PATCH):
+- Lägger till modal-shell (window.FreezerModal) via vanlig <script> (ej module).
+- Behåller ESM-moduler (view-interface/registry/vyer) som type="module".
 
 OBS:
-- RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
-- Inga nya storage-keys
+- admin-dashboard.js + admin-items.js måste finnas på disk (annars 404).
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -144,7 +117,7 @@ OBS:
 
       <!-- ======================================================
       AO-02/15 — Ny shell-yta för router (meny + viewroot)
-      P0: GÖMS tills router är aktiv för att undvika dubbla knappar.
+      OBS: Denna ska visas när router är aktiv.
       ======================================================= -->
       <section class="panel">
         <div class="row">
@@ -163,14 +136,14 @@ OBS:
           </div>
         </div>
 
-        <!-- ROUTER-MENY (GÖMD tills router är aktiv) -->
+        <!-- ROUTER-MENY -->
         <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px; display:none;" hidden>
-          <!-- Router fyller detta senare -->
+          <!-- Router fyller detta -->
         </div>
 
-        <!-- ROUTER-ROOT (GÖMD tills router är aktiv) -->
+        <!-- ROUTER-ROOT -->
         <div id="freezerViewRoot" style="margin-top:10px; display:none;" hidden>
-          <!-- Aktiv vy mountas här senare -->
+          <!-- Aktiv vy mountas här -->
         </div>
       </section>
 
@@ -291,7 +264,7 @@ OBS:
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router/page
+  Core → Contract → Store → Render → Dashboard → ModalShell → view-interface → registry → vyfiler → router/page
   =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
@@ -299,6 +272,9 @@ OBS:
 
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
+
+  <!-- P0: modal-shell (window.FreezerModal) -->
+  <script src="../UI/pages/freezer/05-modal-shell.js"></script>
 
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
