@@ -12,6 +12,14 @@ PATCH (REFAC-STORE-SPLIT):
 - Script-ordning uppdaterad för split: Core -> Contract -> Store -> Render -> Dashboard -> Page
 - Tar bort gamla UI/freezer-store.js include (ersätts av UI/pages/freezer/03-store.js)
 
+AO-02/15 (PATCH I DENNA FIL):
+- Lägger till #freezerViewMenu + #freezerViewRoot (för kommande router/vyer)
+- Script-ordning uppdaterad: Core → Contract → Store → Render → Dashboard → view-interface → registry → router
+
+P0-FIX (I DENNA PATCH):
+- 00-view-interface.js och 01-view-registry.js använder "export" → måste laddas som module.
+  Därför laddas de med <script type="module"> för att undvika syntax error.
+
 OBS:
 - RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
 - Inga nya storage-keys
@@ -121,18 +129,37 @@ OBS:
         </div>
       </section>
 
+      <!-- ======================================================
+      AO-02/15 — Ny shell-yta för router (meny + viewroot)
+      - Router renderar menyknappar i #freezerViewMenu
+      - Aktiv vy mountas inuti #freezerViewRoot
+      - Inte kopplat ännu, men DOM finns nu.
+      ======================================================= -->
       <section class="panel">
         <div class="row">
+          <!-- BEHÅLLER befintliga tabs (för att inte riskera att nuvarande freezer.js bryts) -->
           <div class="tabs" role="tablist" aria-label="Vy">
             <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
             <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
             <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
           </div>
+
           <div class="spacer"></div>
+
           <div class="pill" title="Visar om sidan är read-only">
             <span class="muted">Läge:</span>
             <b id="frzModeText">—</b>
           </div>
+        </div>
+
+        <!-- ROUTER-MENY (tom nu) -->
+        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;">
+          <!-- Router fyller detta senare -->
+        </div>
+
+        <!-- ROUTER-ROOT (tom nu) -->
+        <div id="freezerViewRoot" style="margin-top:10px;">
+          <!-- Aktiv vy mountas här senare -->
         </div>
       </section>
 
@@ -255,14 +282,22 @@ OBS:
     </div>
   </main>
 
-  <!-- Script order (KRITISK): Core -> Contract -> Store -> Render -> Dashboard -> Page -->
-  <!-- OBS: Om din FreezerCore-fil INTE ligger här, justera endast denna src så att FreezerCore laddas först. -->
+  <!-- ==========================================================
+  Script order (KRITISK):
+  Core → Contract → Store → Render → Dashboard → view-interface → registry → (vyfiler) → router
+  =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
   <script src="../UI/pages/freezer/03-store.js"></script>
 
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
+
+  <!-- AO-01/15 (ESM: använder export) -->
+  <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
+  <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
+
+  <!-- Router / Page (nuvarande) -->
   <script src="./freezer.js"></script>
 </body>
 </html>
