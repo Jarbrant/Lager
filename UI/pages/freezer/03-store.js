@@ -1,746 +1,950 @@
 /* ============================================================
-AO-01/15 — NY-BASELINE | FIL: UI/freezer-render.js
-+ AO-02/15 — Statuspanel + Read-only UX + felkoder
-+ AO-03/15 — Users CRUD UI render (Admin)
-+ AO-04/15 — Produktregister (Items) CRUD (Admin) — BLOCK 1/6
+AO-REFAC-STORE-SPLIT-01 (PROD) | FIL: UI/pages/freezer/03-store.js
+Projekt: Freezer (UI-only / localStorage-first)
 
 Syfte:
-- XSS-safe rendering (textContent, aldrig osäker innerHTML)
-- Render av status banner/pill + lockpanel + debug + mode
-- Tab UI växling (dashboard/saldo/history)
-- Users-panel: visa/dölj via RBAC (users_manage), rendera lista + count
-- Items (AO-04): renderar produktregister i Saldo-vyn utan HTML-ändring:
-  - Search + sort + kategori-filter + includeInactive
-  - Lista + actions (edit / arkivera / radera guarded)
-  - Editor (create/update) inline
+- (KRAV 4) Public Store API: init/load/save/getState/getStatus/subscribe/setRole/resetDemo/trySave
+- Users CRUD + Items CRUD + RBAC (refactor-only: ingen funktionsförändring)
+- Policy: 1 storage key AO-FREEZER_V1, fail-closed vid korrupt storage, SYSTEM_ADMIN read-only
+- Store renderar inte
 
-Kontrakt:
-- Förväntar window.FreezerStore.getStatus() och state-shape från store
-- Får inte skapa nya storage-keys eller skriva till storage
+ÄNDRING (REFAC-ONLY):
+- CONTRACT shim bortkopplad: använder nu window.FreezerContract (04-contract.js)
+
+Taggar:
+- GUARD / STORAGE / RBAC / FLOW / DEBUG
 ============================================================ */
+
 (function () {
   "use strict";
 
-  const FreezerRender = {
-    renderAll,
-    setActiveTabUI,
+  // Version-guard (stabil hook)
+  if (window.FreezerStore && window.FreezerStore.version === "AO-REFAC-STORE-SPLIT-01:03-store@1") return;
 
-    // granular helpers called from freezer.js
-    renderStatus,
-    renderMode,
-    renderLockPanel,
-    renderDebug
+  /* -----------------------------
+    BLOCK 1/9 — Core hooks (GUARD)
+  ----------------------------- */
+  const Core = window.FreezerCore || null;
+
+  // Fail-closed: om core saknas, exponera minimal store som alltid är read-only.
+  if (!Core) {
+    window.FreezerStore = {
+      version: "AO-REFAC-STORE-SPLIT-01:03-store@1",
+      init: () => ({ ok: false, status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason: "FreezerCore saknas." }),
+      getState: () => null,
+      getStatus: () => ({ ok: false, status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason: "FreezerCore saknas." }),
+      subscribe: () => () => {},
+      setRole: () => ({ ok: false }),
+      resetDemo: () => ({ ok: false, reason: "FreezerCore saknas." }),
+      trySave: () => ({ ok: false, reason: "FreezerCore saknas." }),
+
+      can: () => false,
+      listUsers: () => [],
+      createUser: () => ({ ok: false, reason: "FreezerCore saknas." }),
+      updateUser: () => ({ ok: false, reason: "FreezerCore saknas." }),
+      setUserActive: () => ({ ok: false, reason: "FreezerCore saknas." }),
+
+      listItems: () => [],
+      queryItems: () => [],
+      createItem: () => ({ ok: false, reason: "FreezerCore saknas." }),
+      updateItem: () => ({ ok: false, reason: "FreezerCore saknas." }),
+      archiveItem: () => ({ ok: false, reason: "FreezerCore saknas." }),
+      deleteItem: () => ({ ok: false, reason: "FreezerCore saknas." })
+    };
+    return;
+  }
+
+  const { nowIso, safeStr, safeNum, safeInt, deepClone, safeJsonParse, makeId, safeUserName } = Core;
+
+  /* -----------------------------
+    BLOCK 2/9 — Contract hooks (GUARD)
+  ----------------------------- */
+  const Contract = (window.FreezerContract && window.FreezerContract.ok) ? window.FreezerContract : null;
+
+  // Fail-closed: om contract saknas/är fel -> exponera minimal store som alltid är read-only.
+  if (!Contract) {
+    const reason = (window.FreezerContract && window.FreezerContract.reason)
+      ? String(window.FreezerContract.reason)
+      : "FreezerContract saknas (import-ordning fel).";
+
+    window.FreezerStore = {
+      version: "AO-REFAC-STORE-SPLIT-01:03-store@1",
+      init: () => ({ ok: false, status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason }),
+      getState: () => null,
+      getStatus: () => ({ ok: false, status: "KORRUPT", errorCode: "FRZ_E_NOT_INIT", locked: true, readOnly: true, role: "ADMIN", reason }),
+      subscribe: () => () => {},
+      setRole: () => ({ ok: false }),
+      resetDemo: () => ({ ok: false, reason }),
+      trySave: () => ({ ok: false, reason }),
+
+      can: () => false,
+      listUsers: () => [],
+      createUser: () => ({ ok: false, reason }),
+      updateUser: () => ({ ok: false, reason }),
+      setUserActive: () => ({ ok: false, reason }),
+
+      listItems: () => [],
+      queryItems: () => [],
+      createItem: () => ({ ok: false, reason }),
+      updateItem: () => ({ ok: false, reason }),
+      archiveItem: () => ({ ok: false, reason }),
+      deleteItem: () => ({ ok: false, reason })
+    };
+    return;
+  }
+
+  // Contract constants + helpers (refactor-only: samma beteende, bara flyttat)
+  const FRZ_STORAGE_KEY = "AO-FREEZER_V1"; // (KRAV 3) store äger storage-key
+  const {
+    FRZ_SCHEMA_VERSION,
+    FRZ_STATUS,
+    FRZ_ERR,
+    // enums/guards
+    isValidRole,
+    isValidPermKey,
+    computeReadOnly,
+    // normalizers/validators
+    normalizePerms,
+    normalizeUser,
+    normalizeItemAny,
+    validateNewItem,
+    normalizeHistory,
+    // defaults + helpers
+    createDefaultUsers,
+    pickActiveUserForRole,
+    isUserNameUnique: contractIsUserNameUnique,
+    isArticleNoUnique: contractIsArticleNoUnique,
+    deriveLegacyName,
+    deriveLegacyUnit
+  } = Contract;
+
+  /* -----------------------------
+    BLOCK 3/9 — Storage adapter (STORAGE)
+  ----------------------------- */
+  const StorageAdapter = {
+    getRaw() {
+      try { return window.localStorage.getItem(FRZ_STORAGE_KEY); }
+      catch { return null; }
+    },
+    setRaw(raw) {
+      // STORAGE: setRaw kan kasta i vissa lägen (quota/blocked) — hanteras av safeWriteToStorage().
+      window.localStorage.setItem(FRZ_STORAGE_KEY, raw);
+    },
+    remove() {
+      try { window.localStorage.removeItem(FRZ_STORAGE_KEY); } catch {}
+    }
   };
 
-  window.FreezerRender = FreezerRender;
+  /* -----------------------------
+    BLOCK 4/9 — In-memory state + boot (FLOW/DEBUG)
+  ----------------------------- */
+  let _state = null;
+  let _subscribers = [];
+  let _lastLoadError = null;
 
-  // -----------------------------
-  // MAIN RENDER
-  // -----------------------------
-  function renderAll(state, ui = {}) {
-    renderStatus(state);
-    renderMode(state);
-    renderLockPanel(state);
-    renderDebug(state);
+  let _boot = {
+    rawWasEmpty: true,
+    demoCreated: false,
+    loadErrorCode: FRZ_ERR.NONE
+  };
 
-    renderUsersPanel(state);
+  /* -----------------------------
+    BLOCK 5/9 — Public API (stable surface)
+  ----------------------------- */
+  const FreezerStore = {
+    version: "AO-REFAC-STORE-SPLIT-01:03-store@1",
 
-    // AO-04: Saldo-vyn används som Produktregister (Items CRUD)
-    renderItemsRegister(state, ui);
+    init,
+    getState,
+    getStatus,
+    subscribe,
+    setRole,
+    resetDemo,
+    trySave,
 
-    renderHistory(state);
-    renderDashboard(state);
-  }
+    // users
+    can,
+    listUsers,
+    createUser,
+    updateUser,
+    setUserActive,
 
-  // -----------------------------
-  // STATUS (AO-02)
-  // -----------------------------
-  function renderStatus(state) {
-    const pill = byId("frzStatusPill");
-    const pillText = byId("frzStatusText");
-    const lockPanel = byId("frzLockPanel");
-    const lockReason = byId("frzLockReason");
+    // items
+    listItems,
+    queryItems,
+    createItem,
+    updateItem,
+    archiveItem,
+    deleteItem
+  };
 
-    const st = safeStatus();
+  window.FreezerStore = FreezerStore;
 
-    if (pillText) pillText.textContent = st.status;
+  /* -----------------------------
+    BLOCK 6/9 — Init / load / save (GUARD/STORAGE/FLOW)
+  ----------------------------- */
+  function init(opts = {}) {
+    const role = isValidRole(opts.role) ? opts.role : "ADMIN";
 
-    if (pill) {
-      pill.classList.remove("ok", "danger");
-      if (st.status === "OK") pill.classList.add("ok");
-      if (st.status !== "OK") pill.classList.add("danger");
-      pill.title = st.status === "OK"
-        ? "OK – lagring och state ser bra ut"
-        : `Problem – ${st.errorCode || "okänd kod"}`;
+    _boot = { rawWasEmpty: true, demoCreated: false, loadErrorCode: FRZ_ERR.NONE };
+    _lastLoadError = null;
+
+    const loadRes = loadFromStorage();
+    _boot.rawWasEmpty = !!loadRes.rawWasEmpty;
+    _boot.loadErrorCode = loadRes.errorCode || FRZ_ERR.NONE;
+
+    if (!loadRes.ok) {
+      _state = createLockedState(
+        role,
+        loadRes.reason || "Korrupt eller ogiltig lagring.",
+        loadRes.errorCode || FRZ_ERR.CORRUPT_JSON
+      );
+      notify();
+      return getStatus();
     }
 
-    if (lockPanel && lockReason) {
-      if (st.locked) {
-        lockPanel.hidden = false;
-        lockReason.textContent = st.reason ? `Orsak: ${st.reason}` : `Orsak: ${st.errorCode || "okänt fel"}`;
+    _state = loadRes.state;
+
+    // FLOW: roll styr read-only, men vi behåller alltid fail-closed om state redan är låst.
+    _state.user.role = role;
+    _state.flags.readOnly = computeReadOnly(role);
+
+    ensureUsersBaseline();
+    ensureItemsBaseline();
+
+    // Notera: "tom dataset" definieras som 0 items (users finns alltid). Demo skapas bara om ej låst.
+    if (isEmptyDataset(_state) && !_state.flags.locked) {
+      const demo = createDemoState(role);
+
+      demo.data.users = (_state.data && Array.isArray(_state.data.users) && _state.data.users.length)
+        ? _state.data.users
+        : demo.data.users;
+
+      demo.user.activeUserId = pickActiveUserForRole(role, demo.data.users);
+
+      const w = safeWriteToStorage(demo);
+      if (!w.ok) {
+        _state = createLockedState(
+          role,
+          w.reason || "Kunde inte skriva demo-data till lagring.",
+          w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED
+        );
       } else {
-        lockPanel.hidden = true;
-        lockReason.textContent = "Orsak: —";
+        _boot.demoCreated = true;
+        _state = demo;
       }
+    } else {
+      const picked = pickActiveUserForRole(role, _state.data.users);
+      _state.user.activeUserId = picked;
+    }
+
+    notify();
+    return getStatus();
+  }
+
+  function loadFromStorage() {
+    const raw = StorageAdapter.getRaw();
+    const rawWasEmpty = (!raw || raw.trim() === "");
+
+    if (rawWasEmpty) {
+      // GUARD: createEmptyState fyller default users + väljer activeUserId.
+      return { ok: true, state: createEmptyState("ADMIN"), rawWasEmpty: true, errorCode: FRZ_ERR.NONE };
+    }
+
+    const parsed = safeJsonParse(raw);
+    if (!parsed.ok) {
+      _lastLoadError = parsed.error;
+      return {
+        ok: false,
+        reason: "JSON-parse misslyckades (korrupt data).",
+        rawWasEmpty: false,
+        errorCode: FRZ_ERR.CORRUPT_JSON
+      };
+    }
+
+    const validated = Contract.validateAndNormalize(parsed.value);
+    if (!validated.ok) {
+      return {
+        ok: false,
+        reason: validated.reason,
+        rawWasEmpty: false,
+        errorCode: validated.errorCode || FRZ_ERR.INVALID_SHAPE
+      };
+    }
+
+    return { ok: true, state: validated.state, rawWasEmpty: false, errorCode: FRZ_ERR.NONE };
+  }
+
+  function safeWriteToStorage(stateObj) {
+    try {
+      const raw = JSON.stringify(stateObj);
+      StorageAdapter.setRaw(raw);
+      return { ok: true };
+    } catch (e) {
+      return {
+        ok: false,
+        reason: "localStorage write misslyckades (blockerad/quota/privat läge).",
+        errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED
+      };
     }
   }
 
-  // -----------------------------
-  // MODE (read-only) (AO-02)
-  // -----------------------------
-  function renderMode(state) {
-    const modeText = byId("frzModeText");
-    const resetBtn = byId("frzResetDemoBtn");
+  function trySave() {
+    if (!_state) return { ok: false, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, reason: "Read-only." };
 
-    const st = safeStatus();
+    _state.meta.updatedAt = nowIso();
 
-    const label = st.locked
-      ? "LÅST"
-      : (st.readOnly ? "READ-ONLY" : "FULL");
-
-    if (modeText) modeText.textContent = label;
-
-    if (resetBtn) resetBtn.disabled = !!(st.locked || st.readOnly);
-
-    const canUsers = can("users_manage");
-    const saveBtn = byId("frzUserSaveBtn");
-    const cancelBtn = byId("frzUserCancelBtn");
-    if (saveBtn) saveBtn.disabled = !!(st.locked || st.readOnly || !canUsers);
-    if (cancelBtn) cancelBtn.disabled = !!(st.locked || st.readOnly || !canUsers);
-
-    const fn = byId("frzUserFirstName");
-    if (fn) fn.disabled = !!(st.locked || st.readOnly || !canUsers);
-    ["perm_users_manage","perm_inventory_write","perm_history_write","perm_dashboard_view"].forEach(id => {
-      const el = byId(id);
-      if (el) el.disabled = !!(st.locked || st.readOnly || !canUsers);
-    });
+    const w = safeWriteToStorage(_state);
+    if (!w.ok) {
+      _state = createLockedState(
+        _state.user.role,
+        w.reason || "Lagring misslyckades.",
+        w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED
+      );
+      notify();
+      return { ok: false, reason: _state.flags.lockReason };
+    }
+    return { ok: true };
   }
 
-  function renderLockPanel(state) {
-    renderStatus(state);
+  /* -----------------------------
+    BLOCK 7/9 — Getters + subscribe + role (FLOW/RBAC)
+  ----------------------------- */
+  function getState() {
+    return _state ? deepClone(_state) : null;
   }
 
-  function renderDebug(state) {
-    const panel = byId("frzDebugPanel");
-    const text = byId("frzDebugText");
-    if (!panel || !text) return;
+  function getStatus() {
+    if (!_state) {
+      return {
+        ok: false,
+        status: "KORRUPT",
+        errorCode: FRZ_ERR.NOT_INIT,
+        locked: true,
+        readOnly: true,
+        role: "ADMIN",
+        reason: "Ej initierad.",
+        whyReadOnly: "Store ej initierad.",
+        debug: {
+          storageKey: FRZ_STORAGE_KEY,
+          schemaVersion: FRZ_SCHEMA_VERSION,
+          rawWasEmpty: null,
+          demoCreated: null,
+          lastLoadError: _lastLoadError || null
+        }
+      };
+    }
 
-    const st = safeStatus();
-    const shouldShow = (st.status !== "OK") || (st.debug && (st.debug.demoCreated || st.debug.rawWasEmpty));
+    const locked = !!_state.flags.locked;
+    const readOnly = !!_state.flags.readOnly;
 
-    panel.hidden = !shouldShow;
+    let status = "OK";
+    if (locked) status = "KORRUPT";
+    else if (isEmptyDataset(_state) && !_boot.demoCreated) status = "TOM";
 
-    const parts = [];
-    if (st.debug && st.debug.storageKey) parts.push(`key=${st.debug.storageKey}`);
-    if (st.debug && typeof st.debug.schemaVersion !== "undefined") parts.push(`v=${st.debug.schemaVersion}`);
-    if (st.errorCode) parts.push(`err=${st.errorCode}`);
-    if (st.debug && st.debug.rawWasEmpty) parts.push("rawEmpty=1");
-    if (st.debug && st.debug.demoCreated) parts.push("demo=1");
+    const role = _state.user.role;
 
-    text.textContent = parts.length ? parts.join(" • ") : "—";
-  }
+    let whyReadOnly = null;
+    if (locked) whyReadOnly = "Låst läge (korrupt/ogiltig lagring).";
+    else if (readOnly && role === "SYSTEM_ADMIN") whyReadOnly = "SYSTEM_ADMIN är read-only enligt policy.";
+    else if (readOnly) whyReadOnly = "Read-only är aktivt.";
 
-  // -----------------------------
-  // TABS UI
-  // -----------------------------
-  function setActiveTabUI(activeTab) {
-    const tabDashboard = byId("tabDashboard");
-    const tabSaldo = byId("tabSaldo");
-    const tabHistorik = byId("tabHistorik");
+    const errCode = locked
+      ? (_state.flags.lockCode || _boot.loadErrorCode || FRZ_ERR.INVALID_SHAPE)
+      : FRZ_ERR.NONE;
 
-    const viewDashboard = byId("viewDashboard");
-    const viewSaldo = byId("viewSaldo");
-    const viewHistorik = byId("viewHistorik");
+    const reason = locked ? (_state.flags.lockReason || "Låst läge.") : null;
 
-    const key = activeTab || "dashboard";
-
-    setTab(tabDashboard, key === "dashboard");
-    setTab(tabSaldo, key === "saldo");
-    setTab(tabHistorik, key === "history");
-
-    if (viewDashboard) viewDashboard.hidden = !(key === "dashboard");
-    if (viewSaldo) viewSaldo.hidden = !(key === "saldo");
-    if (viewHistorik) viewHistorik.hidden = !(key === "history");
-  }
-
-  function setTab(btn, selected) {
-    if (!btn) return;
-    btn.setAttribute("aria-selected", selected ? "true" : "false");
-  }
-
-  // -----------------------------
-  // USERS (AO-03)
-  // -----------------------------
-  function renderUsersPanel(state) {
-    const panel = byId("frzUsersPanel");
-    const list = byId("frzUsersList");
-    const count = byId("frzUsersCount");
-    if (!panel) return;
-
-    const st = safeStatus();
-    const canUsers = can("users_manage");
-
-    panel.hidden = !!(st.locked || st.readOnly || !canUsers);
-    if (panel.hidden) return;
-
-    const users = safeUsers(state);
-
-    if (count) count.textContent = String(users.length);
-    if (!list) return;
-
-    list.textContent = "";
-
-    users.forEach(u => {
-      const row = document.createElement("div");
-      row.className = "userRow";
-
-      const name = document.createElement("div");
-      name.className = "name";
-      name.textContent = safeText(u.firstName || "—");
-
-      const meta = document.createElement("div");
-      meta.className = "meta muted";
-      meta.textContent = `${u.active ? "Aktiv" : "Inaktiv"} • ${permSummary(u.perms)}`;
-
-      const spacer = document.createElement("div");
-      spacer.className = "spacer";
-
-      const badge = document.createElement("span");
-      badge.className = "badge" + (u.active ? "" : " off");
-      badge.textContent = u.active ? "ACTIVE" : "INACTIVE";
-
-      const btnEdit = document.createElement("button");
-      btnEdit.className = "btn";
-      btnEdit.type = "button";
-      btnEdit.setAttribute("data-action", "user-edit");
-      btnEdit.setAttribute("data-user-id", safeText(u.id || ""));
-      btnEdit.textContent = "Redigera";
-
-      const btnToggle = document.createElement("button");
-      btnToggle.className = "btn";
-      btnToggle.type = "button";
-      btnToggle.setAttribute("data-action", "user-toggle-active");
-      btnToggle.setAttribute("data-user-id", safeText(u.id || ""));
-      btnToggle.textContent = u.active ? "Inaktivera" : "Aktivera";
-
-      row.appendChild(name);
-      row.appendChild(meta);
-      row.appendChild(spacer);
-      row.appendChild(badge);
-      row.appendChild(btnEdit);
-      row.appendChild(btnToggle);
-
-      list.appendChild(row);
-    });
-  }
-
-  function permSummary(perms) {
-    const p = (perms && typeof perms === "object") ? perms : {};
-    const on = [];
-    if (p.users_manage) on.push("users");
-    if (p.inventory_write) on.push("inv");
-    if (p.history_write) on.push("hist");
-    if (p.dashboard_view) on.push("dash");
-    if (!on.length) return "inga perms";
-    return on.join(", ");
-  }
-
-  // -----------------------------
-  // AO-04: ITEMS REGISTER (render in Saldo view)
-  // -----------------------------
-  function renderItemsRegister(state, ui) {
-    const wrap = byId("frzSaldoTableWrap");
-    const count = byId("frzSaldoCount");
-    if (!wrap || !count) return;
-
-    const st = safeStatus();
-    const canInv = can("inventory_write");
-    const locked = !!(st.locked || st.readOnly || !canInv);
-
-    const query = {
-      q: safeText(ui && ui.itemsQ),
-      category: safeText(ui && ui.itemsCategory),
-      sortKey: safeText(ui && ui.itemsSortKey) || "articleNo",
-      sortDir: safeText(ui && ui.itemsSortDir) || "asc",
-      includeInactive: !!(ui && ui.itemsIncludeInactive)
+    return {
+      ok: !locked,
+      status,
+      errorCode: errCode,
+      locked,
+      readOnly,
+      role,
+      reason,
+      whyReadOnly,
+      lastLoadError: _lastLoadError || null,
+      debug: {
+        storageKey: FRZ_STORAGE_KEY,
+        schemaVersion: FRZ_SCHEMA_VERSION,
+        rawWasEmpty: !!_boot.rawWasEmpty,
+        demoCreated: !!_boot.demoCreated,
+        lastLoadError: _lastLoadError || null
+      }
     };
-
-    const items = safeItemsForRegister(state, query);
-    count.textContent = String(items.length);
-
-    wrap.textContent = "";
-
-    // Top controls
-    const top = document.createElement("div");
-    top.className = "row";
-    top.style.marginBottom = "10px";
-
-    const qLabel = pillInput("Sök", "frzItemsQ", query.q || "", "t.ex. FZ-001 / leverantör / kategori");
-    const catLabel = pillSelect("Kategori", "frzItemsCategory", buildCategoryOptions(state), query.category || "");
-    const sortLabel = pillSelect("Sort", "frzItemsSortKey", [
-      { v: "articleNo", t: "articleNo" },
-      { v: "category", t: "kategori" },
-      { v: "supplier", t: "leverantör" },
-      { v: "pricePerKg", t: "pris/kg" },
-      { v: "minLevel", t: "min-nivå" },
-      { v: "updatedAt", t: "uppdaterad" }
-    ], query.sortKey);
-
-    const dirLabel = pillSelect("Ordning", "frzItemsSortDir", [
-      { v: "asc", t: "A→Ö / låg→hög" },
-      { v: "desc", t: "Ö→A / hög→låg" }
-    ], query.sortDir);
-
-    const incLabel = document.createElement("label");
-    incLabel.className = "pill";
-    incLabel.title = "Visa även arkiverade (isActive=false)";
-    const incMuted = document.createElement("span");
-    incMuted.className = "muted";
-    incMuted.textContent = "Visa arkiverade:";
-    const incCb = document.createElement("input");
-    incCb.type = "checkbox";
-    incCb.id = "frzItemsIncludeInactive";
-    incCb.checked = !!query.includeInactive;
-    incCb.disabled = !!st.locked;
-    incLabel.appendChild(incMuted);
-    incLabel.appendChild(incCb);
-
-    const spacer = document.createElement("div");
-    spacer.className = "spacer";
-
-    const btnNew = document.createElement("button");
-    btnNew.className = "btn";
-    btnNew.type = "button";
-    btnNew.textContent = "Ny produkt";
-    btnNew.setAttribute("data-action", "item-new");
-    btnNew.disabled = locked;
-
-    top.appendChild(qLabel);
-    top.appendChild(catLabel);
-    top.appendChild(sortLabel);
-    top.appendChild(dirLabel);
-    top.appendChild(incLabel);
-    top.appendChild(spacer);
-    top.appendChild(btnNew);
-
-    wrap.appendChild(top);
-
-    // Editor
-    const editor = document.createElement("div");
-    editor.className = "panel";
-    editor.style.background = "#fafafa";
-    editor.style.marginBottom = "10px";
-    editor.setAttribute("data-section", "items-editor");
-
-    const isEdit = !!(ui && ui.itemsEditingArticleNo);
-    const title = document.createElement("b");
-    title.textContent = isEdit ? `Redigera produkt: ${safeText(ui.itemsEditingArticleNo)}` : "Skapa produkt";
-
-    const hint = document.createElement("div");
-    hint.className = "muted";
-    hint.style.marginTop = "6px";
-    hint.textContent = isEdit
-      ? "articleNo kan inte ändras (immutable)."
-      : "articleNo måste vara unikt.";
-
-    const hr = document.createElement("div");
-    hr.className = "hr";
-
-    const grid = document.createElement("div");
-    grid.className = "row";
-    grid.style.flexWrap = "wrap";
-
-    // inputs (ids used by freezer.js controller)
-    grid.appendChild(pillInput("articleNo", "frzItemArticleNo", safeText(ui && ui.formArticleNo), "t.ex. FZ-010", 32, isEdit || locked));
-    grid.appendChild(pillInput("packSize", "frzItemPackSize", safeText(ui && ui.formPackSize), "t.ex. 2kg", 32, locked));
-    grid.appendChild(pillInput("supplier", "frzItemSupplier", safeText(ui && ui.formSupplier), "t.ex. FoodSupplier AB", 48, locked));
-    grid.appendChild(pillInput("category", "frzItemCategory", safeText(ui && ui.formCategory), "t.ex. Kyckling", 48, locked));
-    grid.appendChild(pillInput("pricePerKg", "frzItemPricePerKg", safeText(ui && ui.formPricePerKg), "t.ex. 89", 16, locked, "number"));
-    grid.appendChild(pillInput("minLevel", "frzItemMinLevel", safeText(ui && ui.formMinLevel), "t.ex. 10", 16, locked, "number"));
-    grid.appendChild(pillInput("tempClass", "frzItemTempClass", safeText(ui && ui.formTempClass), "t.ex. FROZEN", 16, locked));
-    grid.appendChild(pillSelect("requiresExpiry", "frzItemRequiresExpiry", [
-      { v: "true", t: "Ja" },
-      { v: "false", t: "Nej" }
-    ], (String(!!(ui && ui.formRequiresExpiry)) === "true") ? "true" : "false", locked));
-    grid.appendChild(pillSelect("isActive", "frzItemIsActive", [
-      { v: "true", t: "Aktiv" },
-      { v: "false", t: "Arkiverad" }
-    ], (String(!!(ui && ui.formIsActive)) === "true") ? "true" : "false", locked));
-
-    const actions = document.createElement("div");
-    actions.className = "row";
-    actions.style.marginTop = "10px";
-
-    const msg = document.createElement("div");
-    msg.className = "muted";
-    msg.id = "frzItemsMsg";
-    msg.textContent = safeText(ui && ui.itemsMsg) || "—";
-
-    const btnSave = document.createElement("button");
-    btnSave.className = "btn";
-    btnSave.type = "button";
-    btnSave.textContent = "Spara";
-    btnSave.setAttribute("data-action", "item-save");
-    btnSave.disabled = locked;
-
-    const btnCancel = document.createElement("button");
-    btnCancel.className = "btn";
-    btnCancel.type = "button";
-    btnCancel.textContent = "Avbryt";
-    btnCancel.setAttribute("data-action", "item-cancel");
-    btnCancel.disabled = !!st.locked;
-
-    actions.appendChild(msg);
-    const sp2 = document.createElement("div");
-    sp2.className = "spacer";
-    actions.appendChild(sp2);
-    actions.appendChild(btnSave);
-    actions.appendChild(btnCancel);
-
-    editor.appendChild(title);
-    editor.appendChild(hint);
-    editor.appendChild(hr);
-    editor.appendChild(grid);
-    editor.appendChild(actions);
-
-    wrap.appendChild(editor);
-
-    // List
-    const listWrap = document.createElement("div");
-    listWrap.className = "panel";
-    listWrap.style.background = "#fff";
-
-    if (!items.length) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Inga produkter matchar filtret.";
-      listWrap.appendChild(d);
-      wrap.appendChild(listWrap);
-      return;
-    }
-
-    const table = document.createElement("table");
-    table.style.width = "100%";
-    table.style.borderCollapse = "collapse";
-    table.style.fontSize = "13px";
-
-    const thead = document.createElement("thead");
-    const hr2 = document.createElement("tr");
-    ["articleNo", "Leverantör", "Kategori", "pack", "pris/kg", "min", "saldo", "status", ""].forEach(h => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      th.style.textAlign = "left";
-      th.style.padding = "8px";
-      th.style.borderBottom = "1px solid #e6e6e6";
-      hr2.appendChild(th);
-    });
-    thead.appendChild(hr2);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-    items.forEach(it => {
-      const tr = document.createElement("tr");
-
-      addTd(tr, it.articleNo);
-      addTd(tr, it.supplier);
-      addTd(tr, it.category);
-      addTd(tr, it.packSize);
-      addTd(tr, it.pricePerKg);
-      addTd(tr, it.minLevel);
-      addTd(tr, String(it.onHand ?? 0));
-
-      const statusCell = document.createElement("td");
-      statusCell.style.padding = "8px";
-      statusCell.style.borderBottom = "1px solid #f0f0f0";
-      const badge = document.createElement("span");
-      badge.className = "badge" + (it.isActive ? "" : " off");
-      badge.textContent = it.isActive ? "ACTIVE" : "ARCHIVED";
-      statusCell.appendChild(badge);
-      tr.appendChild(statusCell);
-
-      const actionsCell = document.createElement("td");
-      actionsCell.style.padding = "8px";
-      actionsCell.style.borderBottom = "1px solid #f0f0f0";
-
-      const btnEdit = document.createElement("button");
-      btnEdit.className = "btn";
-      btnEdit.type = "button";
-      btnEdit.textContent = "Redigera";
-      btnEdit.setAttribute("data-action", "item-edit");
-      btnEdit.setAttribute("data-article-no", it.articleNo);
-      btnEdit.disabled = !!st.locked;
-
-      const btnArchive = document.createElement("button");
-      btnArchive.className = "btn";
-      btnArchive.type = "button";
-      btnArchive.textContent = "Arkivera";
-      btnArchive.setAttribute("data-action", "item-archive");
-      btnArchive.setAttribute("data-article-no", it.articleNo);
-      btnArchive.disabled = locked || !it.isActive;
-
-      const btnDelete = document.createElement("button");
-      btnDelete.className = "btn";
-      btnDelete.type = "button";
-      btnDelete.textContent = "Radera";
-      btnDelete.setAttribute("data-action", "item-delete");
-      btnDelete.setAttribute("data-article-no", it.articleNo);
-      btnDelete.disabled = locked;
-
-      actionsCell.appendChild(btnEdit);
-      actionsCell.appendChild(document.createTextNode(" "));
-      actionsCell.appendChild(btnArchive);
-      actionsCell.appendChild(document.createTextNode(" "));
-      actionsCell.appendChild(btnDelete);
-
-      tr.appendChild(actionsCell);
-
-      tbody.appendChild(tr);
-    });
-
-    table.appendChild(tbody);
-    listWrap.appendChild(table);
-    wrap.appendChild(listWrap);
   }
 
-  function safeItemsForRegister(state, query) {
+  function subscribe(fn) {
+    if (typeof fn !== "function") return () => {};
+    _subscribers.push(fn);
+    try { fn(getState()); } catch {}
+    return () => { _subscribers = _subscribers.filter(x => x !== fn); };
+  }
+
+  function notify() {
+    const snapshot = getState();
+    _subscribers.forEach(fn => { try { fn(snapshot); } catch {} });
+  }
+
+  function setRole(role) {
+    if (!_state) return getStatus();
+    if (!isValidRole(role)) return getStatus();
+
+    _state.user.role = role;
+    _state.flags.readOnly = computeReadOnly(role);
+
+    ensureUsersBaseline();
+    _state.user.activeUserId = pickActiveUserForRole(role, _state.data.users);
+
+    // RBAC/FLOW: rollbyte får ske in-memory även om trySave ej lyckas (t.ex. read-only).
+    trySave();
+    notify();
+    return getStatus();
+  }
+
+  function resetDemo() {
+    if (!_state) return { ok: false, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, reason: "Låst läge: kan inte återställa." };
+    if (_state.flags.readOnly) return { ok: false, reason: "Read-only: kan inte återställa." };
+
+    const demo = createDemoState(_state.user.role);
+    const w = safeWriteToStorage(demo);
+    if (!w.ok) {
+      _state = createLockedState(
+        _state.user.role,
+        w.reason || "Kunde inte skriva demo-data.",
+        w.errorCode || FRZ_ERR.STORAGE_WRITE_BLOCKED
+      );
+      notify();
+      return { ok: false, reason: _state.flags.lockReason };
+    }
+
+    _boot.demoCreated = true;
+    _state = demo;
+    notify();
+    return { ok: true };
+  }
+
+  /* -----------------------------
+    BLOCK 8/9 — RBAC + Users + Items + History (RBAC/FLOW)
+  ----------------------------- */
+  function getActiveUser() {
     try {
-      if (!window.FreezerStore || typeof window.FreezerStore.queryItems !== "function") return [];
-      const out = window.FreezerStore.queryItems(query || {});
-      return Array.isArray(out) ? out.map(it => ({
-        articleNo: safeText(it && it.articleNo),
-        supplier: safeText(it && it.supplier),
-        category: safeText(it && it.category),
-        packSize: safeText(it && it.packSize),
-        pricePerKg: safeText(it && it.pricePerKg),
-        minLevel: safeText(it && it.minLevel),
-        tempClass: safeText(it && it.tempClass),
-        requiresExpiry: !!(it && it.requiresExpiry),
-        isActive: !!(it && it.isActive),
-        onHand: (it && typeof it.onHand !== "undefined") ? it.onHand : 0
-      })) : [];
+      if (!_state || !_state.data || !Array.isArray(_state.data.users)) return null;
+      const id = (_state.user && _state.user.activeUserId) ? _state.user.activeUserId : "";
+      const u = _state.data.users.find(x => x && x.id === id) || null;
+      if (!u || !u.active) return null;
+      return u;
     } catch {
-      return [];
+      return null;
     }
   }
 
-  function buildCategoryOptions(state) {
-    const set = new Set();
+  function getAuditActor() {
     try {
-      const s = state && typeof state === "object" ? state : null;
-      const arr = s && s.data && Array.isArray(s.data.items) ? s.data.items : [];
-      arr.forEach(it => {
-        const c = safeText(it && it.category);
-        if (c) set.add(c);
-      });
-    } catch {}
-
-    const out = [{ v: "", t: "Alla" }];
-    Array.from(set).sort((a, b) => a.localeCompare(b, "sv-SE")).forEach(c => out.push({ v: c, t: c }));
-    return out;
-  }
-
-  function pillInput(label, id, value, placeholder, maxLen, disabled, type = "text") {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const inp = document.createElement("input");
-    inp.id = id;
-    inp.type = type;
-    inp.value = safeText(value || "");
-    inp.placeholder = safeText(placeholder || "");
-    if (maxLen) inp.maxLength = maxLen;
-    if (disabled) inp.disabled = true;
-
-    wrap.appendChild(muted);
-    wrap.appendChild(inp);
-    return wrap;
-  }
-
-  function pillSelect(label, id, options, selected, disabled) {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const sel = document.createElement("select");
-    sel.id = id;
-    if (disabled) sel.disabled = true;
-
-    (options || []).forEach(o => {
-      const opt = document.createElement("option");
-      opt.value = safeText(o.v);
-      opt.textContent = safeText(o.t);
-      sel.appendChild(opt);
-    });
-
-    const sv = safeText(selected);
-    if (sv !== null && typeof sv !== "undefined") sel.value = sv;
-
-    wrap.appendChild(muted);
-    wrap.appendChild(sel);
-    return wrap;
-  }
-
-  function addTd(tr, text) {
-    const td = document.createElement("td");
-    td.textContent = safeText(text);
-    td.style.padding = "8px";
-    td.style.borderBottom = "1px solid #f0f0f0";
-    tr.appendChild(td);
-  }
-
-  // -----------------------------
-  // HISTORY / DASH
-  // -----------------------------
-  function renderHistory(state) {
-    const list = byId("frzHistoryList");
-    const count = byId("frzHistoryCount");
-    if (!list || !count) return;
-
-    const history = safeHistory(state);
-    count.textContent = String(history.length);
-
-    list.textContent = "";
-    if (!history.length) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Ingen historik ännu.";
-      list.appendChild(d);
-      return;
+      const role = (_state && _state.user) ? _state.user.role : "ADMIN";
+      const u = getActiveUser();
+      const who = (u && u.firstName) ? u.firstName : role;
+      return `${who}`;
+    } catch {
+      return "system";
     }
-
-    const ul = document.createElement("div");
-    ul.className = "list";
-
-    history.slice().reverse().slice(0, 50).forEach(h => {
-      const row = document.createElement("div");
-      row.className = "userRow";
-
-      const left = document.createElement("div");
-      left.className = "meta";
-      left.textContent = `${safeText(h.ts || "")} • ${safeText(h.type || "")}`;
-
-      const note = document.createElement("div");
-      note.className = "muted";
-      note.textContent = safeText(h.note || "");
-
-      const by = document.createElement("span");
-      by.className = "badge";
-      by.textContent = safeText(h.by || "—");
-
-      row.appendChild(left);
-      row.appendChild(note);
-      row.appendChild(by);
-
-      ul.appendChild(row);
-    });
-
-    list.appendChild(ul);
   }
 
-  function renderDashboard(state) {
-    const cards = byId("frzDashCards");
-    const notes = byId("frzDashNotes");
-    if (!cards || !notes) return;
-
-    const st = safeStatus();
-
-    let itemCount = 0;
+  function pushHistory(type, sku, qty, by, note) {
     try {
-      const s = state && typeof state === "object" ? state : null;
-      const items = s && s.data && Array.isArray(s.data.items) ? s.data.items : [];
-      itemCount = items.length;
+      if (!_state || !_state.data || !Array.isArray(_state.data.history)) return;
+      _state.data.history.push(normalizeHistory({
+        ts: nowIso(),
+        type: safeStr(type) || "note",
+        sku: safeStr(sku) || "",
+        qty: safeNum(qty, 0),
+        by: safeStr(by) || "",
+        note: safeStr(note) || ""
+      }));
     } catch {}
-
-    cards.textContent = "";
-    addCard(cards, "Produkter", String(itemCount));
-    addCard(cards, "Status", st.status);
-    addCard(cards, "Läge", st.locked ? "LÅST" : (st.readOnly ? "READ-ONLY" : "FULL"));
-
-    const msg = [];
-    if (st.debug && st.debug.rawWasEmpty) msg.push("Tom lagring vid start.");
-    if (st.debug && st.debug.demoCreated) msg.push("Demo-data skapad.");
-    if (st.locked) msg.push(`Låst: ${st.errorCode || "okänt fel"}`);
-    notes.textContent = msg.length ? msg.join(" ") : "—";
-  }
-
-  function addCard(root, title, value) {
-    const card = document.createElement("div");
-    card.className = "panel";
-    card.style.background = "#fafafa";
-
-    const t = document.createElement("div");
-    t.className = "muted";
-    t.textContent = safeText(title);
-
-    const v = document.createElement("div");
-    v.style.fontSize = "20px";
-    v.style.fontWeight = "800";
-    v.style.marginTop = "6px";
-    v.textContent = safeText(value);
-
-    card.appendChild(t);
-    card.appendChild(v);
-    root.appendChild(card);
-  }
-
-  // -----------------------------
-  // SAFE ACCESSORS
-  // -----------------------------
-  function safeStatus() {
-    try {
-      if (window.FreezerStore && typeof window.FreezerStore.getStatus === "function") {
-        return window.FreezerStore.getStatus();
-      }
-    } catch {}
-    return { status: "KORRUPT", locked: true, readOnly: true, errorCode: "FRZ_E_NOT_INIT", debug: {} };
   }
 
   function can(permKey) {
-    try {
-      return !!(window.FreezerStore && typeof window.FreezerStore.can === "function" && window.FreezerStore.can(permKey));
-    } catch {
-      return false;
+    if (!_state) return false;
+    if (!isValidPermKey(permKey)) return false;
+    if (_state.flags.locked) return false;
+    if (_state.flags.readOnly) return false;
+
+    const u = getActiveUser();
+    if (!u || !u.active) return false;
+    return !!(u.perms && u.perms[permKey]);
+  }
+
+  function ensureUsersBaseline() {
+    if (!_state || !_state.data) return;
+    if (!Array.isArray(_state.data.users)) _state.data.users = [];
+
+    if (_state.data.users.length === 0) {
+      _state.data.users = createDefaultUsers();
+    } else {
+      _state.data.users = _state.data.users.map(normalizeUser).filter(Boolean);
+      if (_state.data.users.length === 0) _state.data.users = createDefaultUsers();
     }
+
+    if (!_state.data.users.some(u => u && u.active)) {
+      _state.data.users[0].active = true;
+    }
+
+    _state.user.activeUserId = pickActiveUserForRole(_state.user.role, _state.data.users);
   }
 
-  function safeHistory(state) {
-    const s = state && typeof state === "object" ? state : null;
-    const arr = s && s.data && Array.isArray(s.data.history) ? s.data.history : [];
-    return arr.map(h => ({
-      ts: safeText(h && h.ts),
-      type: safeText(h && h.type),
-      note: safeText(h && h.note),
-      by: safeText(h && h.by)
-    }));
+  function isUserNameUnique(firstName, excludeId) {
+    const users = (_state && _state.data && Array.isArray(_state.data.users)) ? _state.data.users : [];
+    return contractIsUserNameUnique(firstName, excludeId, users);
   }
 
-  function safeUsers(state) {
-    const s = state && typeof state === "object" ? state : null;
-    const arr = s && s.data && Array.isArray(s.data.users) ? s.data.users : [];
-    return arr.map(u => ({
-      id: safeText(u && u.id),
-      firstName: safeText(u && u.firstName),
-      active: !!(u && u.active),
-      perms: (u && typeof u.perms === "object" && u.perms) ? u.perms : {}
-    }));
+  function listUsers() {
+    if (!_state || !_state.data || !Array.isArray(_state.data.users)) return [];
+    return deepClone(_state.data.users) || [];
   }
 
-  function safeText(v) {
-    if (v === null || typeof v === "undefined") return "";
-    return String(v);
+  function createUser(input) {
+    if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+    if (!can("users_manage")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (users_manage)." };
+
+    ensureUsersBaseline();
+
+    const firstName = safeUserName(input && input.firstName);
+    if (!firstName) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "Förnamn krävs." };
+
+    if (!isUserNameUnique(firstName, null)) {
+      return { ok: false, errorCode: FRZ_ERR.USER_NAME_NOT_UNIQUE, reason: "Förnamn måste vara unikt." };
+    }
+
+    const now = nowIso();
+    const id = makeId("u");
+    const createdBy = getAuditActor();
+
+    // REFAC-ONLY: behåller shape (roleKey kan sättas senare via UI om det finns)
+    const user = normalizeUser({
+      id,
+      firstName,
+      active: true,
+      perms: normalizePerms(input && input.perms),
+      audit: { createdAt: now, updatedAt: now, createdBy, updatedBy: createdBy }
+    });
+
+    if (!user) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "User blev ogiltig." };
+
+    _state.data.users.push(user);
+    pushHistory("users_create", "", 0, createdBy, `User skapad: ${firstName}`);
+
+    const s = trySave();
+    notify();
+    if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+    return { ok: true, id };
   }
 
-  function byId(id) {
-    return document.getElementById(id);
+  function updateUser(userId, patch) {
+    if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+    if (!can("users_manage")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (users_manage)." };
+
+    ensureUsersBaseline();
+
+    const u = _state.data.users.find(x => x && x.id === userId);
+    if (!u) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "User hittades inte." };
+
+    const nextName = safeUserName(patch && patch.firstName);
+    if (!nextName) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "Förnamn krävs." };
+
+    if (!isUserNameUnique(nextName, userId)) {
+      return { ok: false, errorCode: FRZ_ERR.USER_NAME_NOT_UNIQUE, reason: "Förnamn måste vara unikt." };
+    }
+
+    const now = nowIso();
+    const actor = getAuditActor();
+    const nameChanged = (String(u.firstName || "") !== nextName);
+
+    u.firstName = nextName;
+    u.perms = normalizePerms(patch && patch.perms);
+    u.audit = (u.audit && typeof u.audit === "object") ? u.audit : {};
+    u.audit.updatedAt = now;
+    u.audit.updatedBy = actor;
+
+    if (nameChanged) pushHistory("users_update", "", 0, actor, `User uppdaterad: ${nextName}`);
+    else pushHistory("users_update", "", 0, actor, `Behörigheter uppdaterade: ${nextName}`);
+
+    const s = trySave();
+    notify();
+    if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+    return { ok: true };
   }
 
+  function setUserActive(userId, active) {
+    if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+    if (!can("users_manage")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (users_manage)." };
+
+    ensureUsersBaseline();
+
+    const u = _state.data.users.find(x => x && x.id === userId);
+    if (!u) return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "User hittades inte." };
+
+    const next = !!active;
+
+    if (!next) {
+      const activeCount = _state.data.users.filter(x => x && x.active).length;
+      if (activeCount <= 1 && u.active) {
+        return { ok: false, errorCode: FRZ_ERR.USER_INVALID, reason: "Minst en aktiv användare krävs." };
+      }
+    }
+
+    const now = nowIso();
+    const actor = getAuditActor();
+
+    u.active = next;
+    u.audit = (u.audit && typeof u.audit === "object") ? u.audit : {};
+    u.audit.updatedAt = now;
+    u.audit.updatedBy = actor;
+
+    pushHistory("users_toggle", "", 0, actor, `${u.firstName} är nu ${next ? "aktiv" : "inaktiv"}.`);
+
+    if (!u.active && _state.user && _state.user.activeUserId === u.id) {
+      _state.user.activeUserId = pickActiveUserForRole(_state.user.role, _state.data.users);
+    }
+
+    const s = trySave();
+    notify();
+    if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+    return { ok: true };
+  }
+
+  function ensureItemsBaseline() {
+    if (!_state || !_state.data) return;
+    if (!Array.isArray(_state.data.items)) _state.data.items = [];
+    _state.data.items = _state.data.items.map(normalizeItemAny).filter(Boolean);
+  }
+
+  function isArticleNoUnique(articleNo, excludeArticleNo) {
+    const items = (_state && _state.data && Array.isArray(_state.data.items)) ? _state.data.items : [];
+    return contractIsArticleNoUnique(articleNo, excludeArticleNo, items);
+  }
+
+  function canDeleteItemNow(articleNo) {
+    // STOCK_MOVES: FINNS INTE ÄN (hook)
+    return { ok: true };
+  }
+
+  function listItems(opts = {}) {
+    if (!_state || !_state.data || !Array.isArray(_state.data.items)) return [];
+    ensureItemsBaseline();
+
+    const includeInactive = ("includeInactive" in opts) ? !!opts.includeInactive : true;
+    const items = _state.data.items.filter(it => includeInactive ? true : !!it.isActive);
+
+    return deepClone(items) || [];
+  }
+
+  function getSortValue(it, key) {
+    const k = String(key || "");
+    if (k === "pricePerKg") return safeNum(it.pricePerKg, 0);
+    if (k === "minLevel") return safeNum(it.minLevel, 0);
+    if (k === "updatedAt") return safeStr(it.updatedAt) || (it.audit && it.audit.updatedAt) || "";
+    if (k === "supplier") return safeStr(it.supplier);
+    if (k === "category") return safeStr(it.category);
+    return safeStr(it.articleNo);
+  }
+
+  function queryItems(query = {}) {
+    if (!_state || !_state.data || !Array.isArray(_state.data.items)) return [];
+    ensureItemsBaseline();
+
+    const q = safeStr(query.q).toLocaleLowerCase("sv-SE");
+    const category = safeStr(query.category).toLocaleLowerCase("sv-SE");
+    const includeInactive = ("includeInactive" in query) ? !!query.includeInactive : true;
+    const sortKey = safeStr(query.sortKey) || "articleNo";
+    const sortDir = (safeStr(query.sortDir).toLowerCase() === "desc") ? "desc" : "asc";
+
+    let out = _state.data.items.slice();
+
+    if (!includeInactive) out = out.filter(it => !!it.isActive);
+
+    if (category) {
+      out = out.filter(it => safeStr(it.category).toLocaleLowerCase("sv-SE") === category);
+    }
+
+    if (q) {
+      out = out.filter(it => {
+        const a = safeStr(it.articleNo).toLocaleLowerCase("sv-SE");
+        const s = safeStr(it.supplier).toLocaleLowerCase("sv-SE");
+        const c = safeStr(it.category).toLocaleLowerCase("sv-SE");
+        return a.includes(q) || s.includes(q) || c.includes(q);
+      });
+    }
+
+    out.sort((x, y) => {
+      const ax = getSortValue(x, sortKey);
+      const ay = getSortValue(y, sortKey);
+
+      if (typeof ax === "number" && typeof ay === "number") {
+        return sortDir === "desc" ? (ay - ax) : (ax - ay);
+      }
+      const sx = String(ax ?? "").toLocaleLowerCase("sv-SE");
+      const sy = String(ay ?? "").toLocaleLowerCase("sv-SE");
+      if (sx < sy) return sortDir === "desc" ? 1 : -1;
+      if (sx > sy) return sortDir === "desc" ? -1 : 1;
+      return 0;
+    });
+
+    return deepClone(out) || [];
+  }
+
+  function createItem(input) {
+    if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+    if (!can("inventory_write")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (inventory_write)." };
+
+    ensureItemsBaseline();
+
+    const v = validateNewItem(input);
+    if (!v.ok) return { ok: false, errorCode: v.errorCode || FRZ_ERR.ITEM_INVALID, reason: v.reason || "Ogiltig item." };
+
+    if (!isArticleNoUnique(v.item.articleNo, null)) {
+      return { ok: false, errorCode: FRZ_ERR.ITEM_ARTICLE_NO_NOT_UNIQUE, reason: "articleNo måste vara unikt." };
+    }
+
+    const now = nowIso();
+    const actor = getAuditActor();
+
+    const item = normalizeItemAny({
+      articleNo: v.item.articleNo,
+      packSize: v.item.packSize,
+      supplier: v.item.supplier,
+      category: v.item.category,
+      pricePerKg: v.item.pricePerKg,
+      minLevel: v.item.minLevel,
+      tempClass: v.item.tempClass,
+      requiresExpiry: v.item.requiresExpiry,
+      isActive: v.item.isActive,
+      audit: { createdAt: now, updatedAt: now, createdBy: actor, updatedBy: actor },
+
+      // legacy extras (contract fyller/deriverar vid behov)
+      sku: v.item.articleNo,
+      name: deriveLegacyName(v.item),
+      unit: deriveLegacyUnit(v.item),
+      onHand: 0,
+      min: v.item.minLevel,
+      updatedAt: now
+    });
+
+    if (!item) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "Ogiltig item (normalize)." };
+
+    _state.data.items.push(item);
+    pushHistory("item_create", item.articleNo, 0, actor, `Produkt skapad: ${item.articleNo}`);
+
+    const s = trySave();
+    notify();
+    if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+    return { ok: true, articleNo: item.articleNo };
+  }
+
+  function updateItem(articleNo, patch) {
+    if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+    if (!can("inventory_write")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (inventory_write)." };
+
+    ensureItemsBaseline();
+
+    const key = safeStr(articleNo);
+    if (!key) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "articleNo krävs." };
+
+    const it = _state.data.items.find(x => x && safeStr(x.articleNo) === key) || null;
+    if (!it) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "Produkt hittades inte." };
+
+    if (patch && typeof patch === "object" && "articleNo" in patch) {
+      const attempted = safeStr(patch.articleNo);
+      if (attempted && attempted !== it.articleNo) {
+        return { ok: false, errorCode: FRZ_ERR.ITEM_ARTICLE_NO_IMMUTABLE, reason: "articleNo är immutable och kan inte ändras." };
+      }
+    }
+
+    const next = {
+      articleNo: it.articleNo,
+      packSize: ("packSize" in (patch || {})) ? safeStr(patch.packSize) : safeStr(it.packSize),
+      supplier: ("supplier" in (patch || {})) ? safeStr(patch.supplier) : safeStr(it.supplier),
+      category: ("category" in (patch || {})) ? safeStr(patch.category) : safeStr(it.category),
+      pricePerKg: ("pricePerKg" in (patch || {})) ? safeNum(patch.pricePerKg, NaN) : safeNum(it.pricePerKg, NaN),
+      minLevel: ("minLevel" in (patch || {})) ? safeInt(patch.minLevel, NaN) : safeInt(it.minLevel, NaN),
+      tempClass: ("tempClass" in (patch || {})) ? safeStr(patch.tempClass) : safeStr(it.tempClass),
+      requiresExpiry: ("requiresExpiry" in (patch || {})) ? !!patch.requiresExpiry : !!it.requiresExpiry,
+      isActive: ("isActive" in (patch || {})) ? !!patch.isActive : !!it.isActive
+    };
+
+    const v = validateNewItem(next);
+    if (!v.ok) return { ok: false, errorCode: v.errorCode || FRZ_ERR.ITEM_INVALID, reason: v.reason || "Ogiltig uppdatering." };
+
+    it.packSize = v.item.packSize;
+    it.supplier = v.item.supplier;
+    it.category = v.item.category;
+    it.pricePerKg = v.item.pricePerKg;
+    it.minLevel = v.item.minLevel;
+    it.tempClass = v.item.tempClass;
+    it.requiresExpiry = v.item.requiresExpiry;
+    it.isActive = v.item.isActive;
+
+    const now = nowIso();
+    const actor = getAuditActor();
+
+    it.audit = (it.audit && typeof it.audit === "object") ? it.audit : {};
+    it.audit.updatedAt = now;
+    it.audit.updatedBy = actor;
+
+    it.sku = it.articleNo;
+    it.name = deriveLegacyName(it);
+    it.unit = deriveLegacyUnit(it);
+    it.min = it.minLevel;
+    it.updatedAt = now;
+
+    pushHistory("item_update", it.articleNo, 0, actor, `Produkt uppdaterad: ${it.articleNo}`);
+
+    const s = trySave();
+    notify();
+    if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+    return { ok: true };
+  }
+
+  function archiveItem(articleNo) {
+    return updateItem(articleNo, { isActive: false });
+  }
+
+  function deleteItem(articleNo) {
+    if (!_state) return { ok: false, errorCode: FRZ_ERR.NOT_INIT, reason: "Ej initierad." };
+    if (_state.flags.locked) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Låst läge." };
+    if (_state.flags.readOnly) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Read-only." };
+    if (!can("inventory_write")) return { ok: false, errorCode: FRZ_ERR.FORBIDDEN, reason: "Saknar behörighet (inventory_write)." };
+
+    ensureItemsBaseline();
+
+    const key = safeStr(articleNo);
+    if (!key) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "articleNo krävs." };
+
+    const idx = _state.data.items.findIndex(x => x && safeStr(x.articleNo) === key);
+    if (idx < 0) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "Produkt hittades inte." };
+
+    const guard = canDeleteItemNow(key);
+    if (!guard.ok) {
+      return { ok: false, errorCode: FRZ_ERR.ITEM_DELETE_GUARDED, reason: guard.reason || "Delete spärrad." };
+    }
+
+    const actor = getAuditActor();
+    _state.data.items.splice(idx, 1);
+    pushHistory("item_delete", key, 0, actor, `Produkt borttagen: ${key}`);
+
+    const s = trySave();
+    notify();
+    if (!s.ok) return { ok: false, errorCode: FRZ_ERR.STORAGE_WRITE_BLOCKED, reason: s.reason || "Kunde inte spara." };
+    return { ok: true };
+  }
+
+  /* -----------------------------
+    BLOCK 9/9 — State factories (FLOW)
+  ----------------------------- */
+  function createEmptyState(role) {
+    const r = isValidRole(role) ? role : "ADMIN";
+    const state = {
+      meta: { schemaVersion: FRZ_SCHEMA_VERSION, createdAt: nowIso(), updatedAt: nowIso() },
+      user: { role: r, activeUserId: "" },
+      flags: { locked: false, lockReason: "", lockCode: "", readOnly: computeReadOnly(r) },
+      data: { items: [], history: [], users: createDefaultUsers() }
+    };
+    state.user.activeUserId = pickActiveUserForRole(r, state.data.users);
+    return state;
+  }
+
+  function createDemoState(role) {
+    const now = nowIso();
+    const r = isValidRole(role) ? role : "ADMIN";
+    const state = createEmptyState(r);
+
+    state.data.items = [
+      {
+        articleNo: "FZ-001",
+        packSize: "2kg",
+        supplier: "FoodSupplier AB",
+        category: "Kyckling",
+        pricePerKg: 89.0,
+        minLevel: 6,
+        tempClass: "FROZEN",
+        requiresExpiry: true,
+        isActive: true,
+        audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" },
+        sku: "FZ-001",
+        name: "FoodSupplier AB • Kyckling • 2kg",
+        unit: "fp",
+        onHand: 12,
+        min: 6,
+        updatedAt: now
+      },
+      {
+        articleNo: "FZ-002",
+        packSize: "150g",
+        supplier: "SeaTrade",
+        category: "Lax",
+        pricePerKg: 199.0,
+        minLevel: 30,
+        tempClass: "FROZEN",
+        requiresExpiry: true,
+        isActive: true,
+        audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" },
+        sku: "FZ-002",
+        name: "SeaTrade • Lax • 150g",
+        unit: "st",
+        onHand: 48,
+        min: 30,
+        updatedAt: now
+      },
+      {
+        articleNo: "FZ-003",
+        packSize: "1kg",
+        supplier: "VeggieCo",
+        category: "Grönsaker",
+        pricePerKg: 35.0,
+        minLevel: 10,
+        tempClass: "FROZEN",
+        requiresExpiry: false,
+        isActive: true,
+        audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" },
+        sku: "FZ-003",
+        name: "VeggieCo • Grönsaker • 1kg",
+        unit: "fp",
+        onHand: 20,
+        min: 10,
+        updatedAt: now
+      }
+    ].map(normalizeItemAny).filter(Boolean);
+
+    state.data.history = [normalizeHistory({ ts: now, type: "init_demo", sku: "", qty: 0, by: r, note: "Demo-data skapad." })];
+    state.user.activeUserId = pickActiveUserForRole(r, state.data.users);
+    return state;
+  }
+
+  function createLockedState(role, reason, code) {
+    const r = isValidRole(role) ? role : "ADMIN";
+    return {
+      meta: { schemaVersion: FRZ_SCHEMA_VERSION, createdAt: nowIso(), updatedAt: nowIso() },
+      user: { role: r, activeUserId: "" },
+      flags: { locked: true, lockReason: safeStr(reason) || "Låst läge.", lockCode: safeStr(code) || FRZ_ERR.INVALID_SHAPE, readOnly: true },
+      data: { items: [], history: [], users: createDefaultUsers() }
+    };
+  }
+
+  function isEmptyDataset(state) {
+    return !!state && state.data && Array.isArray(state.data.items) && state.data.items.length === 0;
+  }
 })();
