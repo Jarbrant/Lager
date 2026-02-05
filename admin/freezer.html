@@ -4,7 +4,8 @@ AUTOPATCH | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
 P0 FIX (DENNA PATCH):
-- Lägger till modal-shell (window.FreezerModal) via vanlig <script> (ej module).
+- Router-meny + router-root ska INTE vara hidden / display:none (orsak till “inga rutor”).
+- Behåller modal-shell (window.FreezerModal) via vanlig <script> (ej module).
 - Behåller ESM-moduler (view-interface/registry/vyer) som type="module".
 
 OBS:
@@ -117,7 +118,7 @@ OBS:
 
       <!-- ======================================================
       AO-02/15 — Ny shell-yta för router (meny + viewroot)
-      OBS: Denna ska visas när router är aktiv.
+      P0: ska vara synlig. (Tidigare: hidden + display:none gav “inga rutor”.)
       ======================================================= -->
       <section class="panel">
         <div class="row">
@@ -136,13 +137,13 @@ OBS:
           </div>
         </div>
 
-        <!-- ROUTER-MENY -->
-        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px; display:none;" hidden>
+        <!-- ROUTER-MENY (P0 FIX: INTE hidden / INTE display:none) -->
+        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;">
           <!-- Router fyller detta -->
         </div>
 
-        <!-- ROUTER-ROOT -->
-        <div id="freezerViewRoot" style="margin-top:10px; display:none;" hidden>
+        <!-- ROUTER-ROOT (P0 FIX: INTE hidden / INTE display:none) -->
+        <div id="freezerViewRoot" style="margin-top:10px;">
           <!-- Aktiv vy mountas här -->
         </div>
       </section>
