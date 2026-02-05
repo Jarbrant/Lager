@@ -6,6 +6,13 @@ P0-FIX:
 - Denna fil MÅSTE definiera window.FreezerStore.
 - Den får INTE råka innehålla admin/freezer.js (controller) — det orsakar FRZ_E_NOT_INIT.
 
+P0 SUPPLIERS (DENNA PATCH):
+- Lägger till "Leverantörsregister" UTAN nya storage-keys och UTAN att lägga ny top-level state-nyckel.
+- Vi återanvänder befintlig _state.history som källa (event-sourcing i minnet):
+  -> create/update supplier skriver ett "supplier"-event i history
+  -> listSuppliers() bygger leverantörslistan från history
+- Resultat: när supplier skapas/uppdateras -> notify() -> Sök Leverantör kan rendera direkt.
+
 POLICY (LÅST):
 - Inga nya storage-keys/datamodell
 - Fail-closed
@@ -13,7 +20,6 @@ POLICY (LÅST):
 
 Notis:
 - Detta är en robust baseline-store som kör "demo i minne".
-- Om ni redan har en Contract/Storage-nyckel i 04-contract.js kan den kopplas in senare.
 ============================================================ */
 (function () {
   "use strict";
@@ -33,6 +39,29 @@ Notis:
 
   function safeClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch { return obj; }
+  }
+
+  function normStr(v) {
+    return String(v || "").trim();
+  }
+
+  function normUpper(v) {
+    return String(v || "").trim().toUpperCase();
+  }
+
+  function normEmail(v) {
+    const s = normStr(v);
+    return s;
+  }
+
+  function normPhone(v) {
+    const s = normStr(v);
+    return s;
+  }
+
+  function normOrg(v) {
+    // Bevarar bara trim – formatvalidering görs i UI om ni vill.
+    return normStr(v);
   }
 
   // ------------------------------------------------------------
@@ -117,6 +146,138 @@ Notis:
   }
 
   // ------------------------------------------------------------
+  // SUPPLIERS (P0) — byggs från history (ingen ny state-nyckel)
+  // ------------------------------------------------------------
+  function isSupplierEvent(ev) {
+    try {
+      if (!ev) return false;
+      if (String(ev.type || "") !== "supplier") return false;
+      const m = ev.meta && typeof ev.meta === "object" ? ev.meta : null;
+      const s = m && m.supplier && typeof m.supplier === "object" ? m.supplier : null;
+      return !!s;
+    } catch {
+      return false;
+    }
+  }
+
+  function getSuppliersSnapshotFromHistory() {
+    // Event-sourcing: senaste event per supplierId gäller.
+    const byId = Object.create(null);
+
+    const hist = Array.isArray(_state.history) ? _state.history : [];
+    // history är "nyast först" (unshift). Vi vill applicera från äldst -> nyast för korrekt "senast vinner".
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const ev = hist[i];
+      if (!isSupplierEvent(ev)) continue;
+
+      const meta = ev.meta || {};
+      const sup = meta.supplier || {};
+      const id = normStr(sup.id);
+      if (!id) continue;
+
+      // action kan vara: "upsert" | "setActive"
+      const action = normStr(meta.action || "upsert");
+
+      if (action === "setActive") {
+        const cur = byId[id] || {};
+        byId[id] = Object.assign({}, cur, { id: id, active: !!sup.active, updatedAt: ev.at || nowIso() });
+        continue;
+      }
+
+      // upsert
+      const next = {
+        id: id,
+        companyName: normStr(sup.companyName),
+        orgNo: normOrg(sup.orgNo),
+        contactPerson: normStr(sup.contactPerson),
+        phone: normPhone(sup.phone),
+        email: normEmail(sup.email),
+        address: normStr(sup.address),
+        notes: normStr(sup.notes),
+        active: ("active" in sup) ? !!sup.active : true,
+        createdAt: sup.createdAt ? String(sup.createdAt) : (ev.at || nowIso()),
+        updatedAt: ev.at || nowIso()
+      };
+
+      // bevara createdAt om vi redan har en
+      if (byId[id] && byId[id].createdAt) next.createdAt = byId[id].createdAt;
+
+      byId[id] = next;
+    }
+
+    // till lista
+    const list = Object.values(byId);
+
+    // sort: företag A-Ö
+    list.sort((a, b) => {
+      const an = String(a.companyName || "").toLowerCase();
+      const bn = String(b.companyName || "").toLowerCase();
+      if (an < bn) return -1;
+      if (an > bn) return 1;
+      return String(a.orgNo || "").localeCompare(String(b.orgNo || ""));
+    });
+
+    return list;
+  }
+
+  function findSupplierByOrgNo(orgNo) {
+    const want = normOrg(orgNo);
+    if (!want) return null;
+    const list = getSuppliersSnapshotFromHistory();
+    return list.find(s => s && normOrg(s.orgNo) === want) || null;
+  }
+
+  function findSupplierById(id) {
+    const want = normStr(id);
+    if (!want) return null;
+    const list = getSuppliersSnapshotFromHistory();
+    return list.find(s => s && normStr(s.id) === want) || null;
+  }
+
+  function validateSupplierInput(data, mode) {
+    const d = (data && typeof data === "object") ? data : {};
+
+    const companyName = normStr(d.companyName);
+    const orgNo = normOrg(d.orgNo);
+
+    // KRAV: Företagsnamn + Org
+    if (!companyName) return { ok: false, reason: "Företagsnamn krävs." };
+    if (!orgNo) return { ok: false, reason: "Org-nr krävs." };
+
+    const contactPerson = normStr(d.contactPerson);
+    const phone = normPhone(d.phone);
+    const email = normEmail(d.email);
+    const address = normStr(d.address);
+    const notes = normStr(d.notes);
+
+    // Email enkel sanity (valfritt, fail-soft)
+    if (email && !email.includes("@")) return { ok: false, reason: "Mail verkar ogiltig." };
+
+    // Unikhet: orgNo måste vara unik (oavsett active)
+    const existing = findSupplierByOrgNo(orgNo);
+    if (existing) {
+      if (mode === "create") return { ok: false, reason: "Org-nr finns redan." };
+      if (mode === "update") {
+        const updId = normStr(d.id);
+        if (updId && existing.id !== updId) return { ok: false, reason: "Org-nr finns redan på annan leverantör." };
+      }
+    }
+
+    return {
+      ok: true,
+      supplier: {
+        companyName,
+        orgNo,
+        contactPerson,
+        phone,
+        email,
+        address,
+        notes
+      }
+    };
+  }
+
+  // ------------------------------------------------------------
   // Demo baseline (in-memory)
   // ------------------------------------------------------------
   function seedDemo() {
@@ -132,6 +293,9 @@ Notis:
 
     _state.history = [];
     addHistory("info", "Demo initierad (in-memory).", { role: _state.role });
+
+    // OBS: Vi seedar INTE leverantörer separat (ingen ny state-nyckel).
+    // Vill ni ha demo-suppliers kan ni lägga in supplier-events här via addHistory("supplier", ...).
   }
 
   // ------------------------------------------------------------
@@ -213,6 +377,103 @@ Notis:
       if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
 
       seedDemo();
+      notify();
+      return { ok: true };
+    },
+
+    // ----------------------------------------------------------
+    // Suppliers API (P0) — använder history som källa
+    // ----------------------------------------------------------
+    listSuppliers(opts) {
+      // opts: { includeInactive?: boolean }
+      const includeInactive = !!(opts && opts.includeInactive);
+      const list = getSuppliersSnapshotFromHistory();
+      const out = includeInactive ? list : list.filter(s => s && s.active !== false);
+      return safeClone(out);
+    },
+
+    createSupplier(data) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
+      if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
+
+      // Vi återanvänder inventory_write som write-gate för inköp/admin.
+      if (!FreezerStore.can("inventory_write")) return { ok: false, reason: "Saknar behörighet (inventory_write)." };
+
+      const v = validateSupplierInput(data, "create");
+      if (!v.ok) return { ok: false, reason: v.reason || "Ogiltig leverantör." };
+
+      const s = v.supplier;
+      const supplierId = uid("sup");
+
+      const supplier = {
+        id: supplierId,
+        companyName: s.companyName,
+        orgNo: s.orgNo,
+        contactPerson: s.contactPerson,
+        phone: s.phone,
+        email: s.email,
+        address: s.address,
+        notes: s.notes,
+        active: true,
+        createdAt: nowIso()
+      };
+
+      addHistory("supplier", "Leverantör skapad.", { action: "upsert", supplier: supplier });
+      notify();
+      return { ok: true, supplier: safeClone(supplier) };
+    },
+
+    updateSupplier(supplierId, patch) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
+      if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
+      if (!FreezerStore.can("inventory_write")) return { ok: false, reason: "Saknar behörighet (inventory_write)." };
+
+      const id = normStr(supplierId);
+      if (!id) return { ok: false, reason: "supplierId saknas." };
+
+      const cur = findSupplierById(id);
+      if (!cur) return { ok: false, reason: "Leverantör hittades inte." };
+
+      // validera med sammanslagen data (så orgNo-unicitet funkar)
+      const merged = Object.assign({}, cur, (patch && typeof patch === "object" ? patch : {}), { id: id });
+      const v = validateSupplierInput(merged, "update");
+      if (!v.ok) return { ok: false, reason: v.reason || "Ogiltig leverantör." };
+
+      const s = v.supplier;
+
+      const supplier = {
+        id: id,
+        companyName: s.companyName,
+        orgNo: s.orgNo,
+        contactPerson: s.contactPerson,
+        phone: s.phone,
+        email: s.email,
+        address: s.address,
+        notes: s.notes,
+        active: ("active" in merged) ? !!merged.active : (cur.active !== false),
+        createdAt: cur.createdAt || nowIso()
+      };
+
+      addHistory("supplier", "Leverantör uppdaterad.", { action: "upsert", supplier: supplier });
+      notify();
+      return { ok: true, supplier: safeClone(supplier) };
+    },
+
+    setSupplierActive(supplierId, active) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
+      if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
+      if (!FreezerStore.can("inventory_write")) return { ok: false, reason: "Saknar behörighet (inventory_write)." };
+
+      const id = normStr(supplierId);
+      if (!id) return { ok: false, reason: "supplierId saknas." };
+
+      const cur = findSupplierById(id);
+      if (!cur) return { ok: false, reason: "Leverantör hittades inte." };
+
+      addHistory("supplier", "Leverantör aktiv-status ändrad.", { action: "setActive", supplier: { id: id, active: !!active } });
       notify();
       return { ok: true };
     },
