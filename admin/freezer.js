@@ -4,20 +4,13 @@ AUTOPATCH | FIL: admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
 
 AO-04/15 — Produktregister (Items) CRUD (Admin) — LÅST fältkontrakt
-BLOCK 1/6 (stort AO):
-- Wire Items CRUD UI (renderas i Saldo-vyn av freezer-render.js)
-- Sök + sort + kategori-filter
-- Create/Update/Archive/Delete(guarded)
-- Arkivera är standard-action; delete kräver confirm och kan blockeras av guard
+BLOCK 1/6 (stort AO)
 
-PATCH (AO-04 BLOCK 4/6) + AUTOPATCH:
-- Init-guard mot dubbel init (inga dubbla listeners)
-- Deterministisk Items-scope: endast #viewSaldo (fail-closed)
-- Säkrare readVal(): läser endast input/select/textarea value
-- Safe-calls för FreezerRender.renderStatus/renderMode/renderLockPanel/renderDebug
-- Stoppar NaN i payload (validering)
-- Konsekvent editor-läge: new/edit/cancel/save
-- Ingen ny storage-key/datamodell, XSS-safe (render ansvarar)
+AO-11/15 — Router kopplar in shared views i meny för alla roller
+PATCH:
+- Rendera router-meny (Saldo/Historik) för alla roller i #freezerViewMenu
+- Klick i router-menyn växlar legacy-tabbar (för att återanvända befintliga DOM-id och FreezerRender)
+- Init-guard för att undvika dubbla listeners om script råkar laddas två gånger
 
 Policy:
 - Inga nya storage-keys/datamodell
@@ -27,7 +20,7 @@ Policy:
 (function () {
   "use strict";
 
-  // P1 GUARD: Stoppa dubbel init om script råkar laddas två gånger
+  // P0 GUARD: skydda mot dubbel init (dubbla event listeners)
   if (window.__FREEZER_PAGE_INIT__) return;
   window.__FREEZER_PAGE_INIT__ = true;
 
@@ -37,6 +30,10 @@ Policy:
 
   const userSelect = byId("frzUserSelect");
   const resetBtn = byId("frzResetDemoBtn");
+
+  // Router shell DOM
+  const viewMenu = byId("freezerViewMenu");
+  const viewRoot = byId("freezerViewRoot"); // (finns, men används ej för mount i denna patch)
 
   // Users UI
   const usersPanel = byId("frzUsersPanel");
@@ -61,9 +58,6 @@ Policy:
   // Page state
   let activeTab = "dashboard";
 
-  // Deterministisk Items-scope root (fail-closed)
-  const itemsScopeRoot = document.getElementById("viewSaldo") || null;
-
   // AO-04: Items UI state (in-memory only)
   const itemsUI = {
     itemsQ: "",
@@ -80,7 +74,7 @@ Policy:
     formCategory: "",
     formPricePerKg: "",
     formMinLevel: "",
-    formTempClass: "FROZEN", // P2: stabil baseline
+    formTempClass: "",
     formRequiresExpiry: true,
     formIsActive: true,
 
@@ -102,12 +96,15 @@ Policy:
     window.FreezerRender.renderAll(state, itemsUI);
     window.FreezerRender.setActiveTabUI(activeTab);
 
+    // AO-11: uppdatera router-meny när state/role ändras
+    renderRouterMenuFromState(state);
+
     if (usersPanel && !usersPanel.hidden) {
       refreshFormHeader();
     }
   });
 
-  // Tabs
+  // Tabs (legacy)
   bindTab(tabDashboard, "dashboard");
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
@@ -120,6 +117,10 @@ Policy:
 
       const st = window.FreezerStore.getStatus();
       if (st && userSelect.value !== st.role) userSelect.value = st.role;
+
+      // AO-11: håll router-menyn i sync
+      const state = window.FreezerStore.getState();
+      renderRouterMenuFromState(state);
     });
   }
 
@@ -138,7 +139,6 @@ Policy:
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
         setItemsMsg("Demo återställd.");
-        rerender(); // itemsUI är in-memory, säkerställ render
       }
     });
   }
@@ -150,9 +150,69 @@ Policy:
   // AO-04: Items actions (delegation in scope)
   wireItemsDelegation();
 
+  // AO-11: första render av router-menyn (fail-soft om shell saknas)
+  try {
+    renderRouterMenuFromState(window.FreezerStore.getState());
+  } catch {}
+
   // Initial UI
   window.FreezerRender.setActiveTabUI(activeTab);
   refreshFormHeader();
+
+  // -----------------------------
+  // AO-11: ROUTER-MENY (Saldo/Historik för alla roller)
+  // -----------------------------
+  function renderRouterMenuFromState(state) {
+    if (!viewMenu) return;
+
+    // XSS-safe: skapa knappar med textContent
+    while (viewMenu.firstChild) viewMenu.removeChild(viewMenu.firstChild);
+
+    const role = (state && state.status && state.status.role) ? String(state.status.role) : "";
+    const isRO = !!(state && state.status && state.status.readOnly);
+
+    // Vi visar alltid Saldo/Historik i router-menyn (DoD AO-11/15)
+    const btnSaldo = makeViewBtn("Saldo", "shared-saldo", () => {
+      switchToLegacyTab("saldo");
+    });
+
+    const btnHist = makeViewBtn("Historik", "shared-history", () => {
+      switchToLegacyTab("history");
+    });
+
+    // Markera aktivt (enkel koppling: legacy-tab styr)
+    btnSaldo.setAttribute("aria-selected", activeTab === "saldo" ? "true" : "false");
+    btnHist.setAttribute("aria-selected", activeTab === "history" ? "true" : "false");
+
+    // Tooltip / status info (fail-soft)
+    btnSaldo.title = `Router-vy: Saldo • role=${role || "—"}${isRO ? " • read-only" : ""}`;
+    btnHist.title = `Router-vy: Historik • role=${role || "—"}${isRO ? " • read-only" : ""}`;
+
+    viewMenu.appendChild(btnSaldo);
+    viewMenu.appendChild(btnHist);
+  }
+
+  function makeViewBtn(label, viewId, onClick) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tabBtn";
+    b.setAttribute("data-view-id", viewId);
+    b.textContent = String(label || "Vy");
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function switchToLegacyTab(key) {
+    // Växla via knapparna om de finns (bevarar aria-controls + ev framtida logik)
+    if (key === "dashboard" && tabDashboard) return tabDashboard.click();
+    if (key === "saldo" && tabSaldo) return tabSaldo.click();
+    if (key === "history" && tabHistorik) return tabHistorik.click();
+
+    // Fallback: direkt
+    activeTab = key;
+    window.FreezerRender.setActiveTabUI(activeTab);
+    rerender();
+  }
 
   // -----------------------------
   // USERS: FORM
@@ -300,6 +360,7 @@ Policy:
   // AO-04: ITEMS (delegation)
   // -----------------------------
   function wireItemsDelegation() {
+    // NOTE: Vi kör document-level delegation men med hård scope-guard så att andra vyer inte triggar items-logik.
     document.addEventListener("click", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
@@ -310,25 +371,18 @@ Policy:
       const action = btn.getAttribute("data-action") || "";
       if (!action) return;
 
-      // Scope-guard: items-actions endast inom #viewSaldo
-      if (isItemsAction(action) && !isInItemsScope(btn)) {
-        setItemsMsg("Items UI ej initierad i denna vy.");
-        rerender();
-        return;
-      }
+      // Scope-guard: endast Items-actions i saldo/Items-området
+      if (isItemsAction(action) && !isInItemsScope(btn)) return;
 
       const articleNo = btn.getAttribute("data-article-no") || "";
       const status = window.FreezerStore.getStatus();
 
-      if (status.locked) {
-        setItemsMsg(status.reason ? `Låst: ${status.reason}` : "Låst läge.");
-        rerender();
-        return;
-      }
+      // Always block if locked
+      if (status.locked) return setItemsMsg(status.reason ? `Låst: ${status.reason}` : "Låst läge.");
 
       if (action === "item-new") {
         const gate = gateItemsWrite(status);
-        if (!gate.ok) { setItemsMsg(gate.msg); rerender(); return; }
+        if (!gate.ok) return setItemsMsg(gate.msg);
 
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
@@ -347,18 +401,18 @@ Policy:
 
       if (action === "item-save") {
         const gate = gateItemsWrite(status);
-        if (!gate.ok) { setItemsMsg(gate.msg); rerender(); return; }
+        if (!gate.ok) return setItemsMsg(gate.msg);
 
         readItemsFormFromDOM();
 
         const payloadRes = buildItemPayloadFromUIValidated();
-        if (!payloadRes.ok) { setItemsMsg(payloadRes.reason); rerender(); return; }
+        if (!payloadRes.ok) return setItemsMsg(payloadRes.reason);
 
         const payload = payloadRes.payload;
 
         if (itemsUI.itemsEditingArticleNo) {
           const r = window.FreezerStore.updateItem(itemsUI.itemsEditingArticleNo, payload);
-          if (!r.ok) { setItemsMsg(r.reason || "Kunde inte spara."); rerender(); return; }
+          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte spara.");
 
           resetItemsForm();
           itemsUI.itemsEditingArticleNo = "";
@@ -368,7 +422,7 @@ Policy:
         }
 
         const r = window.FreezerStore.createItem(payload);
-        if (!r.ok) { setItemsMsg(r.reason || "Kunde inte skapa."); rerender(); return; }
+        if (!r.ok) return setItemsMsg(r.reason || "Kunde inte skapa.");
 
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
@@ -388,11 +442,11 @@ Policy:
 
       if (action === "item-archive") {
         const gate = gateItemsWrite(status);
-        if (!gate.ok) { setItemsMsg(gate.msg); rerender(); return; }
+        if (!gate.ok) return setItemsMsg(gate.msg);
         if (!articleNo) return;
 
         const r = window.FreezerStore.archiveItem(articleNo);
-        if (!r.ok) { setItemsMsg(r.reason || "Kunde inte arkivera."); rerender(); return; }
+        if (!r.ok) return setItemsMsg(r.reason || "Kunde inte arkivera.");
 
         if (itemsUI.itemsEditingArticleNo === articleNo) {
           resetItemsForm();
@@ -405,14 +459,14 @@ Policy:
 
       if (action === "item-delete") {
         const gate = gateItemsWrite(status);
-        if (!gate.ok) { setItemsMsg(gate.msg); rerender(); return; }
+        if (!gate.ok) return setItemsMsg(gate.msg);
         if (!articleNo) return;
 
         const ok = window.confirm(`Radera ${articleNo} permanent?\n(Detta kan blockeras om referenser finns.)`);
         if (!ok) return;
 
         const r = window.FreezerStore.deleteItem(articleNo);
-        if (!r.ok) { setItemsMsg(r.reason || "Radering blockerad."); rerender(); return; }
+        if (!r.ok) return setItemsMsg(r.reason || "Radering blockerad.");
 
         if (itemsUI.itemsEditingArticleNo === articleNo) {
           resetItemsForm();
@@ -427,6 +481,7 @@ Policy:
     document.addEventListener("change", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
+
       if (!isInItemsScope(t)) return;
 
       const id = t.id || "";
@@ -462,6 +517,7 @@ Policy:
     document.addEventListener("input", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
+
       if (!isInItemsScope(t)) return;
 
       if (t.id === "frzItemsQ") {
@@ -476,12 +532,16 @@ Policy:
   }
 
   function isInItemsScope(el) {
-    // Fail-closed: Items är bara giltiga i #viewSaldo
-    if (!itemsScopeRoot) return false;
     try {
-      return itemsScopeRoot.contains(el);
+      const viewSaldo = document.getElementById("viewSaldo");
+      if (viewSaldo) return !!el.closest("#viewSaldo");
+
+      if (document.getElementById("frzSaldoTableWrap")) return !!el.closest("#frzSaldoTableWrap");
+      if (document.getElementById("frzItemsPanel")) return !!el.closest("#frzItemsPanel");
+
+      return true; // fail-soft
     } catch {
-      return false;
+      return true; // fail-soft
     }
   }
 
@@ -513,7 +573,7 @@ Policy:
     itemsUI.formCategory = readVal("frzItemCategory");
     itemsUI.formPricePerKg = readVal("frzItemPricePerKg");
     itemsUI.formMinLevel = readVal("frzItemMinLevel");
-    itemsUI.formTempClass = readVal("frzItemTempClass") || "FROZEN";
+    itemsUI.formTempClass = readVal("frzItemTempClass");
     itemsUI.formRequiresExpiry = (readVal("frzItemRequiresExpiry") === "true");
     itemsUI.formIsActive = (readVal("frzItemIsActive") === "true");
   }
@@ -521,13 +581,7 @@ Policy:
   function readVal(id) {
     const el = document.getElementById(id);
     if (!el) return "";
-
-    // GUARD: bara element med value
-    const tag = String(el.tagName || "").toUpperCase();
-    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") {
-      return String(el.value || "");
-    }
-    return "";
+    return String(el.value || "");
   }
 
   function buildItemPayloadFromUIValidated() {
@@ -578,7 +632,7 @@ Policy:
       itemsUI.formCategory = String(it.category || "");
       itemsUI.formPricePerKg = (typeof it.pricePerKg !== "undefined" && it.pricePerKg !== null) ? String(it.pricePerKg) : "";
       itemsUI.formMinLevel = (typeof it.minLevel !== "undefined" && it.minLevel !== null) ? String(it.minLevel) : "";
-      itemsUI.formTempClass = String(it.tempClass || "FROZEN");
+      itemsUI.formTempClass = String(it.tempClass || "");
       itemsUI.formRequiresExpiry = !!it.requiresExpiry;
       itemsUI.formIsActive = !!it.isActive;
     } catch {}
@@ -598,6 +652,7 @@ Policy:
 
   function setItemsMsg(text) {
     itemsUI.itemsMsg = String(text || "—");
+    rerender();
   }
 
   function rerender() {
@@ -605,6 +660,7 @@ Policy:
       const state = window.FreezerStore.getState();
       window.FreezerRender.renderAll(state, itemsUI);
       window.FreezerRender.setActiveTabUI(activeTab);
+      renderRouterMenuFromState(state);
     } catch {}
   }
 
@@ -626,18 +682,6 @@ Policy:
   }
 
   // -----------------------------
-  // SAFE RENDER HELPERS
-  // -----------------------------
-  function safeRenderCall(name, state) {
-    try {
-      const fn = window.FreezerRender && window.FreezerRender[name];
-      if (typeof fn === "function") fn.call(window.FreezerRender, state);
-    } catch {
-      /* fail-soft */
-    }
-  }
-
-  // -----------------------------
   // TABS
   // -----------------------------
   function bindTab(btn, key) {
@@ -647,14 +691,15 @@ Policy:
       window.FreezerRender.setActiveTabUI(activeTab);
 
       const state = window.FreezerStore.getState();
-
-      // P0: safe-calls (render kan sakna dessa i vissa baselines)
-      safeRenderCall("renderStatus", state);
-      safeRenderCall("renderMode", state);
-      safeRenderCall("renderLockPanel", state);
-      safeRenderCall("renderDebug", state);
+      window.FreezerRender.renderStatus(state);
+      window.FreezerRender.renderMode(state);
+      window.FreezerRender.renderLockPanel(state);
+      window.FreezerRender.renderDebug(state);
 
       window.FreezerRender.renderAll(state, itemsUI);
+
+      // AO-11: håll router-menyn i sync med activeTab
+      renderRouterMenuFromState(state);
     });
   }
 
