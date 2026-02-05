@@ -172,6 +172,18 @@ Taggar:
   /* -----------------------------
     BLOCK 5/10 — Items normalize (legacy + new)
   ----------------------------- */
+
+  // NOTE (GUARD): Core har normKey/safeStr, men normalizeArticleNo kan saknas.
+  // Vi håller detta helt lokalt för att inte krascha vid refactor-split.
+  function normalizeArticleNo(v) {
+    const raw = C.safeStr(v).trim();
+    if (!raw) return "";
+    // Tillåt A–Z 0–9 - _ (uppercase)
+    const up = raw.toUpperCase();
+    if (!/^[A-Z0-9\-_]+$/.test(up)) return "";
+    return up;
+  }
+
   function normalizeTempClass(v) {
     const s = C.safeStr(v).toUpperCase();
     if (FRZ_TEMP_CLASSES.includes(s)) return s;
@@ -198,7 +210,7 @@ Taggar:
   }
 
   function normalizeItemNew(it) {
-    const articleNo = C.normalizeArticleNo(it && it.articleNo);
+    const articleNo = normalizeArticleNo(it && it.articleNo);
     if (!articleNo) return null;
 
     const packSize = C.safeStr(it.packSize);
@@ -255,11 +267,11 @@ Taggar:
     if (!it || typeof it !== "object") return null;
 
     // New shape first
-    const aNo = C.safeStr(it.articleNo);
-    if (aNo) return normalizeItemNew(it);
+    const aNo = normalizeArticleNo(it.articleNo);
+    if (aNo) return normalizeItemNew(Object.assign({}, it, { articleNo: aNo }));
 
     // Legacy shape
-    const sku = C.safeStr(it.sku);
+    const sku = normalizeArticleNo(it.sku);
     const name = C.safeStr(it.name);
     if (!sku || !name) return null;
 
@@ -303,7 +315,7 @@ Taggar:
     const x = (input && typeof input === "object") ? input : null;
     if (!x) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "Ogiltigt input." };
 
-    const articleNo = C.normalizeArticleNo(x.articleNo);
+    const articleNo = normalizeArticleNo(x.articleNo);
     if (!articleNo) return { ok: false, errorCode: FRZ_ERR.ITEM_INVALID, reason: "articleNo krävs (A–Z 0–9 - _)." };
 
     const packSize = C.safeStr(x.packSize);
