@@ -1,1 +1,27 @@
+Lager/
+├─ 🟩 UI/                                   (🧩 stödfiler: delad logik för alla roller)
+│  ├─ 🟩 freezer-store.js                    (🧩 äldre baseline store-hook / kompat)
+│  ├─ 🟩 freezer-render.js                   (🧩 delad rendering: Saldo/Historik/UI-hjälpare)
+│  ├─ 🟩 freezer-dashboard.js                (🧩 statistik/beräkningar för dashboard)
+│  └─ 🟩 pages/
+│     └─ 🟩 freezer/
+│        ├─ 🟩 02-core.js                    (🧩 core helpers: safe*, id, parse, utils)
+│        ├─ 🟩 03-store.js                   (🧩 nya store-API:t (public store surface))
+│        ├─ 🟩 04-contract.js                (🧩 kontrakt/guards/validering/enums)
+│        ├─ 🆕 admin/                        (🧩 vy-moduler: ADMIN)
+│        │  ├─ 🆕 admin-items.js             (🧩 ADMIN vy: produktregister/items CRUD)
+│        │  ├─ 🆕 admin-locations.js         (🧩 ADMIN vy: platser/lagerzoner)
+│        │  ├─ 🆕 admin-users.js             (🧩 ADMIN vy: users + rättigheter)
+│        │  └─ 🆕 admin-settings.js          (🧩 ADMIN vy: inställningar / demo / policy)
+│        ├─ 🆕 buyer/                        (🧩 vy-moduler: INKÖPARE)
+│        │  └─ 🆕 buyer-in.js                (🧩 INKÖP vy: inleveranser / intag)
+│        └─ 🆕 picker/                       (🧩 vy-moduler: PLOCKARE)
+│           └─ 🆕 picker-out.js              (🧩 PLOCK vy: uttag/plock)
+│
+├─ 🟩 admin/                                 (👁 + 🧩 “shell” + router för fryslager)
+│  ├─ 🟩 freezer.html                         (👁 PUBLIK SIDA: enda URL för fryslagret)
+│  └─ 🟩 freezer.js                           (🧩 ROUTER: väljer vy utifrån role/perms)
+│
+├─ 🟩 index.html                              (👁 PUBLIK: start/landing/meny)
+└─ 🟩 readme                                  (🧩 dokumentation)
 
