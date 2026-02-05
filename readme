@@ -1,29 +1,37 @@
-Lager/
-├─ 🟩 UI/                                   (🧩 stödfiler: delad logik för alla roller)
-│  ├─ 🟩 freezer-store.js                    (🧩 äldre baseline store-hook / kompat)
-│  ├─ 🟩 freezer-render.js                   (🧩 delad rendering: Saldo/Historik/UI-hjälpare)
-│  ├─ 🟩 freezer-dashboard.js                (🧩 statistik/beräkningar för dashboard)
-│  └─ 🟩 pages/
-│     └─ 🟩 freezer/
-│        ├─ 🟩 02-core.js                    (🧩 core helpers: safe*, id, parse, utils)
-│        ├─ 🟩 03-store.js                   (🧩 nya store-API:t (public store surface))
-│        ├─ 🟩 04-contract.js                (🧩 kontrakt/guards/validering/enums)
-│        ├─ 🆕 admin/                        (🧩 vy-moduler: ADMIN)
-│        │  ├─ 🆕 admin-items.js             (🧩 ADMIN vy: produktregister/items CRUD)
-│        │  ├─ 🆕 admin-locations.js         (🧩 ADMIN vy: platser/lagerzoner)
-│        │  ├─ 🆕 admin-users.js             (🧩 ADMIN vy: users + rättigheter)
-│        │  └─ 🆕 admin-settings.js          (🧩 ADMIN vy: inställningar / demo / policy)
-│        ├─ 🆕 buyer/                        (🧩 vy-moduler: INKÖPARE)
-│        │  └─ 🆕 buyer-in.js                (🧩 INKÖP vy: inleveranser / intag)
-│        └─ 🆕 picker/                       (🧩 vy-moduler: PLOCKARE)
-│           └─ 🆕 picker-out.js              (🧩 PLOCK vy: uttag/plock)
+Lager/  (repo-root)
+├─ 🟩 index.html                     [PUBLIK] Entré/länkning (start)
+├─ 🟩 readme                         [STÖD] Dokumentation
+├─ 🟩 admin/                         [PUBLIK-MAPP] Sidor man kan öppna i webben
+│  ├─ 🟩 freezer.html                [PUBLIK][SHELL] Fryslager-sidan (gemensam URL)
+│  ├─ 🟩 freezer.js                  [ROUTER] Controller/router (ska bli “vy-router”)
+│  ├─ 🟩 freezer-store.js            [STÖD] (DUPLIKAT?) Äldre/alternativ store (städ senare)
+│  ├─ 🟩 freezer-render.js           [STÖD] (DUPLIKAT?) Äldre/alternativ render (städ senare)
+│  └─ 🟩 freezer-dashboard.js        [STÖD] (DUPLIKAT?) Äldre/alternativ dashboard (städ senare)
 │
-├─ 🟩 admin/                                 (👁 + 🧩 “shell” + router för fryslager)
-│  ├─ 🟩 freezer.html                         (👁 PUBLIK SIDA: enda URL för fryslagret)
-│  └─ 🟩 freezer.js                           (🧩 ROUTER: väljer vy utifrån role/perms)
-│
-├─ 🟩 index.html                              (👁 PUBLIK: start/landing/meny)
-└─ 🟩 readme                                  (🧩 dokumentation)
+└─ 🟩 UI/                            [STÖD-MAPP] Delad UI-kod (ska återanvändas av alla roller)
+   ├─ 🟩 freezer-store.js             [STÖD] Bas-store (legacy) / delad API-yta
+   ├─ 🟩 freezer-render.js            [STÖD] Render helpers (tabeller/listor), XSS-safe
+   ├─ 🟩 freezer-dashboard.js         [STÖD] Statistik/beräkningar (delad)
+   │
+   └─ 🟩 pages/
+      └─ 🟩 freezer/
+         ├─ 🟩 02-core.js             [STÖD] Core helpers/guards (måste laddas tidigt)
+         ├─ 🟩 03-store.js            [STÖD] Split-store (public store API, RBAC, CRUD)
+         ├─ 🟩 04-contract.js         [STÖD] Kontrakt/validering/normalizers (fail-closed)
+         │
+         ├─ 🆕 shared/                [VY-STÖD] Delade vyer (saldo/historik) + RBAC-styrda actions
+         │  ├─ 🆕 saldo-view.js        [VY] Saldo (delad) – läser perms, visar actions om tillåtet
+         │  └─ 🆕 historik-view.js     [VY] Historik (delad) – filtrerar/visar enligt roll/perms
+         │
+         ├─ 🆕 admin/                 [VY] ADMIN-specifika vyer (dashboard m.m.)
+         │  └─ 🆕 dashboard.js         [VY] Admin Dashboard (egen)
+         │
+         ├─ 🆕 buyer/                 [VY] INKÖPARE-specifika vyer
+         │  └─ 🆕 dashboard.js         [VY] Buyer Dashboard (egen)
+         │
+         └─ 🆕 picker/                [VY] PLOCK-specifika vyer
+            └─ 🆕 dashboard.js        [VY] Picker Dashboard (egen)
+
 UI/pages/freezer/
 ├─ shared/
 │  ├─ saldo-view.js        (delad vy: tabell + sök/sort/filter; RBAC styr actions)
