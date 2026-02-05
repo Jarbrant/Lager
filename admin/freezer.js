@@ -3,23 +3,28 @@ AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 4/4
 AUTOPATCH | FIL: admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
 
-AO-13/15 — Flytta Users CRUD från router till admin-users view
-- Users CRUD wiring flyttas från denna fil till UI/pages/freezer/admin/admin-users.js
-- Denna fil ska vara tunn och endast bootstrap + legacy tabs + role/reset + render
+AO-04/15 — Produktregister (Items) CRUD (Admin) — delegation (tills flytt i AO-12)
+AO-15/15 — QA-stabilisering:
+- Inga dubbla listeners vid vybyte / dubbel script-load (init-guard)
+- Korrupt storage -> read-only men navigation funkar (shim-store fail-soft)
+- Robust scope-guard + readVal
 
 Policy:
 - Inga nya storage-keys/datamodell
-- XSS-safe (render sköter textContent; controller använder textContent)
+- XSS-safe (render sköter textContent)
 ============================================================ */
 
 (function () {
   "use strict";
 
-  // ----------------------------------------------------------
-  // P1 GUARD: skydda mot dubbel init (dubbla listeners)
-  // ----------------------------------------------------------
-  if (window.__FREEZER_ADMIN_PAGE_INIT__) return;
-  window.__FREEZER_ADMIN_PAGE_INIT__ = true;
+  // ------------------------------------------------------------
+  // AO-15: INIT-GUARD (förhindra dubbla document-level listeners)
+  // ------------------------------------------------------------
+  if (window.__FRZ_ADMIN_PAGE_INIT__) {
+    console.warn("[Freezer] admin/freezer.js redan initierad (guard).");
+    return;
+  }
+  window.__FRZ_ADMIN_PAGE_INIT__ = true;
 
   const tabDashboard = byId("tabDashboard");
   const tabSaldo = byId("tabSaldo");
@@ -28,10 +33,30 @@ Policy:
   const userSelect = byId("frzUserSelect");
   const resetBtn = byId("frzResetDemoBtn");
 
+  // Users UI
+  const usersPanel = byId("frzUsersPanel");
+  const usersList = byId("frzUsersList");
+
+  const msgBox = byId("frzUsersMsg");
+  const msgTitle = byId("frzUsersMsgTitle");
+  const msgText = byId("frzUsersMsgText");
+
+  const formTitle = byId("frzUserFormTitle");
+  const formMode = byId("frzUserFormMode");
+  const firstNameInput = byId("frzUserFirstName");
+  const editingIdInput = byId("frzUserEditingId");
+  const saveBtn = byId("frzUserSaveBtn");
+  const cancelBtn = byId("frzUserCancelBtn");
+
+  const cbUsersManage = byId("perm_users_manage");
+  const cbInvWrite = byId("perm_inventory_write");
+  const cbHistWrite = byId("perm_history_write");
+  const cbDashView = byId("perm_dashboard_view");
+
   // Page state
   let activeTab = "dashboard";
 
-  // AO-04: Items UI state (in-memory only) — ligger kvar här tills AO-12 flyttar Items till admin-items view
+  // AO-04: Items UI state (in-memory only)
   const itemsUI = {
     itemsQ: "",
     itemsCategory: "",
@@ -54,38 +79,119 @@ Policy:
     itemsMsg: "—"
   };
 
-  if (!window.FreezerStore || !window.FreezerRender) {
-    console.error("Freezer baseline saknar FreezerStore eller FreezerRender.");
+  if (!window.FreezerRender) {
+    console.error("Freezer baseline saknar FreezerRender.");
     return;
   }
 
-  // ----------------------------------------------------------
-  // BOOT
-  // ----------------------------------------------------------
-  const initialRole = (userSelect && userSelect.value) ? userSelect.value : "ADMIN";
-  window.FreezerStore.init({ role: initialRole });
+  // ------------------------------------------------------------
+  // AO-15: SHIM STORE (korrupt storage -> read-only men nav funkar)
+  // ------------------------------------------------------------
+  let store = window.FreezerStore || null;
+  let storeCorrupt = false;
 
-  // AO-13: skapa Users-controller om viewen finns (ESM laddad före denna fil)
-  const usersCtrl = (window.FreezerAdminUsers && typeof window.FreezerAdminUsers.createController === "function")
-    ? window.FreezerAdminUsers.createController({
-        store: window.FreezerStore,
-        render: window.FreezerRender,
-        getActiveTab: () => activeTab,
-        rerender
-      })
-    : null;
+  const storeShim = {
+    init: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    setRole: function () {},
+    subscribe: function () { return function () {}; },
+    getState: function () { return {}; },
+    getStatus: function () {
+      return {
+        role: (userSelect && userSelect.value) ? userSelect.value : "ADMIN",
+        locked: false,
+        readOnly: true,
+        whyReadOnly: "Read-only: korrupt storage eller init-fel.",
+        reason: "Storage error"
+      };
+    },
+    can: function () { return false; },
+    hasPerm: function () { return false; },
 
-  window.FreezerStore.subscribe((state) => {
-    window.FreezerRender.renderAll(state, itemsUI);
-    window.FreezerRender.setActiveTabUI(activeTab);
+    resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; },
 
-    // AO-13: låt view/controller synca headers/UX vid state-ändring (utan att röra store/render-ansvar)
-    if (usersCtrl && typeof usersCtrl.onState === "function") {
-      try { usersCtrl.onState(state); } catch {}
+    // Users
+    listUsers: function () { return []; },
+    createUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    updateUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    setUserActive: function () { return { ok: false, reason: "Read-only: storage error." }; },
+
+    // Items
+    listItems: function () { return []; },
+    createItem: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    updateItem: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    archiveItem: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    deleteItem: function () { return { ok: false, reason: "Read-only: storage error." }; }
+  };
+
+  function getStore() {
+    return storeCorrupt ? storeShim : store;
+  }
+
+  function markStoreCorrupt(err) {
+    storeCorrupt = true;
+    console.error("[Freezer] Store fel -> read-only shim aktiverad.", err);
+  }
+
+  function safeGetState() {
+    try {
+      const s = getStore();
+      return (s && typeof s.getState === "function") ? s.getState() : {};
+    } catch (e) {
+      markStoreCorrupt(e);
+      return {};
     }
-  });
+  }
 
-  // Tabs (legacy)
+  function safeGetStatus() {
+    try {
+      const s = getStore();
+      return (s && typeof s.getStatus === "function") ? s.getStatus() : storeShim.getStatus();
+    } catch (e) {
+      markStoreCorrupt(e);
+      return storeShim.getStatus();
+    }
+  }
+
+  // ------------------------------------------------------------
+  // BOOT
+  // ------------------------------------------------------------
+  const initialRole = (userSelect && userSelect.value) ? userSelect.value : "ADMIN";
+
+  // Init store fail-soft
+  if (!store || typeof store.init !== "function") {
+    console.error("Freezer baseline saknar FreezerStore.");
+    storeCorrupt = true;
+  } else {
+    try {
+      store.init({ role: initialRole });
+    } catch (e) {
+      markStoreCorrupt(e);
+    }
+  }
+
+  // Subscribe fail-soft
+  try {
+    const s = getStore();
+    if (s && typeof s.subscribe === "function") {
+      s.subscribe((state) => {
+        window.FreezerRender.renderAll(state || {}, itemsUI);
+        window.FreezerRender.setActiveTabUI(activeTab);
+
+        if (usersPanel && !usersPanel.hidden) {
+          refreshFormHeader();
+        }
+      });
+    }
+  } catch (e) {
+    markStoreCorrupt(e);
+  }
+
+  // Initial paint (även vid shim)
+  window.FreezerRender.renderAll(safeGetState(), itemsUI);
+  window.FreezerRender.setActiveTabUI(activeTab);
+  refreshFormHeader();
+
+  // Tabs (navigation ska funka även om store är korrupt)
   bindTab(tabDashboard, "dashboard");
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
@@ -94,44 +200,227 @@ Policy:
   if (userSelect) {
     userSelect.addEventListener("change", () => {
       const role = userSelect.value || "ADMIN";
-      window.FreezerStore.setRole(role);
+      const s = getStore();
 
-      const st = window.FreezerStore.getStatus();
+      try {
+        if (!storeCorrupt && s && typeof s.setRole === "function") s.setRole(role);
+      } catch (e) {
+        markStoreCorrupt(e);
+      }
+
+      const st = safeGetStatus();
       if (st && userSelect.value !== st.role) userSelect.value = st.role;
+      rerender();
     });
   }
 
   // Reset demo
   if (resetBtn) {
     resetBtn.addEventListener("click", () => {
-      const status = window.FreezerStore.getStatus();
+      const status = safeGetStatus();
       if (status.locked || status.readOnly) return;
 
-      const res = window.FreezerStore.resetDemo();
+      clearUsersMsg();
+
+      const s = getStore();
+      let res = { ok: false, reason: "Okänt fel." };
+      try {
+        res = s.resetDemo();
+      } catch (e) {
+        markStoreCorrupt(e);
+        res = { ok: false, reason: "Storage error." };
+      }
+
       if (!res.ok) {
-        // Users-controller ansvarar för user-meddelanden; här lämnar vi tyst (render kan visa status om ni vill)
-        // För Items: visa msg i items-panelen
-        setItemsMsg(res.reason || "Reset misslyckades.");
+        showUsersMsg("Reset misslyckades", res.reason || "Okänt fel.");
       } else {
+        resetUserForm();
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
         setItemsMsg("Demo återställd.");
-        rerender();
       }
     });
   }
 
-  // AO-04: Items actions (delegation in scope) — kvar här tills AO-12 flytt
+  // Users actions
+  wireUsersForm();
+  wireUsersListDelegation();
+
+  // AO-04: Items actions (delegation in scope) — tills flytt i AO-12
   wireItemsDelegation();
 
-  // Initial UI
-  window.FreezerRender.setActiveTabUI(activeTab);
+  // -----------------------------
+  // USERS: FORM
+  // -----------------------------
+  function wireUsersForm() {
+    if (saveBtn) {
+      saveBtn.addEventListener("click", () => {
+        clearUsersMsg();
 
-  // ----------------------------------------------------------
+        const s = getStore();
+        const status = safeGetStatus();
+
+        if (status.locked) return showUsersMsg("Spärrad", status.reason ? `Låst: ${status.reason}` : "Låst läge.");
+        if (status.readOnly) return showUsersMsg("Spärrad", status.whyReadOnly || "Read-only.");
+
+        if (!safeCan("users_manage")) {
+          return showUsersMsg("Spärrad", "Saknar behörighet (users_manage).");
+        }
+
+        const firstName = (firstNameInput && firstNameInput.value) ? firstNameInput.value.trim() : "";
+        const perms = readPermsFromUI();
+
+        const editingId = (editingIdInput && editingIdInput.value) ? editingIdInput.value : "";
+        if (!firstName) return showUsersMsg("Fel", "Förnamn krävs.");
+
+        try {
+          if (editingId) {
+            const r = s.updateUser(editingId, { firstName, perms });
+            if (!r.ok) return showUsersMsg("Fel", r.reason || "Kunde inte spara.");
+            resetUserForm();
+            return;
+          }
+
+          const r = s.createUser({ firstName, perms });
+          if (!r.ok) {
+            if (r.errorCode === "FRZ_E_USER_NAME_NOT_UNIQUE") return showUsersMsg("Fel", "Förnamn måste vara unikt.");
+            return showUsersMsg("Fel", r.reason || "Kunde inte skapa.");
+          }
+          resetUserForm();
+        } catch (e) {
+          markStoreCorrupt(e);
+          showUsersMsg("Spärrad", "Read-only: storage error.");
+        }
+      });
+    }
+
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => {
+        clearUsersMsg();
+        resetUserForm();
+      });
+    }
+  }
+
+  function safeCan(perm) {
+    const s = getStore();
+    try {
+      if (s && typeof s.hasPerm === "function") return !!s.hasPerm(perm);
+      if (s && typeof s.can === "function") return !!s.can(perm);
+      return false;
+    } catch (e) {
+      markStoreCorrupt(e);
+      return false;
+    }
+  }
+
+  function readPermsFromUI() {
+    return {
+      users_manage: !!(cbUsersManage && cbUsersManage.checked),
+      inventory_write: !!(cbInvWrite && cbInvWrite.checked),
+      history_write: !!(cbHistWrite && cbHistWrite.checked),
+      dashboard_view: !!(cbDashView && cbDashView.checked)
+    };
+  }
+
+  function setPermsToUI(perms) {
+    const p = perms && typeof perms === "object" ? perms : {};
+    if (cbUsersManage) cbUsersManage.checked = !!p.users_manage;
+    if (cbInvWrite) cbInvWrite.checked = !!p.inventory_write;
+    if (cbHistWrite) cbHistWrite.checked = !!p.history_write;
+    if (cbDashView) cbDashView.checked = ("dashboard_view" in p) ? !!p.dashboard_view : true;
+  }
+
+  function resetUserForm() {
+    if (editingIdInput) editingIdInput.value = "";
+    if (firstNameInput) firstNameInput.value = "";
+    setPermsToUI({ dashboard_view: true });
+    refreshFormHeader();
+  }
+
+  function refreshFormHeader() {
+    const editingId = (editingIdInput && editingIdInput.value) ? editingIdInput.value : "";
+    const isEdit = !!editingId;
+
+    if (formTitle) formTitle.textContent = isEdit ? "Redigera användare" : "Skapa användare";
+    if (formMode) formMode.textContent = isEdit ? "Editläge" : "Nytt";
+  }
+
+  // -----------------------------
+  // USERS: LIST (delegation)
+  // -----------------------------
+  function wireUsersListDelegation() {
+    if (!usersList) return;
+
+    usersList.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!t || !(t instanceof HTMLElement)) return;
+
+      const btn = t.closest("button[data-action]");
+      if (!btn) return;
+
+      const action = btn.getAttribute("data-action") || "";
+      const userId = btn.getAttribute("data-user-id") || "";
+
+      clearUsersMsg();
+
+      const s = getStore();
+      const status = safeGetStatus();
+
+      if (status.locked) return showUsersMsg("Spärrad", status.reason ? `Låst: ${status.reason}` : "Låst läge.");
+      if (status.readOnly) return showUsersMsg("Spärrad", status.whyReadOnly || "Read-only.");
+      if (!safeCan("users_manage")) return showUsersMsg("Spärrad", "Saknar behörighet (users_manage).");
+
+      if (!userId) return;
+
+      if (action === "user-edit") {
+        const u = findUserById(userId);
+        if (!u) return showUsersMsg("Fel", "User hittades inte.");
+
+        if (editingIdInput) editingIdInput.value = u.id || "";
+        if (firstNameInput) firstNameInput.value = String(u.firstName || "");
+        setPermsToUI(u.perms || {});
+        refreshFormHeader();
+        if (firstNameInput) firstNameInput.focus();
+        return;
+      }
+
+      if (action === "user-toggle-active") {
+        const u = findUserById(userId);
+        if (!u) return showUsersMsg("Fel", "User hittades inte.");
+
+        try {
+          const next = !u.active;
+          const r = s.setUserActive(userId, next);
+          if (!r.ok) return showUsersMsg("Fel", r.reason || "Kunde inte uppdatera.");
+
+          if (editingIdInput && editingIdInput.value === userId && !next) {
+            resetUserForm();
+          }
+        } catch (e) {
+          markStoreCorrupt(e);
+          showUsersMsg("Spärrad", "Read-only: storage error.");
+        }
+        return;
+      }
+    });
+  }
+
+  function findUserById(id) {
+    try {
+      const s = getStore();
+      const users = s.listUsers();
+      return users.find(u => u && u.id === id) || null;
+    } catch (e) {
+      markStoreCorrupt(e);
+      return null;
+    }
+  }
+
+  // -----------------------------
   // AO-04: ITEMS (delegation)
-  // ----------------------------------------------------------
+  // -----------------------------
   function wireItemsDelegation() {
-    // NOTE: document-level delegation med scope-guard så andra vyer inte triggar items-logik.
     document.addEventListener("click", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
@@ -146,7 +435,8 @@ Policy:
       if (isItemsAction(action) && !isInItemsScope(btn)) return;
 
       const articleNo = btn.getAttribute("data-article-no") || "";
-      const status = window.FreezerStore.getStatus();
+      const s = getStore();
+      const status = safeGetStatus();
 
       if (status.locked) return setItemsMsg(status.reason ? `Låst: ${status.reason}` : "Låst läge.");
 
@@ -180,24 +470,29 @@ Policy:
 
         const payload = payloadRes.payload;
 
-        if (itemsUI.itemsEditingArticleNo) {
-          const r = window.FreezerStore.updateItem(itemsUI.itemsEditingArticleNo, payload);
-          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte spara.");
+        try {
+          if (itemsUI.itemsEditingArticleNo) {
+            const r = s.updateItem(itemsUI.itemsEditingArticleNo, payload);
+            if (!r.ok) return setItemsMsg(r.reason || "Kunde inte spara.");
+
+            resetItemsForm();
+            itemsUI.itemsEditingArticleNo = "";
+            setItemsMsg("Uppdaterad.");
+            rerender();
+            return;
+          }
+
+          const r = s.createItem(payload);
+          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte skapa.");
 
           resetItemsForm();
           itemsUI.itemsEditingArticleNo = "";
-          setItemsMsg("Uppdaterad.");
+          setItemsMsg("Skapad.");
           rerender();
-          return;
+        } catch (e) {
+          markStoreCorrupt(e);
+          setItemsMsg("Read-only: storage error.");
         }
-
-        const r = window.FreezerStore.createItem(payload);
-        if (!r.ok) return setItemsMsg(r.reason || "Kunde inte skapa.");
-
-        resetItemsForm();
-        itemsUI.itemsEditingArticleNo = "";
-        setItemsMsg("Skapad.");
-        rerender();
         return;
       }
 
@@ -215,15 +510,20 @@ Policy:
         if (!gate.ok) return setItemsMsg(gate.msg);
         if (!articleNo) return;
 
-        const r = window.FreezerStore.archiveItem(articleNo);
-        if (!r.ok) return setItemsMsg(r.reason || "Kunde inte arkivera.");
+        try {
+          const r = s.archiveItem(articleNo);
+          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte arkivera.");
 
-        if (itemsUI.itemsEditingArticleNo === articleNo) {
-          resetItemsForm();
-          itemsUI.itemsEditingArticleNo = "";
+          if (itemsUI.itemsEditingArticleNo === articleNo) {
+            resetItemsForm();
+            itemsUI.itemsEditingArticleNo = "";
+          }
+          setItemsMsg("Arkiverad.");
+          rerender();
+        } catch (e) {
+          markStoreCorrupt(e);
+          setItemsMsg("Read-only: storage error.");
         }
-        setItemsMsg("Arkiverad.");
-        rerender();
         return;
       }
 
@@ -235,15 +535,20 @@ Policy:
         const ok = window.confirm(`Radera ${articleNo} permanent?\n(Detta kan blockeras om referenser finns.)`);
         if (!ok) return;
 
-        const r = window.FreezerStore.deleteItem(articleNo);
-        if (!r.ok) return setItemsMsg(r.reason || "Radering blockerad.");
+        try {
+          const r = s.deleteItem(articleNo);
+          if (!r.ok) return setItemsMsg(r.reason || "Radering blockerad.");
 
-        if (itemsUI.itemsEditingArticleNo === articleNo) {
-          resetItemsForm();
-          itemsUI.itemsEditingArticleNo = "";
+          if (itemsUI.itemsEditingArticleNo === articleNo) {
+            resetItemsForm();
+            itemsUI.itemsEditingArticleNo = "";
+          }
+          setItemsMsg("Raderad.");
+          rerender();
+        } catch (e) {
+          markStoreCorrupt(e);
+          setItemsMsg("Read-only: storage error.");
         }
-        setItemsMsg("Raderad.");
-        rerender();
         return;
       }
     });
@@ -251,7 +556,6 @@ Policy:
     document.addEventListener("change", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
-
       if (!isInItemsScope(t)) return;
 
       const id = t.id || "";
@@ -267,7 +571,6 @@ Policy:
     document.addEventListener("input", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
-
       if (!isInItemsScope(t)) return;
 
       if (t.id === "frzItemsQ") {
@@ -282,12 +585,31 @@ Policy:
   }
 
   function isInItemsScope(el) {
+    // AO-15: extra robust: kontrollera att .closest finns innan vi använder den.
     try {
-      const viewSaldo = document.getElementById("viewSaldo");
-      if (viewSaldo) return !!el.closest("#viewSaldo");
+      const hasClosest = el && typeof el.closest === "function";
 
-      if (document.getElementById("frzSaldoTableWrap")) return !!el.closest("#frzSaldoTableWrap");
-      if (document.getElementById("frzItemsPanel")) return !!el.closest("#frzItemsPanel");
+      const viewSaldo = document.getElementById("viewSaldo");
+      if (viewSaldo && hasClosest) return !!el.closest("#viewSaldo");
+      if (viewSaldo && !hasClosest) return true; // fail-soft
+
+      const q = document.getElementById("frzItemsQ");
+      if (q) {
+        const qClosestOk = typeof q.closest === "function";
+        if (qClosestOk) {
+          const root =
+            q.closest("#frzItemsPanel") ||
+            q.closest("#frzSaldoTableWrap") ||
+            q.closest("main") ||
+            q.closest("section");
+
+          if (root && root.id && hasClosest) return !!el.closest(`#${root.id}`) || root.contains(el);
+          if (root && !hasClosest) return true; // fail-soft
+        }
+      }
+
+      if (document.getElementById("frzSaldoTableWrap") && hasClosest) return !!el.closest("#frzSaldoTableWrap");
+      if (document.getElementById("frzItemsPanel") && hasClosest) return !!el.closest("#frzItemsPanel");
 
       return true; // fail-soft
     } catch {
@@ -299,15 +621,9 @@ Policy:
     if (status.locked) return { ok: false, msg: status.reason ? `Låst: ${status.reason}` : "Låst läge." };
     if (status.readOnly) return { ok: false, msg: status.whyReadOnly || "Read-only: skrivning är spärrad." };
 
-    const hasPermFn = (window.FreezerStore && typeof window.FreezerStore.hasPerm === "function")
-      ? window.FreezerStore.hasPerm
-      : null;
-
-    const hasPerm = hasPermFn
-      ? !!hasPermFn.call(window.FreezerStore, "inventory_write")
-      : !!(window.FreezerStore && window.FreezerStore.can && window.FreezerStore.can("inventory_write"));
-
+    const hasPerm = safeCan("inventory_write");
     if (!hasPerm) return { ok: false, msg: "Saknar behörighet (inventory_write)." };
+
     return { ok: true, msg: "" };
   }
 
@@ -324,8 +640,10 @@ Policy:
   }
 
   function readVal(id) {
+    // AO-15: robust: läs bara .value om det faktiskt finns
     const el = document.getElementById(id);
     if (!el) return "";
+    if (!("value" in el)) return "";
     return String(el.value || "");
   }
 
@@ -350,25 +668,25 @@ Policy:
       minLevel = n;
     }
 
-    return {
-      ok: true,
-      payload: {
-        articleNo,
-        packSize: String(itemsUI.formPackSize || "").trim(),
-        supplier: String(itemsUI.formSupplier || "").trim(),
-        category: String(itemsUI.formCategory || "").trim(),
-        pricePerKg,
-        minLevel,
-        tempClass: String(itemsUI.formTempClass || "").trim(),
-        requiresExpiry: !!itemsUI.formRequiresExpiry,
-        isActive: !!itemsUI.formIsActive
-      }
+    const payload = {
+      articleNo,
+      packSize: String(itemsUI.formPackSize || "").trim(),
+      supplier: String(itemsUI.formSupplier || "").trim(),
+      category: String(itemsUI.formCategory || "").trim(),
+      pricePerKg,
+      minLevel,
+      tempClass: String(itemsUI.formTempClass || "").trim(),
+      requiresExpiry: !!itemsUI.formRequiresExpiry,
+      isActive: !!itemsUI.formIsActive
     };
+
+    return { ok: true, payload };
   }
 
   function loadItemToForm(articleNo) {
     try {
-      const all = window.FreezerStore.listItems({ includeInactive: true });
+      const s = getStore();
+      const all = s.listItems({ includeInactive: true });
       const it = all.find(x => x && String(x.articleNo || "") === String(articleNo || "")) || null;
       if (!it) return;
 
@@ -381,7 +699,9 @@ Policy:
       itemsUI.formTempClass = String(it.tempClass || "");
       itemsUI.formRequiresExpiry = !!it.requiresExpiry;
       itemsUI.formIsActive = !!it.isActive;
-    } catch {}
+    } catch (e) {
+      markStoreCorrupt(e);
+    }
   }
 
   function resetItemsForm() {
@@ -403,32 +723,55 @@ Policy:
 
   function rerender() {
     try {
-      const state = window.FreezerStore.getState();
+      const state = safeGetState();
       window.FreezerRender.renderAll(state, itemsUI);
       window.FreezerRender.setActiveTabUI(activeTab);
-    } catch {}
+
+      // Bonus: render status/mode/lock/debug om de finns
+      window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
+      window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
+      window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
+      window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
+    } catch (e) {
+      // fail-soft
+    }
   }
 
-  // ----------------------------------------------------------
-  // TABS
-  // ----------------------------------------------------------
+  // -----------------------------
+  // MESSAGES (Users)
+  // -----------------------------
+  function showUsersMsg(title, text) {
+    if (!msgBox || !msgTitle || !msgText) return;
+    msgTitle.textContent = title || "Info";
+    msgText.textContent = text || "—";
+    msgBox.hidden = false;
+  }
+
+  function clearUsersMsg() {
+    if (!msgBox || !msgTitle || !msgText) return;
+    msgBox.hidden = true;
+    msgTitle.textContent = "Info";
+    msgText.textContent = "—";
+  }
+
+  // -----------------------------
+  // TABS (nav ska funka även vid read-only shim)
+  // -----------------------------
   function bindTab(btn, key) {
     if (!btn) return;
     btn.addEventListener("click", () => {
       activeTab = key;
       window.FreezerRender.setActiveTabUI(activeTab);
 
-      const state = window.FreezerStore.getState();
-      window.FreezerRender.renderStatus(state);
-      window.FreezerRender.renderMode(state);
-      window.FreezerRender.renderLockPanel(state);
-      window.FreezerRender.renderDebug(state);
+      const state = safeGetState();
+
+      // Rendera bas UI-delar fail-soft
+      window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
+      window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
+      window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
+      window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
 
       window.FreezerRender.renderAll(state, itemsUI);
-
-      if (usersCtrl && typeof usersCtrl.onTabChange === "function") {
-        try { usersCtrl.onTabChange(activeTab); } catch {}
-      }
     });
   }
 
