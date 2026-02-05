@@ -1,331 +1,164 @@
 /* ============================================================
-AO-14/15 — Buyer dashboard (minsta)
-FIL: UI/pages/freezer/buyer/buyer-dashboard.js
-Projekt: Freezer (UI-only / localStorage-first)
-
-Kontrakt:
-- Buyer: fokus på inköp (låga nivåer, rekommenderad inköpslista)
-- Inga nya datanycklar / inga nya storage-keys
-- Robust mount/render/unmount (router-kompatibelt)
-- XSS-safe: bygger DOM via createElement + textContent
-
-ESM:
-- Laddas med <script type="module" ...>
-
-P0-FIX i denna patch:
-- defineView-spec måste använda label (inte title) för att matcha view-interface/registry.
-- exportera vyn (buyerDashboardView) så registry kan importera den senare.
-- mount/render/unmount måste följa router: mount({root,ctx}), render({root,state,ctx}), unmount({root,ctx})
+AO-01/15 — View Registry (minsta baseline) | FIL-ID: UI/pages/freezer/01-view-registry.js
+Projekt: Fryslager (UI-only / localStorage-first)
+Syfte: Central export av vy-listor per roll.
+POLICY: Inga nya storage-keys • Ingen UX/redesign • Fail-closed friendly
 ============================================================ */
 
-import { defineView } from "../01-view-registry.js";
+import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
 
-const VIEW_ID = "buyer-dashboard";
-const VIEW_LABEL = "Inköp • Dashboard";
+// AO-11/15: Shared views (Saldo/Historik)
+import { sharedSaldoView } from "./shared/shared-saldo.js";
+import { sharedHistoryView } from "./shared/shared-history.js";
+
+// P0 BUYER-MOUNT: Buyer views måste importeras och registreras
+import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
+import { buyerInView } from "./buyer/buyer-in.js";
 
 /* =========================
-BLOCK 1 — Lokal vy-state (ingen storage)
+BLOCK 1 — Hjälpare: säker registrering
 ========================= */
-const _viewState = {
-  root: /** @type {HTMLElement|null} */ (null),
-  unsub: /** @type {null|Function} */ (null)
-};
 
-function safeNum(n) {
-  return Number.isFinite(n) ? n : 0;
-}
-
-function toNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function pickFirstArray(state, keys) {
-  for (const k of keys) {
-    const v = state && state[k];
-    if (Array.isArray(v)) return v;
+/**
+ * Skapar + validerar + fryser en vy.
+ * @param {Parameters<typeof createView>[0]} spec
+ * @returns {import("./00-view-interface.js").FreezerView}
+ */
+export function defineView(spec) {
+  const view = createView(spec);
+  const v = validateViewShape(view);
+  if (!v.ok) {
+    throw new Error(
+      "AO-01/15 view-registry: View validation failed: " + v.errors.join("; ")
+    );
   }
-  return [];
+  return freezeView(view);
 }
 
-function normalizeItemsAndStock(state) {
-  const items = pickFirstArray(state, ["items", "catalog", "products", "itemRegistry", "itemList"]);
-  const stockRows = pickFirstArray(state, ["saldo", "stock", "inventory", "rows", "saldoRows", "inventoryRows"]);
-
-  const byArticle = new Map();
-  for (const it of items) {
-    if (!it || typeof it !== "object") continue;
-    const articleNo = String(it.articleNo || it.article || it.sku || it.id || "").trim();
-    if (!articleNo) continue;
-    byArticle.set(articleNo, it);
+/**
+ * Validerar + fryser en redan-skapad vy (t.ex. importerad).
+ * Fail-closed med tydligt fel.
+ * @param {any} view
+ * @param {string} name
+ * @returns {import("./00-view-interface.js").FreezerView}
+ */
+function defineExistingView(view, name) {
+  const v = validateViewShape(view);
+  if (!v.ok) {
+    throw new Error(
+      `AO-11/15 view-registry: Importerad vy är ogiltig (${name}): ` + v.errors.join("; ")
+    );
   }
-
-  const normStock = [];
-  for (const r of stockRows) {
-    if (!r || typeof r !== "object") continue;
-    const articleNo = String(r.articleNo || r.article || r.sku || r.id || "").trim();
-    if (!articleNo) continue;
-
-    const qty =
-      toNum(r.qty) ??
-      toNum(r.quantity) ??
-      toNum(r.onHand) ??
-      toNum(r.balance) ??
-      toNum(r.kg) ??
-      toNum(r.qtyKg) ??
-      0;
-
-    normStock.push({ articleNo, qty });
-  }
-
-  return { byArticle, stock: normStock };
-}
-
-function computeBuyerList(state) {
-  const { byArticle, stock } = normalizeItemsAndStock(state);
-  const needs = [];
-
-  for (const row of stock) {
-    const it = byArticle.get(row.articleNo);
-    if (!it) continue;
-
-    // skip inactive if available
-    if ("isActive" in it && !it.isActive) continue;
-
-    const minLevel = toNum(it.minLevel);
-    if (minLevel == null) continue;
-
-    if (row.qty < minLevel) {
-      const deficit = safeNum(minLevel) - safeNum(row.qty);
-      const supplier = String(it.supplier || "");
-      const category = String(it.category || "");
-      needs.push({
-        articleNo: row.articleNo,
-        supplier,
-        category,
-        qty: row.qty,
-        minLevel,
-        deficit
-      });
-    }
-  }
-
-  needs.sort((a, b) => safeNum(b.deficit) - safeNum(a.deficit));
-  return needs.slice(0, 12);
-}
-
-function el(tag) { return document.createElement(tag); }
-function setText(node, text) { node.textContent = String(text == null ? "" : text); }
-function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
-
-function formatCtxLine(ctx) {
-  const role = ctx && ctx.role ? String(ctx.role) : "—";
-  const ro = ctx && (ctx.readOnly === true || ctx.mode === "readOnly" || ctx.isReadOnly === true) ? "read-only" : "write";
-  return `role=${role} • mode=${ro}`;
-}
-
-function resolveRootFromArgs(a, b) {
-  // Router: mount({root,ctx}) / render({root,state,ctx})
-  if (a && typeof a === "object" && a.root) return a.root;
-
-  // Legacy: mount(ctx) där ctx.root finns
-  if (a && typeof a === "object" && a.root) return a.root;
-
-  // Fallback
-  const fromDom = document.getElementById("freezerViewRoot");
-  return fromDom || document.body;
-}
-
-function resolveCtxFromArgs(a, b) {
-  // Router shape
-  if (a && typeof a === "object" && ("ctx" in a)) return a.ctx || null;
-
-  // Legacy: mount(ctx)
-  if (a && typeof a === "object" && !("root" in a)) return a;
-
-  return b || null;
-}
-
-function resolveStateFromArgs(a) {
-  // Router: render({root,state,ctx})
-  if (a && typeof a === "object" && ("state" in a)) return a.state || {};
-  return {};
-}
-
-function renderBuyerDashboard(root, state, ctx) {
-  if (!root || !(root instanceof HTMLElement)) return;
-  clear(root);
-
-  const title = el("h2");
-  title.style.margin = "0 0 6px 0";
-  setText(title, "Inköpsdashboard");
-
-  const sub = el("div");
-  sub.style.opacity = "0.75";
-  sub.style.marginBottom = "12px";
-  setText(sub, `Fokus: låga nivåer och inköpslista. (${formatCtxLine(ctx)})`);
-
-  const list = computeBuyerList(state);
-
-  const cards = el("div");
-  cards.style.display = "grid";
-  cards.style.gridTemplateColumns = "repeat(auto-fit, minmax(220px, 1fr))";
-  cards.style.gap = "10px";
-
-  const c1 = el("div");
-  c1.style.border = "1px solid #e6e6e6";
-  c1.style.borderRadius = "12px";
-  c1.style.padding = "12px";
-  c1.style.background = "#fff";
-
-  const l1 = el("div");
-  l1.style.opacity = "0.75";
-  l1.style.fontSize = "13px";
-  setText(l1, "Under min-nivå");
-
-  const v1 = el("div");
-  v1.style.fontWeight = "800";
-  v1.style.fontSize = "20px";
-  v1.style.marginTop = "4px";
-  setText(v1, String(list.length));
-
-  const h1 = el("div");
-  h1.style.opacity = "0.7";
-  h1.style.fontSize = "12px";
-  h1.style.marginTop = "6px";
-  setText(h1, "Visar upp till 12 förslag.");
-
-  c1.appendChild(l1);
-  c1.appendChild(v1);
-  c1.appendChild(h1);
-
-  cards.appendChild(c1);
-
-  const box = el("div");
-  box.style.marginTop = "12px";
-  box.style.border = "1px solid #e6e6e6";
-  box.style.borderRadius = "12px";
-  box.style.padding = "12px";
-  box.style.background = "#fff";
-
-  const bTitle = el("b");
-  setText(bTitle, "Rekommenderad inköpslista");
-  box.appendChild(bTitle);
-
-  const hint = el("div");
-  hint.style.opacity = "0.75";
-  hint.style.fontSize = "12px";
-  hint.style.marginTop = "4px";
-  setText(hint, "Bygger på qty < minLevel. Deficit = (minLevel - qty).");
-  box.appendChild(hint);
-
-  if (list.length === 0) {
-    const empty = el("div");
-    empty.style.marginTop = "10px";
-    empty.style.opacity = "0.75";
-    empty.style.fontSize = "13px";
-    setText(empty, "Inga inköpsbehov hittades (eller minLevel saknas).");
-    box.appendChild(empty);
-  } else {
-    const table = el("div");
-    table.style.marginTop = "10px";
-    table.style.display = "grid";
-    table.style.gridTemplateColumns = "120px 1fr 120px 120px";
-    table.style.gap = "6px";
-    table.style.alignItems = "center";
-    table.style.fontSize = "13px";
-
-    function cell(txt, bold) {
-      const d = el("div");
-      if (bold) d.style.fontWeight = "700";
-      setText(d, txt);
-      return d;
-    }
-
-    table.appendChild(cell("Artikel", true));
-    table.appendChild(cell("Leverantör / kategori", true));
-    table.appendChild(cell("Qty", true));
-    table.appendChild(cell("Köp", true));
-
-    for (const r of list) {
-      table.appendChild(cell(r.articleNo, false));
-      table.appendChild(cell(`${r.supplier || "—"} • ${r.category || "—"}`, false));
-      table.appendChild(cell(String(r.qty), false));
-      table.appendChild(cell(String(r.deficit), false));
-    }
-
-    box.appendChild(table);
-  }
-
-  root.appendChild(title);
-  root.appendChild(sub);
-  root.appendChild(cards);
-  root.appendChild(box);
+  return freezeView(view);
 }
 
 /* =========================
-BLOCK 2 — View definition (P0: router-kompatibel + exporterad)
+BLOCK 2 — Listor per roll
 ========================= */
-export const buyerDashboardView = defineView({
-  id: VIEW_ID,
-  label: VIEW_LABEL,
-  requiredPerm: "dashboard_view",
 
-  mount(a, b) {
-    try {
-      // Router: mount({root,ctx})
-      const root = resolveRootFromArgs(a, b);
-      const ctx = resolveCtxFromArgs(a, b);
+const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
+const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
 
-      _viewState.root = (root instanceof HTMLElement) ? root : null;
+// P0: validera buyer views direkt när de importeras
+const _buyerDash = defineExistingView(buyerDashboardView, "buyerDashboardView");
+const _buyerIn = defineExistingView(buyerInView, "buyerInView");
 
-      // säkerställ att vi inte läcker gamla subscriptions
-      try { if (typeof _viewState.unsub === "function") _viewState.unsub(); } catch {}
-      _viewState.unsub = null;
+/** @type {import("./00-view-interface.js").FreezerView[]} */
+export const sharedViews = [_sharedSaldo, _sharedHistory];
 
-      const store = window.FreezerStore || null;
-      const state = store && typeof store.getState === "function" ? store.getState() : {};
-      renderBuyerDashboard(_viewState.root || root, state, ctx);
+/** @type {import("./00-view-interface.js").FreezerView[]} */
+export const adminViews = [];
 
-      if (store && typeof store.subscribe === "function") {
-        try {
-          _viewState.unsub = store.subscribe((st) => {
-            // använd senast känd root
-            const r = _viewState.root || root;
-            renderBuyerDashboard(r, st || {}, ctx);
-          });
-        } catch {
-          _viewState.unsub = null;
-        }
-      }
-    } catch {
-      /* fail-soft */
-    }
-  },
+/** @type {import("./00-view-interface.js").FreezerView[]} */
+export const buyerViews = [_buyerDash, _buyerIn];
 
-  render(a, b) {
-    try {
-      // Router: render({root,state,ctx})
-      const root = (a && typeof a === "object" && a.root) ? a.root : (_viewState.root || resolveRootFromArgs(a, b));
-      const ctx = resolveCtxFromArgs(a, b);
-      const state = resolveStateFromArgs(a);
+/** @type {import("./00-view-interface.js").FreezerView[]} */
+export const pickerViews = [];
 
-      _viewState.root = (root instanceof HTMLElement) ? root : _viewState.root;
+/* =========================
+BLOCK 3 — Aggregat (praktiskt för router)
+========================= */
 
-      renderBuyerDashboard(root, state, ctx);
-    } catch {
-      /* fail-soft */
-    }
-  },
+/**
+ * Normaliserar roll-sträng så legacy ("ADMIN") och nya ("admin") fungerar.
+ * @param {string} role
+ * @returns {"admin"|"buyer"|"picker"|""}
+ */
+function normalizeRole(role) {
+  const r = String(role || "").trim();
+  if (!r) return "";
+  const up = r.toUpperCase();
+  if (up === "ADMIN") return "admin";
+  if (up === "BUYER") return "buyer";
+  if (up === "PICKER") return "picker";
+  if (up === "SYSTEM_ADMIN") return "";
+  const low = r.toLowerCase();
+  if (low === "admin" || low === "buyer" || low === "picker") return /** @type any */ (low);
+  return "";
+}
 
-  unmount() {
-    try { if (typeof _viewState.unsub === "function") _viewState.unsub(); } catch {}
-    _viewState.unsub = null;
+/**
+ * @param {"admin"|"buyer"|"picker"|string} role
+ * @returns {import("./00-view-interface.js").FreezerView[]}
+ */
+export function getViewsForRole(role) {
+  const nr = normalizeRole(role);
+  if (nr === "admin") return [...sharedViews, ...adminViews];
+  if (nr === "buyer") return [...sharedViews, ...buyerViews];
+  if (nr === "picker") return [...sharedViews, ...pickerViews];
+  return [...sharedViews];
+}
 
-    try {
-      if (_viewState.root) clear(_viewState.root);
-    } catch {}
-
-    _viewState.root = null;
+/**
+ * @param {import("./00-view-interface.js").FreezerView[]} list
+ * @param {string} id
+ * @returns {import("./00-view-interface.js").FreezerView|null}
+ */
+export function findView(list, id) {
+  const want = String(id || "").trim();
+  if (!want) return null;
+  for (const v of list) {
+    if (v && v.id === want) return v;
   }
-});
+  return null;
+}
+
+/* =========================
+BLOCK 4 — Export för meny
+========================= */
+
+/**
+ * @param {import("./00-view-interface.js").FreezerView[]} list
+ * @returns {{ id: string, label: string, requiredPerm: string|null }[]}
+ */
+export function toMenuItems(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter(Boolean)
+    .map((v) => ({ id: v.id, label: v.label, requiredPerm: v.requiredPerm ?? null }));
+}
+
+/* =========================
+BLOCK 5 — AO-11 BRIDGE: gör registry tillgänglig för non-module freezer.js
+========================= */
+/**
+ * POLICY: ingen storage, bara en window-bridge.
+ * Detta behövs eftersom admin/freezer.js laddas som vanlig <script>.
+ */
+try {
+  if (!window.FreezerViewRegistry) {
+    window.FreezerViewRegistry = {
+      // helpers
+      defineView,
+      getViewsForRole,
+      findView,
+      toMenuItems,
+      // lists (read-only)
+      sharedViews,
+      adminViews,
+      buyerViews,
+      pickerViews
+    };
+  }
+} catch {
+  // fail-soft
+}
