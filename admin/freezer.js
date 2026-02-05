@@ -10,18 +10,14 @@ BLOCK 1/6 (stort AO):
 - Create/Update/Archive/Delete(guarded)
 - Arkivera är standard-action; delete kräver confirm och kan blockeras av guard
 
-PATCH (AO-04 BLOCK 4/6):
-- Begränsa Items-delegation till Saldo/Items-scope (scope-guard, fail-soft om DOM-id saknas)
-- Inför tydlig semantik: hasPerm (RBAC) vs can (write-allowed) i controller
-- Tydliga spärr-meddelanden: locked vs read-only vs saknar perm
-- Stoppa NaN i payload (validering)
+PATCH (AO-04 BLOCK 4/6) + AUTOPATCH:
+- Init-guard mot dubbel init (inga dubbla listeners)
+- Deterministisk Items-scope: endast #viewSaldo (fail-closed)
+- Säkrare readVal(): läser endast input/select/textarea value
+- Safe-calls för FreezerRender.renderStatus/renderMode/renderLockPanel/renderDebug
+- Stoppar NaN i payload (validering)
 - Konsekvent editor-läge: new/edit/cancel/save
 - Ingen ny storage-key/datamodell, XSS-safe (render ansvarar)
-
-AUTOPATCH i denna fil:
-- P0: safe-calls för FreezerRender.renderStatus/renderMode/renderLockPanel/renderDebug
-- P1: stramare items-scope-guard (fail-soft men inte globalt permissiv)
-- P1: bort med dubbel-rerender (setItemsMsg renderar inte själv)
 
 Policy:
 - Inga nya storage-keys/datamodell
@@ -30,6 +26,10 @@ Policy:
 
 (function () {
   "use strict";
+
+  // P1 GUARD: Stoppa dubbel init om script råkar laddas två gånger
+  if (window.__FREEZER_PAGE_INIT__) return;
+  window.__FREEZER_PAGE_INIT__ = true;
 
   const tabDashboard = byId("tabDashboard");
   const tabSaldo = byId("tabSaldo");
@@ -61,6 +61,9 @@ Policy:
   // Page state
   let activeTab = "dashboard";
 
+  // Deterministisk Items-scope root (fail-closed)
+  const itemsScopeRoot = document.getElementById("viewSaldo") || null;
+
   // AO-04: Items UI state (in-memory only)
   const itemsUI = {
     itemsQ: "",
@@ -77,7 +80,7 @@ Policy:
     formCategory: "",
     formPricePerKg: "",
     formMinLevel: "",
-    formTempClass: "",
+    formTempClass: "FROZEN", // P2: stabil baseline
     formRequiresExpiry: true,
     formIsActive: true,
 
@@ -135,7 +138,7 @@ Policy:
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
         setItemsMsg("Demo återställd.");
-        rerender(); // itemsMsg är UI-state → säkerställ render även om store redan renderat via subscribe
+        rerender(); // itemsUI är in-memory, säkerställ render
       }
     });
   }
@@ -297,7 +300,6 @@ Policy:
   // AO-04: ITEMS (delegation)
   // -----------------------------
   function wireItemsDelegation() {
-    // NOTE: Document-level delegation men med scope-guard.
     document.addEventListener("click", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
@@ -308,21 +310,16 @@ Policy:
       const action = btn.getAttribute("data-action") || "";
       if (!action) return;
 
-      // Scope-guard: endast Items-actions i saldo/Items-området
-      if (isItemsAction(action)) {
-        const scopeOk = isInItemsScope(btn);
-        if (!scopeOk) {
-          // fail-soft: ge ett tydligt meddelande men krascha inte
-          setItemsMsg("Items UI ej initierad i denna vy.");
-          rerender();
-          return;
-        }
+      // Scope-guard: items-actions endast inom #viewSaldo
+      if (isItemsAction(action) && !isInItemsScope(btn)) {
+        setItemsMsg("Items UI ej initierad i denna vy.");
+        rerender();
+        return;
       }
 
       const articleNo = btn.getAttribute("data-article-no") || "";
       const status = window.FreezerStore.getStatus();
 
-      // Always block if locked
       if (status.locked) {
         setItemsMsg(status.reason ? `Låst: ${status.reason}` : "Låst läge.");
         rerender();
@@ -352,7 +349,6 @@ Policy:
         const gate = gateItemsWrite(status);
         if (!gate.ok) { setItemsMsg(gate.msg); rerender(); return; }
 
-        // read fields from DOM (render creates these ids)
         readItemsFormFromDOM();
 
         const payloadRes = buildItemPayloadFromUIValidated();
@@ -382,7 +378,6 @@ Policy:
       }
 
       if (action === "item-edit") {
-        // Read-action: tillåt även i read-only (render ska disable:a inputs/knappar)
         if (!articleNo) return;
         itemsUI.itemsEditingArticleNo = String(articleNo || "");
         loadItemToForm(itemsUI.itemsEditingArticleNo);
@@ -432,8 +427,6 @@ Policy:
     document.addEventListener("change", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
-
-      // Scope-guard: Items-filters endast inom items-scope
       if (!isInItemsScope(t)) return;
 
       const id = t.id || "";
@@ -469,8 +462,6 @@ Policy:
     document.addEventListener("input", (ev) => {
       const t = ev.target;
       if (!t || !(t instanceof HTMLElement)) return;
-
-      // Scope-guard
       if (!isInItemsScope(t)) return;
 
       if (t.id === "frzItemsQ") {
@@ -485,34 +476,10 @@ Policy:
   }
 
   function isInItemsScope(el) {
-    // Fail-soft men stramt: om vi inte kan fastställa scope, anta INTE globalt.
-    // 1) Primär: viewSaldo
+    // Fail-closed: Items är bara giltiga i #viewSaldo
+    if (!itemsScopeRoot) return false;
     try {
-      const viewSaldo = document.getElementById("viewSaldo");
-      if (viewSaldo) return !!el.closest("#viewSaldo");
-
-      // 2) Sekundär: om någon känd items-control finns, använd dess container som scope-hint
-      const anyKnown =
-        document.getElementById("frzItemsQ") ||
-        document.getElementById("frzItemArticleNo") ||
-        document.getElementById("frzSaldoTableWrap") ||
-        document.getElementById("frzItemsPanel");
-
-      if (anyKnown) {
-        // Föredra explicit items-panel/wrap om de finns
-        const panel = document.getElementById("frzItemsPanel");
-        if (panel) return panel.contains(el);
-
-        const wrap = document.getElementById("frzSaldoTableWrap");
-        if (wrap) return wrap.contains(el);
-
-        // Som sista scope-hint: närmaste section kring något känt element
-        const root = anyKnown.closest("section") || anyKnown.closest("main");
-        if (root) return root.contains(el);
-      }
-
-      // 3) Inget hittat: fail-soft = return false (och controller kan visa meddelande)
-      return false;
+      return itemsScopeRoot.contains(el);
     } catch {
       return false;
     }
@@ -526,7 +493,6 @@ Policy:
       return { ok: false, msg: status.whyReadOnly || "Read-only: skrivning är spärrad." };
     }
 
-    // Semantik: hasPerm = RBAC, can = fallback om hasPerm saknas.
     const hasPermFn = (window.FreezerStore && typeof window.FreezerStore.hasPerm === "function")
       ? window.FreezerStore.hasPerm
       : null;
@@ -547,7 +513,7 @@ Policy:
     itemsUI.formCategory = readVal("frzItemCategory");
     itemsUI.formPricePerKg = readVal("frzItemPricePerKg");
     itemsUI.formMinLevel = readVal("frzItemMinLevel");
-    itemsUI.formTempClass = readVal("frzItemTempClass");
+    itemsUI.formTempClass = readVal("frzItemTempClass") || "FROZEN";
     itemsUI.formRequiresExpiry = (readVal("frzItemRequiresExpiry") === "true");
     itemsUI.formIsActive = (readVal("frzItemIsActive") === "true");
   }
@@ -555,7 +521,13 @@ Policy:
   function readVal(id) {
     const el = document.getElementById(id);
     if (!el) return "";
-    return String(el.value || "");
+
+    // GUARD: bara element med value
+    const tag = String(el.tagName || "").toUpperCase();
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") {
+      return String(el.value || "");
+    }
+    return "";
   }
 
   function buildItemPayloadFromUIValidated() {
@@ -606,7 +578,7 @@ Policy:
       itemsUI.formCategory = String(it.category || "");
       itemsUI.formPricePerKg = (typeof it.pricePerKg !== "undefined" && it.pricePerKg !== null) ? String(it.pricePerKg) : "";
       itemsUI.formMinLevel = (typeof it.minLevel !== "undefined" && it.minLevel !== null) ? String(it.minLevel) : "";
-      itemsUI.formTempClass = String(it.tempClass || "");
+      itemsUI.formTempClass = String(it.tempClass || "FROZEN");
       itemsUI.formRequiresExpiry = !!it.requiresExpiry;
       itemsUI.formIsActive = !!it.isActive;
     } catch {}
@@ -661,7 +633,7 @@ Policy:
       const fn = window.FreezerRender && window.FreezerRender[name];
       if (typeof fn === "function") fn.call(window.FreezerRender, state);
     } catch {
-      // fail-soft: ignorera för att inte krascha tab-flödet
+      /* fail-soft */
     }
   }
 
@@ -682,7 +654,6 @@ Policy:
       safeRenderCall("renderLockPanel", state);
       safeRenderCall("renderDebug", state);
 
-      // keep panels updated
       window.FreezerRender.renderAll(state, itemsUI);
     });
   }
