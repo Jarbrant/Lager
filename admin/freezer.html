@@ -1,37 +1,16 @@
 <!-- ============================================================
 AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 2/4
-AUTOPATCH | FIL: admin/freezer.html
+AUTOPATCH v1.0 | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
-Syfte (BLOCK 2/4):
-- Lägger till Users UI containers (form + lista + editläge)
-- Lägger till debug-panel DOM (AO-02 valfri) som render kan använda
-- Ingen redesign utanför AO: endast ny panel i Dashboard-vyn
+P0-FIX (DENNA PATCH):
+- Förhindrar att sidan blir “korrupt/låst” om admin-vy-moduler saknas (404).
+- ESM-vyer laddas fail-soft via inline module-loader (import() med catch).
+- Legacy freezer.js kör alltid även om vy-moduler saknas.
 
-PATCH (REFAC-STORE-SPLIT):
-- Script-ordning uppdaterad för split: Core -> Contract -> Store -> Render -> Dashboard -> Page
-- Tar bort gamla UI/freezer-store.js include (ersätts av UI/pages/freezer/03-store.js)
-
-AO-02/15 (PATCH I DENNA FIL):
-- Lägger till #freezerViewMenu + #freezerViewRoot (för kommande router/vyer)
-- Script-ordning uppdaterad: Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router
-
-P0-FIX (I DENNA PATCH):
-- 00-view-interface.js och 01-view-registry.js använder "export" → måste laddas som module.
-  Därför laddas de med <script type="module"> för att undvika syntax error.
-
-AO-05/15 (I DENNA PATCH):
-- Laddar admin-vyer (placeholders) som ESM modules:
-  - UI/pages/freezer/admin/admin-dashboard.js
-  - UI/pages/freezer/admin/admin-items.js
-
-AO-12/15 (KOPPLING / HELHET):
-- admin-items.js exponerar window.FreezerAdminItems (createController)
-- Den måste laddas före admin/freezer.js (page/controller) för att Items CRUD ska wire:as.
-
-OBS:
-- RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
-- Inga nya storage-keys
+Policy:
+- Inga nya storage-keys/datamodell
+- Ingen UX/redesign utanför AO
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -140,13 +119,9 @@ OBS:
 
       <!-- ======================================================
       AO-02/15 — Ny shell-yta för router (meny + viewroot)
-      - Router renderar menyknappar i #freezerViewMenu
-      - Aktiv vy mountas inuti #freezerViewRoot
-      - Inte kopplat ännu, men DOM finns nu.
       ======================================================= -->
       <section class="panel">
         <div class="row">
-          <!-- BEHÅLLER befintliga tabs (för att inte riskera att nuvarande freezer.js bryts) -->
           <div class="tabs" role="tablist" aria-label="Vy">
             <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
             <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
@@ -161,15 +136,8 @@ OBS:
           </div>
         </div>
 
-        <!-- ROUTER-MENY (tom nu) -->
-        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;">
-          <!-- Router fyller detta senare -->
-        </div>
-
-        <!-- ROUTER-ROOT (tom nu) -->
-        <div id="freezerViewRoot" style="margin-top:10px;">
-          <!-- Aktiv vy mountas här senare -->
-        </div>
+        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;"></div>
+        <div id="freezerViewRoot" style="margin-top:10px;"></div>
       </section>
 
       <!-- Dashboard -->
@@ -191,7 +159,7 @@ OBS:
 
         <div class="hr"></div>
 
-        <!-- AO-03: Users CRUD panel (RBAC: visas bara för admin i render/controller) -->
+        <!-- AO-03: Users CRUD panel -->
         <section id="frzUsersPanel" class="panel" style="background:#fff;" hidden>
           <div class="row">
             <div>
@@ -209,13 +177,11 @@ OBS:
 
           <div class="hr"></div>
 
-          <!-- Error/feedback -->
           <div id="frzUsersMsg" class="panel warn" hidden>
             <b id="frzUsersMsgTitle">Fel</b>
             <div class="muted" id="frzUsersMsgText">—</div>
           </div>
 
-          <!-- Form (create/edit) -->
           <div class="panel" style="background:#fafafa;">
             <div class="row" style="margin-bottom:10px;">
               <b id="frzUserFormTitle">Skapa användare</b>
@@ -242,16 +208,12 @@ OBS:
               <label class="chk"><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
             </div>
 
-            <!-- Hidden fields for edit mode -->
             <input id="frzUserEditingId" type="hidden" value="" />
           </div>
 
           <div class="hr"></div>
 
-          <!-- Users list -->
-          <div class="list" id="frzUsersList" aria-label="Users list">
-            <!-- Rendered by freezer-render.js (XSS-safe) -->
-          </div>
+          <div class="list" id="frzUsersList" aria-label="Users list"></div>
         </section>
       </section>
 
@@ -265,9 +227,7 @@ OBS:
             <b id="frzSaldoCount">0</b>
           </div>
         </div>
-        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;">
-          <!-- Renderas XSS-safe -->
-        </div>
+        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;"></div>
       </section>
 
       <!-- Historik -->
@@ -280,9 +240,7 @@ OBS:
             <b id="frzHistoryCount">0</b>
           </div>
         </div>
-        <div id="frzHistoryList" class="panel" style="background:#fafafa;">
-          <!-- Renderas XSS-safe -->
-        </div>
+        <div id="frzHistoryList" class="panel" style="background:#fafafa;"></div>
       </section>
 
       <footer class="muted">
@@ -293,10 +251,7 @@ OBS:
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router/page
-
-  AO-12 notis:
-  - admin-items.js måste ligga före freezer.js så window.FreezerAdminItems finns när page/controller initierar.
+  Core → Contract → Store → Render → Dashboard → (ESM views fail-soft) → page/controller
   =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
@@ -305,15 +260,27 @@ OBS:
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
 
-  <!-- AO-01/15 (ESM: använder export) -->
-  <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
-  <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
+  <!-- ESM LOADER (fail-soft): försöker ladda view-interface/registry + admin placeholders.
+       Om 404 eller ESM-fel: logga och fortsätt så legacy freezer.js alltid kan köra. -->
+  <script type="module">
+    const mods = [
+      "../UI/pages/freezer/00-view-interface.js",
+      "../UI/pages/freezer/01-view-registry.js",
+      "../UI/pages/freezer/admin/admin-dashboard.js",
+      "../UI/pages/freezer/admin/admin-items.js"
+    ];
 
-  <!-- AO-05/15 (ESM: admin placeholders + Items controller/provider) -->
-  <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
-  <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
+    for (const src of mods) {
+      try {
+        // Dynamisk import ger oss catch istället för “hard fail” vid 404.
+        await import(src);
+      } catch (e) {
+        console.warn("[Freezer] Module load fail-soft:", src, e && (e.message || e));
+      }
+    }
+  </script>
 
-  <!-- Router / Page (nuvarande legacy controller) -->
+  <!-- Page/controller (legacy) -->
   <script src="./freezer.js"></script>
 </body>
 </html>
