@@ -3,6 +3,11 @@ AO-01/15 — View Registry (minsta baseline) | FIL-ID: UI/pages/freezer/01-view-
 Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Central export av vy-listor per roll.
 POLICY: Inga nya storage-keys • Ingen UX/redesign • Fail-closed friendly
+
+P0 buyer-mount (DENNA PATCH):
+- Kopplar in buyer-vyer i buyerViews så router kan mounta dem.
+- Importerar buyerDashboardView + buyerInView (ESM).
+- Ingen storage. Ingen UX.
 ============================================================ */
 
 import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
@@ -10,6 +15,10 @@ import { createView, freezeView, validateViewShape } from "./00-view-interface.j
 // AO-11/15: Shared views (Saldo/Historik)
 import { sharedSaldoView } from "./shared/shared-saldo.js";
 import { sharedHistoryView } from "./shared/shared-history.js";
+
+// P0: Buyer views (mountable)
+import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
+import { buyerInView } from "./buyer/buyer-in.js";
 
 /* =========================
 BLOCK 1 — Hjälpare: säker registrering
@@ -55,6 +64,10 @@ BLOCK 2 — Listor per roll
 const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
 const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
 
+// P0: buyer views måste vara validerade och frysta via registry
+const _buyerDash = defineExistingView(buyerDashboardView, "buyerDashboardView");
+const _buyerIn = defineExistingView(buyerInView, "buyerInView");
+
 /** @type {import("./00-view-interface.js").FreezerView[]} */
 export const sharedViews = [_sharedSaldo, _sharedHistory];
 
@@ -62,7 +75,7 @@ export const sharedViews = [_sharedSaldo, _sharedHistory];
 export const adminViews = [];
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
-export const buyerViews = [];
+export const buyerViews = [_buyerDash, _buyerIn];
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
 export const pickerViews = [];
@@ -137,20 +150,19 @@ BLOCK 5 — AO-11 BRIDGE: gör registry tillgänglig för non-module freezer.js
  * Detta behövs eftersom admin/freezer.js laddas som vanlig <script>.
  */
 try {
-  if (!window.FreezerViewRegistry) {
-    window.FreezerViewRegistry = {
-      // helpers
-      defineView,
-      getViewsForRole,
-      findView,
-      toMenuItems,
-      // lists (read-only)
-      sharedViews,
-      adminViews,
-      buyerViews,
-      pickerViews
-    };
-  }
+  // P0: uppdatera alltid bridge så buyerViews blir synliga även om script-load order varierar.
+  window.FreezerViewRegistry = {
+    // helpers
+    defineView,
+    getViewsForRole,
+    findView,
+    toMenuItems,
+    // lists (read-only)
+    sharedViews,
+    adminViews,
+    buyerViews,
+    pickerViews
+  };
 } catch {
   // fail-soft
 }
