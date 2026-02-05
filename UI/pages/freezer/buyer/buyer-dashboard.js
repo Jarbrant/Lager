@@ -6,18 +6,30 @@ Projekt: Freezer (UI-only / localStorage-first)
 Kontrakt:
 - Buyer: fokus på inköp (låga nivåer, rekommenderad inköpslista)
 - Inga nya datanycklar / inga nya storage-keys
-- Robust mount/render/unmount
+- Robust mount/render/unmount (router-kompatibelt)
 - XSS-safe: bygger DOM via createElement + textContent
 
 ESM:
 - Laddas med <script type="module" ...>
 
+P0-FIX i denna patch:
+- defineView-spec måste använda label (inte title) för att matcha view-interface/registry.
+- exportera vyn (buyerDashboardView) så registry kan importera den senare.
+- mount/render/unmount måste följa router: mount({root,ctx}), render({root,state,ctx}), unmount({root,ctx})
 ============================================================ */
 
 import { defineView } from "../01-view-registry.js";
 
 const VIEW_ID = "buyer-dashboard";
-const VIEW_TITLE = "Inköp • Dashboard";
+const VIEW_LABEL = "Inköp • Dashboard";
+
+/* =========================
+BLOCK 1 — Lokal vy-state (ingen storage)
+========================= */
+const _viewState = {
+  root: /** @type {HTMLElement|null} */ (null),
+  unsub: /** @type {null|Function} */ (null)
+};
 
 function safeNum(n) {
   return Number.isFinite(n) ? n : 0;
@@ -66,12 +78,11 @@ function normalizeItemsAndStock(state) {
     normStock.push({ articleNo, qty });
   }
 
-  return { items, byArticle, stock: normStock };
+  return { byArticle, stock: normStock };
 }
 
 function computeBuyerList(state) {
   const { byArticle, stock } = normalizeItemsAndStock(state);
-
   const needs = [];
 
   for (const row of stock) {
@@ -109,16 +120,40 @@ function clear(node) { while (node.firstChild) node.removeChild(node.firstChild)
 
 function formatCtxLine(ctx) {
   const role = ctx && ctx.role ? String(ctx.role) : "—";
-  const ro = ctx && (ctx.readOnly === true || ctx.mode === "readOnly") ? "read-only" : "write";
+  const ro = ctx && (ctx.readOnly === true || ctx.mode === "readOnly" || ctx.isReadOnly === true) ? "read-only" : "write";
   return `role=${role} • mode=${ro}`;
 }
 
-function resolveRoot(ctx) {
-  const r = ctx && ctx.root ? ctx.root : document.getElementById("freezerViewRoot");
-  return r || document.body;
+function resolveRootFromArgs(a, b) {
+  // Router: mount({root,ctx}) / render({root,state,ctx})
+  if (a && typeof a === "object" && a.root) return a.root;
+
+  // Legacy: mount(ctx) där ctx.root finns
+  if (a && typeof a === "object" && a.root) return a.root;
+
+  // Fallback
+  const fromDom = document.getElementById("freezerViewRoot");
+  return fromDom || document.body;
+}
+
+function resolveCtxFromArgs(a, b) {
+  // Router shape
+  if (a && typeof a === "object" && ("ctx" in a)) return a.ctx || null;
+
+  // Legacy: mount(ctx)
+  if (a && typeof a === "object" && !("root" in a)) return a;
+
+  return b || null;
+}
+
+function resolveStateFromArgs(a) {
+  // Router: render({root,state,ctx})
+  if (a && typeof a === "object" && ("state" in a)) return a.state || {};
+  return {};
 }
 
 function renderBuyerDashboard(root, state, ctx) {
+  if (!root || !(root instanceof HTMLElement)) return;
   clear(root);
 
   const title = el("h2");
@@ -228,36 +263,69 @@ function renderBuyerDashboard(root, state, ctx) {
   root.appendChild(box);
 }
 
-defineView({
+/* =========================
+BLOCK 2 — View definition (P0: router-kompatibel + exporterad)
+========================= */
+export const buyerDashboardView = defineView({
   id: VIEW_ID,
-  title: VIEW_TITLE,
+  label: VIEW_LABEL,
   requiredPerm: "dashboard_view",
 
-  mount(ctx) {
-    const root = resolveRoot(ctx);
-    const store = window.FreezerStore || null;
+  mount(a, b) {
+    try {
+      // Router: mount({root,ctx})
+      const root = resolveRootFromArgs(a, b);
+      const ctx = resolveCtxFromArgs(a, b);
 
-    const state = store && typeof store.getState === "function" ? store.getState() : {};
-    renderBuyerDashboard(root, state, ctx);
+      _viewState.root = (root instanceof HTMLElement) ? root : null;
 
-    let unsub = null;
-    if (store && typeof store.subscribe === "function") {
-      try {
-        unsub = store.subscribe((st) => {
-          renderBuyerDashboard(root, st, ctx);
-        });
-      } catch {}
-    }
+      // säkerställ att vi inte läcker gamla subscriptions
+      try { if (typeof _viewState.unsub === "function") _viewState.unsub(); } catch {}
+      _viewState.unsub = null;
 
-    return {
-      render(nextCtx) {
-        const s = store && typeof store.getState === "function" ? store.getState() : {};
-        renderBuyerDashboard(root, s, nextCtx || ctx);
-      },
-      unmount() {
-        try { if (typeof unsub === "function") unsub(); } catch {}
-        clear(root);
+      const store = window.FreezerStore || null;
+      const state = store && typeof store.getState === "function" ? store.getState() : {};
+      renderBuyerDashboard(_viewState.root || root, state, ctx);
+
+      if (store && typeof store.subscribe === "function") {
+        try {
+          _viewState.unsub = store.subscribe((st) => {
+            // använd senast känd root
+            const r = _viewState.root || root;
+            renderBuyerDashboard(r, st || {}, ctx);
+          });
+        } catch {
+          _viewState.unsub = null;
+        }
       }
-    };
+    } catch {
+      /* fail-soft */
+    }
+  },
+
+  render(a, b) {
+    try {
+      // Router: render({root,state,ctx})
+      const root = (a && typeof a === "object" && a.root) ? a.root : (_viewState.root || resolveRootFromArgs(a, b));
+      const ctx = resolveCtxFromArgs(a, b);
+      const state = resolveStateFromArgs(a);
+
+      _viewState.root = (root instanceof HTMLElement) ? root : _viewState.root;
+
+      renderBuyerDashboard(root, state, ctx);
+    } catch {
+      /* fail-soft */
+    }
+  },
+
+  unmount() {
+    try { if (typeof _viewState.unsub === "function") _viewState.unsub(); } catch {}
+    _viewState.unsub = null;
+
+    try {
+      if (_viewState.root) clear(_viewState.root);
+    } catch {}
+
+    _viewState.root = null;
   }
 });
