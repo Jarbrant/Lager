@@ -17,7 +17,7 @@ BLOCK 1 — Hjälpare: säker registrering
 
 /**
  * Skapar + validerar + fryser en vy.
- * Registry kan använda detta när riktiga vyer läggs in i AO-04/15.
+ * Registry kan använda detta när riktiga vyer läggs in.
  *
  * @param {Parameters<typeof createView>[0]} spec
  * @returns {import("./00-view-interface.js").FreezerView}
@@ -34,6 +34,24 @@ export function defineView(spec) {
   return freezeView(view);
 }
 
+/**
+ * Validerar + fryser en redan-skapad vy (t.ex. importerad).
+ * Fail-closed med tydligt fel för att undvika “tysta” router-problem.
+ *
+ * @param {any} view
+ * @param {string} name
+ * @returns {import("./00-view-interface.js").FreezerView}
+ */
+function defineExistingView(view, name) {
+  const v = validateViewShape(view);
+  if (!v.ok) {
+    throw new Error(
+      `AO-11/15 view-registry: Importerad vy är ogiltig (${name}): ` + v.errors.join("; ")
+    );
+  }
+  return freezeView(view);
+}
+
 /* =========================
 BLOCK 2 — Listor per roll
 ========================= */
@@ -41,9 +59,11 @@ BLOCK 2 — Listor per roll
  * AO-11/15 DoD: Alla roller får se Saldo/Historik som views.
  * Därför läggs de i sharedViews.
  */
+const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
+const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
-export const sharedViews = [sharedSaldoView, sharedHistoryView];
+export const sharedViews = [_sharedSaldo, _sharedHistory];
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
 export const adminViews = [];
@@ -59,15 +79,34 @@ BLOCK 3 — Aggregat (praktiskt för router senare)
 ========================= */
 
 /**
+ * Normaliserar roll-sträng så legacy ("ADMIN") och nya ("admin") fungerar.
+ * @param {string} role
+ * @returns {"admin"|"buyer"|"picker"|""}
+ */
+function normalizeRole(role) {
+  const r = String(role || "").trim();
+  if (!r) return "";
+  const up = r.toUpperCase();
+  if (up === "ADMIN") return "admin";
+  if (up === "BUYER") return "buyer";
+  if (up === "PICKER") return "picker";
+  if (up === "SYSTEM_ADMIN") return ""; // SYSTEM_ADMIN ska vara read-only/ingen extra vy här
+  const low = r.toLowerCase();
+  if (low === "admin" || low === "buyer" || low === "picker") return /** @type any */ (low);
+  return "";
+}
+
+/**
  * Router kan använda detta för att slå ihop vyer per roll.
  * @param {"admin"|"buyer"|"picker"|string} role
  * @returns {import("./00-view-interface.js").FreezerView[]}
  */
 export function getViewsForRole(role) {
   // GUARD: enkel och förutsägbar. Okända roller får bara shared.
-  if (role === "admin") return [...sharedViews, ...adminViews];
-  if (role === "buyer") return [...sharedViews, ...buyerViews];
-  if (role === "picker") return [...sharedViews, ...pickerViews];
+  const nr = normalizeRole(role);
+  if (nr === "admin") return [...sharedViews, ...adminViews];
+  if (nr === "buyer") return [...sharedViews, ...buyerViews];
+  if (nr === "picker") return [...sharedViews, ...pickerViews];
   return [...sharedViews];
 }
 
