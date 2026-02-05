@@ -17,6 +17,11 @@ Syfte:
 Kontrakt:
 - Förväntar window.FreezerStore.getStatus() och state-shape från store
 - Får inte skapa nya storage-keys eller skriva till storage
+
+AUTOPATCH (P0):
+- Status-pill ska vara GRÖN när systemet inte är låst och inga tydliga felindikatorer finns,
+  även om status-text inte är exakt "OK" (t.ex. READY/INIT/FULL).
+- Debug-panel ska inte triggas bara för att status !== "OK", utan baseras på samma OK-klassning.
 ============================================================ */
 (function () {
   "use strict";
@@ -62,22 +67,28 @@ Kontrakt:
     const lockReason = byId("frzLockReason");
 
     const st = safeStatus();
+    const okLike = isOkLikeStatus(st);
 
-    if (pillText) pillText.textContent = st.status;
+    if (pillText) {
+      // Visa alltid store-status text, men färg styrs av okLike/locked.
+      pillText.textContent = safeText(st.status || (okLike ? "OK" : "KORRUPT"));
+    }
 
     if (pill) {
       pill.classList.remove("ok", "danger");
-      if (st.status === "OK") pill.classList.add("ok");
-      if (st.status !== "OK") pill.classList.add("danger");
-      pill.title = st.status === "OK"
-        ? "OK – lagring och state ser bra ut"
-        : `Problem – ${st.errorCode || "okänd kod"}`;
+      pill.classList.add(okLike ? "ok" : "danger");
+
+      pill.title = okLike
+        ? "OK – systemet är inte låst"
+        : `Problem – ${st.errorCode || st.reason || "okänd kod"}`;
     }
 
     if (lockPanel && lockReason) {
       if (st.locked) {
         lockPanel.hidden = false;
-        lockReason.textContent = st.reason ? `Orsak: ${st.reason}` : `Orsak: ${st.errorCode || "okänt fel"}`;
+        lockReason.textContent = st.reason
+          ? `Orsak: ${st.reason}`
+          : `Orsak: ${st.errorCode || "okänt fel"}`;
       } else {
         lockPanel.hidden = true;
         lockReason.textContent = "Orsak: —";
@@ -126,14 +137,17 @@ Kontrakt:
     if (!panel || !text) return;
 
     const st = safeStatus();
-    const shouldShow = (st.status !== "OK") || (st.debug && (st.debug.demoCreated || st.debug.rawWasEmpty));
+    const okLike = isOkLikeStatus(st);
 
+    // AUTOPATCH: debug ska visas när vi har faktisk avvikelse (ej okLike) eller debug-flaggor.
+    const shouldShow = (!okLike) || (st.debug && (st.debug.demoCreated || st.debug.rawWasEmpty));
     panel.hidden = !shouldShow;
 
     const parts = [];
     if (st.debug && st.debug.storageKey) parts.push(`key=${st.debug.storageKey}`);
     if (st.debug && typeof st.debug.schemaVersion !== "undefined") parts.push(`v=${st.debug.schemaVersion}`);
-    if (st.errorCode) parts.push(`err=${st.errorCode}`);
+    if (!okLike && st.errorCode) parts.push(`err=${st.errorCode}`);
+    if (!okLike && st.reason) parts.push(`reason=${st.reason}`);
     if (st.debug && st.debug.rawWasEmpty) parts.push("rawEmpty=1");
     if (st.debug && st.debug.demoCreated) parts.push("demo=1");
 
@@ -652,6 +666,7 @@ Kontrakt:
     if (!cards || !notes) return;
 
     const st = safeStatus();
+    const okLike = isOkLikeStatus(st);
 
     let itemCount = 0;
     try {
@@ -662,7 +677,7 @@ Kontrakt:
 
     cards.textContent = "";
     addCard(cards, "Produkter", String(itemCount));
-    addCard(cards, "Status", st.status);
+    addCard(cards, "Status", okLike ? "OK" : safeText(st.status || "KORRUPT"));
     addCard(cards, "Läge", st.locked ? "LÅST" : (st.readOnly ? "READ-ONLY" : "FULL"));
 
     const msg = [];
@@ -702,6 +717,34 @@ Kontrakt:
       }
     } catch {}
     return { status: "KORRUPT", locked: true, readOnly: true, errorCode: "FRZ_E_NOT_INIT", debug: {} };
+  }
+
+  function isOkLikeStatus(st) {
+    try {
+      // 1) Låst är alltid "inte ok"
+      if (st && st.locked === true) return false;
+
+      // 2) Om vi har en tydlig felkod/orsak -> inte ok
+      if (st && st.errorCode) return false;
+      if (st && st.reason) return false;
+
+      // 3) Tolka status-text tolerant (trim + upper)
+      const raw = st && typeof st.status !== "undefined" ? String(st.status) : "";
+      const s = raw.trim().toUpperCase();
+
+      // Vanliga ok-lägen
+      const okSet = new Set(["OK", "READY", "INIT", "INITIALIZED", "FULL", "RUNNING"]);
+      if (okSet.has(s)) return true;
+
+      // Vanliga fel-lägen
+      const badSet = new Set(["KORRUPT", "CORRUPT", "ERROR", "FAIL", "FAILED", "BROKEN", "NOT_INIT"]);
+      if (badSet.has(s)) return false;
+
+      // 4) Default: om inte låst och ingen felkod/orsak -> ok (fail-soft)
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function can(permKey) {
