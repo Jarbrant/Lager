@@ -4,6 +4,7 @@ AUTOPATCH | FIL: admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
 
 AO-04/15 — Produktregister (Items) CRUD (Admin) — delegation (tills flytt i AO-12)
+AO-11/15 — Router: shared views i meny för alla roller (Saldo/Historik)
 AO-15/15 — QA-stabilisering:
 - Inga dubbla listeners vid vybyte / dubbel script-load (init-guard)
 - Korrupt storage -> read-only men navigation funkar (shim-store fail-soft)
@@ -33,7 +34,11 @@ Policy:
   const userSelect = byId("frzUserSelect");
   const resetBtn = byId("frzResetDemoBtn");
 
-  // Users UI
+  // Router shell (AO-11)
+  const viewMenu = byId("freezerViewMenu");
+  const viewRoot = byId("freezerViewRoot");
+
+  // Users UI (legacy panel i dashboard)
   const usersPanel = byId("frzUsersPanel");
   const usersList = byId("frzUsersList");
 
@@ -55,6 +60,10 @@ Policy:
 
   // Page state
   let activeTab = "dashboard";
+
+  // AO-11: router state (in-memory)
+  let routerActiveViewId = ""; // default: första view i listan
+  let routerMountedView = null;
 
   // AO-04: Items UI state (in-memory only)
   const itemsUI = {
@@ -177,6 +186,9 @@ Policy:
         window.FreezerRender.renderAll(state || {}, itemsUI);
         window.FreezerRender.setActiveTabUI(activeTab);
 
+        // AO-11: uppdatera router view (om aktiv)
+        routerRerender();
+
         if (usersPanel && !usersPanel.hidden) {
           refreshFormHeader();
         }
@@ -191,7 +203,10 @@ Policy:
   window.FreezerRender.setActiveTabUI(activeTab);
   refreshFormHeader();
 
-  // Tabs (navigation ska funka även om store är korrupt)
+  // AO-11: init router menu (saldo/historik för alla)
+  initRouterMenu();
+
+  // Tabs (legacy navigation ska funka även om store är korrupt)
   bindTab(tabDashboard, "dashboard");
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
@@ -207,6 +222,9 @@ Policy:
       } catch (e) {
         markStoreCorrupt(e);
       }
+
+      // AO-11: uppdatera router meny efter rollbyte
+      initRouterMenu();
 
       const st = safeGetStatus();
       if (st && userSelect.value !== st.role) userSelect.value = st.role;
@@ -238,11 +256,12 @@ Policy:
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
         setItemsMsg("Demo återställd.");
+        initRouterMenu(); // refresh efter reset
       }
     });
   }
 
-  // Users actions
+  // Users actions (legacy)
   wireUsersForm();
   wireUsersListDelegation();
 
@@ -250,7 +269,164 @@ Policy:
   wireItemsDelegation();
 
   // -----------------------------
-  // USERS: FORM
+  // AO-11: ROUTER MENU + MOUNT
+  // -----------------------------
+  function getRegistry() {
+    try {
+      return window.FreezerViewRegistry || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function buildViewCtx() {
+    const status = safeGetStatus();
+    return {
+      role: status.role,
+      locked: !!status.locked,
+      readOnly: !!status.readOnly,
+      whyReadOnly: status.whyReadOnly || "",
+      // Views ska använda ctx.can(...) för RBAC (AO-09/11 kontrakt)
+      can: function (perm) { return safeCan(String(perm || "")); }
+    };
+  }
+
+  function initRouterMenu() {
+    const reg = getRegistry();
+    if (!viewMenu || !viewRoot || !reg || typeof reg.getViewsForRole !== "function") {
+      // Fail-soft: router saknas, legacy tabs fortsatt OK.
+      return;
+    }
+
+    const ctx = buildViewCtx();
+    let views = [];
+    try {
+      views = reg.getViewsForRole(ctx.role) || [];
+    } catch (e) {
+      console.error("[Freezer] Router: kunde inte hämta views.", e);
+      return;
+    }
+
+    // Skapa meny items och filtrera på requiredPerm (om satt)
+    const menuItems = (typeof reg.toMenuItems === "function") ? reg.toMenuItems(views) : [];
+    const visible = menuItems.filter((mi) => {
+      if (!mi) return false;
+      if (!mi.requiredPerm) return true;
+      return !!ctx.can(mi.requiredPerm);
+    });
+
+    // Om vi saknar aktiv viewId → ta första
+    if (!routerActiveViewId && visible.length) routerActiveViewId = visible[0].id;
+    if (routerActiveViewId && visible.length && !visible.some(x => x.id === routerActiveViewId)) {
+      routerActiveViewId = visible[0].id;
+    }
+
+    // Render meny (XSS-safe)
+    viewMenu.textContent = "";
+    for (const mi of visible) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tabBtn";
+      b.setAttribute("data-view-id", mi.id);
+      b.setAttribute("aria-selected", mi.id === routerActiveViewId ? "true" : "false");
+      b.textContent = String(mi.label || mi.id);
+      b.addEventListener("click", () => {
+        routerActivateView(mi.id);
+      });
+      viewMenu.appendChild(b);
+    }
+
+    // Mount aktiv view
+    routerActivateView(routerActiveViewId || "");
+  }
+
+  function routerActivateView(viewId) {
+    const reg = getRegistry();
+    if (!viewRoot || !reg || typeof reg.getViewsForRole !== "function") return;
+
+    const ctx = buildViewCtx();
+    let views = [];
+    try {
+      views = reg.getViewsForRole(ctx.role) || [];
+    } catch (e) {
+      console.error("[Freezer] Router: kunde inte hämta views.", e);
+      return;
+    }
+
+    const id = String(viewId || "").trim();
+    if (!id) return;
+
+    const view = (typeof reg.findView === "function") ? reg.findView(views, id) : null;
+    if (!view) return;
+
+    // Unmount tidigare
+    try {
+      if (routerMountedView && typeof routerMountedView.unmount === "function") {
+        routerMountedView.unmount({ root: viewRoot, ctx });
+      }
+    } catch {
+      // fail-soft
+    }
+
+    // Rensa root (kontrakt: view får en tom container)
+    while (viewRoot.firstChild) viewRoot.removeChild(viewRoot.firstChild);
+
+    routerMountedView = view;
+    routerActiveViewId = id;
+
+    // Uppdatera aria-selected i menyn
+    try {
+      const btns = viewMenu ? viewMenu.querySelectorAll("button[data-view-id]") : [];
+      btns.forEach((b) => {
+        const bid = b.getAttribute("data-view-id") || "";
+        b.setAttribute("aria-selected", bid === routerActiveViewId ? "true" : "false");
+      });
+    } catch {}
+
+    // Mount + första render
+    try {
+      if (typeof view.mount === "function") {
+        view.mount({ root: viewRoot, ctx });
+      }
+    } catch (e) {
+      console.error("[Freezer] Router: mount-fel.", e);
+    }
+
+    routerRerender();
+  }
+
+  function routerRerender() {
+    const view = routerMountedView;
+    if (!view || !viewRoot) return;
+
+    const ctx = buildViewCtx();
+    const state = safeGetState();
+
+    try {
+      if (typeof view.render === "function") {
+        view.render({ root: viewRoot, state, ctx });
+      }
+    } catch (e) {
+      console.error("[Freezer] Router: render-fel.", e);
+      // fail-soft: visa enkel fallback
+      try {
+        const box = document.createElement("div");
+        box.className = "panel warn";
+        const b = document.createElement("b");
+        b.textContent = "Vyn kunde inte renderas";
+        const m = document.createElement("div");
+        m.className = "muted";
+        m.textContent = "Kontrollera Console för fel.";
+        box.appendChild(b);
+        box.appendChild(m);
+        while (viewRoot.firstChild) viewRoot.removeChild(viewRoot.firstChild);
+        viewRoot.appendChild(box);
+      } catch {}
+    }
+  }
+
+  // -----------------------------
+  // USERS: FORM (legacy)
   // -----------------------------
   function wireUsersForm() {
     if (saveBtn) {
@@ -732,6 +908,9 @@ Policy:
       window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
       window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
       window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
+
+      // AO-11: uppdatera router view
+      routerRerender();
     } catch (e) {
       // fail-soft
     }
@@ -755,7 +934,7 @@ Policy:
   }
 
   // -----------------------------
-  // TABS (nav ska funka även vid read-only shim)
+  // TABS (legacy)
   // -----------------------------
   function bindTab(btn, key) {
     if (!btn) return;
@@ -765,7 +944,6 @@ Policy:
 
       const state = safeGetState();
 
-      // Rendera bas UI-delar fail-soft
       window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
       window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
       window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
