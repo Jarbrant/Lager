@@ -4,13 +4,10 @@ Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Central export av vy-listor per roll.
 POLICY: Inga nya storage-keys • Ingen UX/redesign • Fail-closed friendly
 
-P0-FIX (DENNA PATCH):
-- Rättar import-paths så de matchar faktisk struktur:
-  - shared ligger i: ./shared/...
-  - buyer ligger i: ./buyer/...
-  (Inte ./buyer/shared/... och inte ./buyer/buyer/... )
-- Kopplar in buyer-vyer i buyerViews så router kan mounta buyer.
-
+P0 buyer-mount (DENNA PATCH):
+- Kopplar in buyer-vyer i buyerViews så router kan mounta dem.
+- Importerar buyerDashboardView + buyerInView (ESM).
+- Ingen storage. Ingen UX.
 ============================================================ */
 
 import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
@@ -19,7 +16,7 @@ import { createView, freezeView, validateViewShape } from "./00-view-interface.j
 import { sharedSaldoView } from "./shared/shared-saldo.js";
 import { sharedHistoryView } from "./shared/shared-history.js";
 
-// AO-07/15 + AO-14/15: Buyer views (ESM)
+// AO-07/15 + AO-14/15: Buyer views (router mount)
 import { buyerInView } from "./buyer/buyer-in.js";
 import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
 
@@ -67,7 +64,6 @@ BLOCK 2 — Listor per roll
 const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
 const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
 
-// Buyer views (P0 buyer-mount)
 const _buyerDashboard = defineExistingView(buyerDashboardView, "buyerDashboardView");
 const _buyerIn = defineExistingView(buyerInView, "buyerInView");
 
@@ -75,7 +71,7 @@ const _buyerIn = defineExistingView(buyerInView, "buyerInView");
 export const sharedViews = [_sharedSaldo, _sharedHistory];
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
-export const adminViews = [];
+export const adminViews = []; // fylls när admin-moduler finns
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
 export const buyerViews = [_buyerDashboard, _buyerIn];
