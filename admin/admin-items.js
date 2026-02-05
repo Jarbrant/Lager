@@ -3,27 +3,41 @@ AO-05/15 — Admin view: Items (placeholder) | FIL-ID: UI/pages/freezer/admin/ad
 Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Admin-vy (placeholder) så router kan mount/render/unmount robust.
 POLICY: Ingen storage här • XSS-safe (ingen innerHTML) • Inga sid-effekter
+OBS: ESM-fil (import/export) → måste laddas med <script type="module">
 ============================================================ */
 
 import { defineView } from "../01-view-registry.js";
 
-/**
- * Admin Items placeholder view
- * - Robust mount/render/unmount
- * - Minimal DOM med textContent (XSS-safe)
- * - Inga listeners/timers (än)
- */
+/* =========================
+BLOCK 1 — Lokal vy-state (ingen storage)
+- Undviker globala id-krockar (ingen document.getElementById)
+- render() uppdaterar bara element som mount() skapade
+========================= */
+const _viewState = {
+  root: /** @type {HTMLElement|null} */ (null),
+  statusEl: /** @type {HTMLElement|null} */ (null),
+  boxEl: /** @type {HTMLElement|null} */ (null)
+};
+
+/* =========================
+BLOCK 2 — View definition
+========================= */
 export const adminItemsView = defineView({
   id: "admin-items",
   label: "Produkter",
-  requiredPerm: null,
+  requiredPerm: null, // Placeholder: öppen. Sätt perm senare när RBAC kopplas.
 
   mount(root, ctx) {
     try {
       if (!root || !(root instanceof HTMLElement)) return;
 
-      // Rensa container (fail-soft)
+      // Kontrakt: router ger vyn en tom container.
+      // Vi rensar bara root vi fick (inte globalt).
       while (root.firstChild) root.removeChild(root.firstChild);
+
+      _viewState.root = root;
+      _viewState.statusEl = null;
+      _viewState.boxEl = null;
 
       const wrap = document.createElement("section");
       wrap.setAttribute("data-view", "admin-items");
@@ -40,20 +54,20 @@ export const adminItemsView = defineView({
       hint.textContent = "Placeholder-vy (AO-05/15).";
 
       const status = document.createElement("div");
-      status.id = "frzAdminItemsPlaceholderStatus";
       status.style.marginTop = "10px";
       status.style.opacity = "0.75";
       status.style.fontSize = "13px";
       status.textContent = formatCtxLine(ctx);
+      _viewState.statusEl = status;
 
-      // Extra: minimal “safe list” container (för framtida items-lista)
+      // Minimal “safe box” container (för framtida items-lista)
       const box = document.createElement("div");
-      box.id = "frzAdminItemsPlaceholderBox";
       box.style.marginTop = "12px";
       box.style.border = "1px dashed #ddd";
       box.style.borderRadius = "10px";
       box.style.padding = "10px";
       box.style.background = "#fafafa";
+      _viewState.boxEl = box;
 
       const boxTitle = document.createElement("b");
       boxTitle.textContent = "Här kommer items-UI att monteras";
@@ -80,28 +94,37 @@ export const adminItemsView = defineView({
   },
 
   render(ctx) {
-    // Robust: om DOM inte finns (t.ex. vy ej mountad) gör inget
     try {
-      const el = document.getElementById("frzAdminItemsPlaceholderStatus");
-      if (!el) return;
-      el.textContent = formatCtxLine(ctx);
+      // Robust: om vyn inte är mountad → gör inget
+      if (!_viewState.root) return;
+
+      // Uppdatera bara om statusEl fortfarande sitter i vår root
+      if (_viewState.statusEl && _viewState.root.contains(_viewState.statusEl)) {
+        _viewState.statusEl.textContent = formatCtxLine(ctx);
+      }
     } catch {
       /* fail-soft */
     }
   },
 
   unmount() {
-    // Placeholder: inget att städa (inga listeners/timers)
+    // Städar endast våra referenser (inga listeners/timers i placeholder)
+    _viewState.root = null;
+    _viewState.statusEl = null;
+    _viewState.boxEl = null;
   }
 });
 
+/* =========================
+BLOCK 3 — Hjälpare
+========================= */
 function formatCtxLine(ctx) {
   try {
     const role = ctx && ctx.role ? String(ctx.role) : "—";
-    const mode = ctx && ctx.readOnly ? "read-only" : "write";
+    const ro = !!(ctx && (ctx.readOnly || ctx.isReadOnly));
+    const mode = ro ? "read-only" : "write";
     return `Ctx: role=${role} • mode=${mode}`;
   } catch {
     return "Ctx: —";
   }
 }
-
