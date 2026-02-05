@@ -24,4 +24,15 @@ Lager/
 │
 ├─ 🟩 index.html                              (👁 PUBLIK: start/landing/meny)
 └─ 🟩 readme                                  (🧩 dokumentation)
+UI/pages/freezer/
+├─ shared/
+│  ├─ saldo-view.js        (delad vy: tabell + sök/sort/filter; RBAC styr actions)
+│  ├─ historik-view.js     (delad vy: lista; RBAC styr vad som visas)
+│  └─ ui-shell.js          (små helpers för tabs/menu, valfritt)
+├─ admin/
+│  └─ dashboard.js         (ADMIN dashboard)
+├─ buyer/
+│  └─ dashboard.js         (INKÖPARE dashboard)
+└─ picker/
+   └─ dashboard.js         (PLOCK dashboard)
 
