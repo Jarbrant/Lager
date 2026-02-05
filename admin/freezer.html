@@ -14,11 +14,16 @@ PATCH (REFAC-STORE-SPLIT):
 
 AO-02/15 (PATCH I DENNA FIL):
 - Lägger till #freezerViewMenu + #freezerViewRoot (för kommande router/vyer)
-- Script-ordning uppdaterad: Core → Contract → Store → Render → Dashboard → view-interface → registry → router
+- Script-ordning uppdaterad: Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router
 
 P0-FIX (I DENNA PATCH):
 - 00-view-interface.js och 01-view-registry.js använder "export" → måste laddas som module.
   Därför laddas de med <script type="module"> för att undvika syntax error.
+
+AO-05/15 (I DENNA PATCH):
+- Laddar admin-vyer (placeholders) som ESM modules:
+  - UI/pages/freezer/admin/admin-dashboard.js
+  - UI/pages/freezer/admin/admin-items.js
 
 OBS:
 - RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
@@ -284,7 +289,7 @@ OBS:
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → Render → Dashboard → view-interface → registry → (vyfiler) → router
+  Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router/page
   =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
@@ -297,7 +302,11 @@ OBS:
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
 
-  <!-- Router / Page (nuvarande) -->
+  <!-- AO-05/15 (ESM: admin placeholders) -->
+  <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
+  <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
+
+  <!-- Router / Page (nuvarande legacy controller) -->
   <script src="./freezer.js"></script>
 </body>
 </html>
