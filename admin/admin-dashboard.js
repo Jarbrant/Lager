@@ -3,16 +3,24 @@ AO-05/15 — Admin view: Dashboard (placeholder) | FIL-ID: UI/pages/freezer/admi
 Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Admin-vy (placeholder) så router kan mount/render/unmount robust.
 POLICY: Ingen storage här • XSS-safe (ingen innerHTML) • Inga sid-effekter
+OBS: ESM-fil (import/export) → måste laddas med <script type="module">
 ============================================================ */
 
 import { defineView } from "../01-view-registry.js";
 
-/**
- * Admin Dashboard placeholder view
- * - Robust mount/render/unmount
- * - Bygger minimal DOM med textContent
- * - Ingen logik, inga event listeners (än)
- */
+/* =========================
+BLOCK 1 — Lokal vy-state (ingen storage)
+- Undviker globala id-krockar (ingen document.getElementById)
+- render() uppdaterar bara element som mount() skapade
+========================= */
+const _viewState = {
+  root: /** @type {HTMLElement|null} */ (null),
+  statusEl: /** @type {HTMLElement|null} */ (null)
+};
+
+/* =========================
+BLOCK 2 — View definition
+========================= */
 export const adminDashboardView = defineView({
   id: "admin-dashboard",
   label: "Dashboard",
@@ -22,8 +30,12 @@ export const adminDashboardView = defineView({
     try {
       if (!root || !(root instanceof HTMLElement)) return;
 
-      // Rensa (fail-soft) – router ansvarar för att mountas i rätt container
+      // Kontrakt: router ger vyn en tom container.
+      // Vi rensar bara root vi fick (inte globalt).
       while (root.firstChild) root.removeChild(root.firstChild);
+
+      _viewState.root = root;
+      _viewState.statusEl = null;
 
       const wrap = document.createElement("section");
       wrap.setAttribute("data-view", "admin-dashboard");
@@ -40,11 +52,12 @@ export const adminDashboardView = defineView({
       hint.textContent = "Placeholder-vy (AO-05/15).";
 
       const status = document.createElement("div");
-      status.id = "frzAdminDashPlaceholderStatus";
       status.style.marginTop = "10px";
       status.style.opacity = "0.75";
       status.style.fontSize = "13px";
       status.textContent = formatCtxLine(ctx);
+
+      _viewState.statusEl = status;
 
       wrap.appendChild(h1);
       wrap.appendChild(p);
@@ -58,29 +71,36 @@ export const adminDashboardView = defineView({
   },
 
   render(ctx) {
-    // Robust: om DOM inte finns (t.ex. vy ej mountad) gör inget
     try {
-      const el = document.getElementById("frzAdminDashPlaceholderStatus");
-      if (!el) return;
-      el.textContent = formatCtxLine(ctx);
+      // Robust: om vyn inte är mountad → gör inget
+      if (!_viewState.root || !_viewState.statusEl) return;
+
+      // Extra guard: uppdatera bara om statusEl fortfarande sitter i root
+      if (!_viewState.root.contains(_viewState.statusEl)) return;
+
+      _viewState.statusEl.textContent = formatCtxLine(ctx);
     } catch {
       /* fail-soft */
     }
   },
 
   unmount() {
-    // Inga listeners/timers i placeholder – men håll robust API
-    // Router kan rensa container själv.
+    // Städar endast våra referenser (inga listeners/timers i placeholder)
+    _viewState.root = null;
+    _viewState.statusEl = null;
   }
 });
 
+/* =========================
+BLOCK 3 — Hjälpare
+========================= */
 function formatCtxLine(ctx) {
   try {
     const role = ctx && ctx.role ? String(ctx.role) : "—";
-    const mode = ctx && ctx.readOnly ? "read-only" : "write";
+    const ro = !!(ctx && (ctx.readOnly || ctx.isReadOnly));
+    const mode = ro ? "read-only" : "write";
     return `Ctx: role=${role} • mode=${mode}`;
   } catch {
     return "Ctx: —";
   }
 }
-
