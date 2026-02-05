@@ -25,6 +25,10 @@ AO-05/15 (I DENNA PATCH):
   - UI/pages/freezer/admin/admin-dashboard.js
   - UI/pages/freezer/admin/admin-items.js
 
+AO-12/15 (KOPPLING / HELHET):
+- admin-items.js exponerar window.FreezerAdminItems (createController)
+- Den måste laddas före admin/freezer.js (page/controller) för att Items CRUD ska wire:as.
+
 OBS:
 - RBAC sker i store + render/controller: panelen kan döljas om saknar users_manage
 - Inga nya storage-keys
@@ -290,6 +294,9 @@ OBS:
   <!-- ==========================================================
   Script order (KRITISK):
   Core → Contract → Store → Render → Dashboard → view-interface → registry → vyfiler → router/page
+
+  AO-12 notis:
+  - admin-items.js måste ligga före freezer.js så window.FreezerAdminItems finns när page/controller initierar.
   =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
@@ -302,7 +309,7 @@ OBS:
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
 
-  <!-- AO-05/15 (ESM: admin placeholders) -->
+  <!-- AO-05/15 (ESM: admin placeholders + Items controller/provider) -->
   <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
   <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
 
