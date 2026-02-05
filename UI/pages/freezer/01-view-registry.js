@@ -3,11 +3,6 @@ AO-01/15 — View Registry (minsta baseline) | FIL-ID: UI/pages/freezer/01-view-
 Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Central export av vy-listor per roll.
 POLICY: Inga nya storage-keys • Ingen UX/redesign • Fail-closed friendly
-
-P0 buyer-mount (DENNA PATCH):
-- Kopplar in buyer-vyer i buyerViews så router kan mounta dem.
-- Importerar buyerDashboardView + buyerInView (ESM).
-- Ingen storage. Ingen UX.
 ============================================================ */
 
 import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
@@ -16,7 +11,7 @@ import { createView, freezeView, validateViewShape } from "./00-view-interface.j
 import { sharedSaldoView } from "./shared/shared-saldo.js";
 import { sharedHistoryView } from "./shared/shared-history.js";
 
-// P0: Buyer views (mountable)
+// BUYER views
 import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
 import { buyerInView } from "./buyer/buyer-in.js";
 
@@ -64,7 +59,6 @@ BLOCK 2 — Listor per roll
 const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
 const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
 
-// P0: buyer views måste vara validerade och frysta via registry
 const _buyerDash = defineExistingView(buyerDashboardView, "buyerDashboardView");
 const _buyerIn = defineExistingView(buyerInView, "buyerInView");
 
@@ -86,19 +80,30 @@ BLOCK 3 — Aggregat (praktiskt för router)
 
 /**
  * Normaliserar roll-sträng så legacy ("ADMIN") och nya ("admin") fungerar.
+ * ✅ P0: stöd för svenska roller ("INKÖPARE", "PLOCKARE")
  * @param {string} role
  * @returns {"admin"|"buyer"|"picker"|""}
  */
 function normalizeRole(role) {
   const r = String(role || "").trim();
   if (!r) return "";
+
   const up = r.toUpperCase();
+
+  // Legacy / engelska
   if (up === "ADMIN") return "admin";
   if (up === "BUYER") return "buyer";
   if (up === "PICKER") return "picker";
   if (up === "SYSTEM_ADMIN") return "";
+
+  // Svenska (UI)
+  if (up === "INKÖPARE") return "buyer";
+  if (up === "PLOCKARE") return "picker";
+
+  // Nya (småbokstäver)
   const low = r.toLowerCase();
   if (low === "admin" || low === "buyer" || low === "picker") return /** @type any */ (low);
+
   return "";
 }
 
@@ -150,19 +155,20 @@ BLOCK 5 — AO-11 BRIDGE: gör registry tillgänglig för non-module freezer.js
  * Detta behövs eftersom admin/freezer.js laddas som vanlig <script>.
  */
 try {
-  // P0: uppdatera alltid bridge så buyerViews blir synliga även om script-load order varierar.
-  window.FreezerViewRegistry = {
-    // helpers
-    defineView,
-    getViewsForRole,
-    findView,
-    toMenuItems,
-    // lists (read-only)
-    sharedViews,
-    adminViews,
-    buyerViews,
-    pickerViews
-  };
+  if (!window.FreezerViewRegistry) {
+    window.FreezerViewRegistry = {
+      // helpers
+      defineView,
+      getViewsForRole,
+      findView,
+      toMenuItems,
+      // lists (read-only)
+      sharedViews,
+      adminViews,
+      buyerViews,
+      pickerViews
+    };
+  }
 } catch {
   // fail-soft
 }
