@@ -13,6 +13,12 @@ P0 SUPPLIERS (DENNA PATCH):
   -> listSuppliers() bygger leverantörslistan från history
 - Resultat: när supplier skapas/uppdateras -> notify() -> Sök Leverantör kan rendera direkt.
 
+P0 JUSTERINGAR (enligt era beslut):
+- Org-nr (orgNo) är VALFRITT (kan vara tomt).
+- Unikhet kontrolleras endast om orgNo är ifyllt.
+- Produkter kan kopplas till leverantör via supplierId (kan vara tomt).
+  -> Om supplierId är ifyllt måste den finnas i leverantörsregistret (och vara aktiv).
+
 POLICY (LÅST):
 - Inga nya storage-keys/datamodell
 - Fail-closed
@@ -234,17 +240,25 @@ Notis:
     return list.find(s => s && normStr(s.id) === want) || null;
   }
 
+  function isSupplierActive(id) {
+    const s = findSupplierById(id);
+    if (!s) return false;
+    return s.active !== false;
+  }
+
   function validateSupplierInput(data, mode) {
     const d = (data && typeof data === "object") ? data : {};
 
     const companyName = normStr(d.companyName);
-    const orgNo = normOrg(d.orgNo);
+    const orgNo = normOrg(d.orgNo); // VALFRITT
 
-    // KRAV: Företagsnamn + Org
+    // KRAV: Företagsnamn
     if (!companyName) return { ok: false, reason: "Företagsnamn krävs." };
-    if (!orgNo) return { ok: false, reason: "Org-nr krävs." };
 
-    const contactPerson = normStr(d.contactPerson);
+    const contactPerson = normStr(d.contactPerson); // en kontaktperson i v1
+    // Om ni vill göra kontaktperson obligatorisk:
+    if (!contactPerson) return { ok: false, reason: "Kontaktperson krävs." };
+
     const phone = normPhone(d.phone);
     const email = normEmail(d.email);
     const address = normStr(d.address);
@@ -253,13 +267,15 @@ Notis:
     // Email enkel sanity (valfritt, fail-soft)
     if (email && !email.includes("@")) return { ok: false, reason: "Mail verkar ogiltig." };
 
-    // Unikhet: orgNo måste vara unik (oavsett active)
-    const existing = findSupplierByOrgNo(orgNo);
-    if (existing) {
-      if (mode === "create") return { ok: false, reason: "Org-nr finns redan." };
-      if (mode === "update") {
-        const updId = normStr(d.id);
-        if (updId && existing.id !== updId) return { ok: false, reason: "Org-nr finns redan på annan leverantör." };
+    // Unikhet: orgNo kontrolleras bara om det är ifyllt
+    if (orgNo) {
+      const existing = findSupplierByOrgNo(orgNo);
+      if (existing) {
+        if (mode === "create") return { ok: false, reason: "Org-nr finns redan." };
+        if (mode === "update") {
+          const updId = normStr(d.id);
+          if (updId && existing.id !== updId) return { ok: false, reason: "Org-nr finns redan på annan leverantör." };
+        }
       }
     }
 
@@ -409,7 +425,7 @@ Notis:
       const supplier = {
         id: supplierId,
         companyName: s.companyName,
-        orgNo: s.orgNo,
+        orgNo: s.orgNo, // kan vara ""
         contactPerson: s.contactPerson,
         phone: s.phone,
         email: s.email,
@@ -436,7 +452,7 @@ Notis:
       const cur = findSupplierById(id);
       if (!cur) return { ok: false, reason: "Leverantör hittades inte." };
 
-      // validera med sammanslagen data (så orgNo-unicitet funkar)
+      // validera med sammanslagen data (så orgNo-unicitet funkar om orgNo är ifyllt)
       const merged = Object.assign({}, cur, (patch && typeof patch === "object" ? patch : {}), { id: id });
       const v = validateSupplierInput(merged, "update");
       if (!v.ok) return { ok: false, reason: v.reason || "Ogiltig leverantör." };
@@ -446,7 +462,7 @@ Notis:
       const supplier = {
         id: id,
         companyName: s.companyName,
-        orgNo: s.orgNo,
+        orgNo: s.orgNo, // kan vara ""
         contactPerson: s.contactPerson,
         phone: s.phone,
         email: s.email,
@@ -572,12 +588,24 @@ Notis:
       const exists = (_state.items || []).some(x => x && String(x.articleNo || "") === articleNo);
       if (exists) return { ok: false, reason: "articleNo måste vara unikt." };
 
+      // supplierId: får vara tomt, men om ifyllt måste leverantören finnas + vara aktiv
+      const supplierId = normStr(p.supplierId);
+      if (supplierId) {
+        if (!findSupplierById(supplierId)) return { ok: false, reason: "supplierId finns inte (okänd leverantör)." };
+        if (!isSupplierActive(supplierId)) return { ok: false, reason: "Leverantören är inaktiv." };
+      }
+
       const it = safeClone(p);
       it.articleNo = articleNo;
+
+      // Normalisera supplierId fält (om UI skickar det)
+      if (supplierId) it.supplierId = supplierId;
+      else if ("supplierId" in it) it.supplierId = ""; // gör det stabilt
+
       if (typeof it.isActive !== "boolean") it.isActive = true;
 
       _state.items.push(it);
-      addHistory("item", "Item skapad.", { articleNo });
+      addHistory("item", "Item skapad.", { articleNo, supplierId: supplierId || "" });
       notify();
       return { ok: true };
     },
@@ -593,9 +621,25 @@ Notis:
       if (!it) return { ok: false, reason: "Item hittades inte." };
 
       const p = patch && typeof patch === "object" ? patch : {};
+
+      // supplierId: får vara tomt, men om ifyllt måste leverantören finnas + vara aktiv
+      if ("supplierId" in p) {
+        const supId = normStr(p.supplierId);
+        if (supId) {
+          if (!findSupplierById(supId)) return { ok: false, reason: "supplierId finns inte (okänd leverantör)." };
+          if (!isSupplierActive(supId)) return { ok: false, reason: "Leverantören är inaktiv." };
+          it.supplierId = supId;
+        } else {
+          it.supplierId = "";
+        }
+      }
+
       // articleNo är låst nyckel – uppdatera inte
       it.packSize = String(p.packSize || it.packSize || "");
+
+      // Backwards compat: supplier (text) kan fortfarande finnas (UI kan visa namn).
       it.supplier = String(p.supplier || it.supplier || "");
+
       it.category = String(p.category || it.category || "");
       it.tempClass = String(p.tempClass || it.tempClass || "");
       it.requiresExpiry = ("requiresExpiry" in p) ? !!p.requiresExpiry : !!it.requiresExpiry;
@@ -604,7 +648,7 @@ Notis:
       if ("pricePerKg" in p) it.pricePerKg = p.pricePerKg;
       if ("minLevel" in p) it.minLevel = p.minLevel;
 
-      addHistory("item", "Item uppdaterad.", { articleNo: id });
+      addHistory("item", "Item uppdaterad.", { articleNo: id, supplierId: ("supplierId" in it) ? String(it.supplierId || "") : "" });
       notify();
       return { ok: true };
     },
