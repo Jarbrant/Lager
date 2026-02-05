@@ -17,24 +17,17 @@ const _viewState = {
 };
 
 /* =========================
-BLOCK 2 — View definition (P0: router-kompatibel)
-Kontrakt:
-- mount({root,ctx}) (men tolererar även mount(root,ctx))
-- render({root,state,ctx}) (men tolererar även render(ctx))
-- unmount(...) tolererar args
+BLOCK 2 — View definition
 ========================= */
 export const buyerInView = defineView({
   id: "buyer-in",
   label: "Inleverans",
   requiredPerm: null, // Placeholder: öppen. Sätt perm senare när RBAC kopplas.
 
-  mount(a, b) {
+  mount(a) {
     try {
-      // P0: stöd både för mount({root,ctx}) och mount(root,ctx)
-      const parsed = parseArgs(a, b);
-      const root = parsed.root;
-      const ctx = parsed.ctx;
-
+      const root = a && typeof a === "object" && a.root ? a.root : null;
+      const ctx = a && typeof a === "object" && a.ctx ? a.ctx : null;
       if (!root || !(root instanceof HTMLElement)) return;
 
       while (root.firstChild) root.removeChild(root.firstChild);
@@ -94,12 +87,9 @@ export const buyerInView = defineView({
     }
   },
 
-  render(a, b) {
+  render(a) {
     try {
-      // P0: stöd både för render({root,state,ctx}) och render(ctx)
-      const parsed = parseArgs(a, b);
-      const ctx = parsed.ctx;
-
+      const ctx = a && typeof a === "object" && a.ctx ? a.ctx : null;
       if (!_viewState.root || !_viewState.statusEl) return;
       if (!_viewState.root.contains(_viewState.statusEl)) return;
 
@@ -118,20 +108,6 @@ export const buyerInView = defineView({
 /* =========================
 BLOCK 3 — Hjälpare
 ========================= */
-function parseArgs(a, b) {
-  // Router kallar mount({root,ctx}) / render({root,state,ctx})
-  if (a && typeof a === "object" && ("root" in a || "ctx" in a)) {
-    const root = a && a.root ? a.root : null;
-    const ctx = a && a.ctx ? a.ctx : (a && !("root" in a) ? a : null);
-    return { root, ctx };
-  }
-
-  // Legacy: mount(root, ctx) / render(ctx)
-  const root = (a instanceof HTMLElement) ? a : null;
-  const ctx = b || (a && typeof a === "object" ? a : null);
-  return { root, ctx };
-}
-
 function formatCtxLine(ctx) {
   try {
     const role = ctx && ctx.role ? String(ctx.role) : "—";
