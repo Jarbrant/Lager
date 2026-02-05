@@ -7,25 +7,23 @@ P0-FIX:
 - Den får INTE råka innehålla admin/freezer.js (controller) — det orsakar FRZ_E_NOT_INIT.
 
 P0 SUPPLIERS (DENNA PATCH):
-- Lägger till "Leverantörsregister" UTAN nya storage-keys och UTAN att lägga ny top-level state-nyckel.
-- Vi återanvänder befintlig _state.history som källa (event-sourcing i minnet):
-  -> create/update supplier skriver ett "supplier"-event i history
-  -> listSuppliers() bygger leverantörslistan från history
-- Resultat: när supplier skapas/uppdateras -> notify() -> Sök Leverantör kan rendera direkt.
+- Leverantörsregister UTAN nya storage-keys och UTAN ny top-level state-nyckel.
+- Återanvänder _state.history som källa (event-sourcing i minnet):
+  -> create/update supplier skriver "supplier"-event
+  -> listSuppliers() bygger listan från history
+- När supplier skapas/uppdateras -> notify() -> UI kan rendera direkt.
 
-P0 JUSTERINGAR (enligt era beslut):
-- Org-nr (orgNo) är VALFRITT (kan vara tomt).
-- Unikhet kontrolleras endast om orgNo är ifyllt.
-- Produkter kan kopplas till leverantör via supplierId (kan vara tomt).
-  -> Om supplierId är ifyllt måste den finnas i leverantörsregistret (och vara aktiv).
+Beslut:
+- Org-nr (orgNo) får vara TOMT (valfritt).
+- Kontaktperson räcker med 1 st och får vara TOMT (valfritt).
+- supplierId kan vara TOMT på produkt.
+- Produkter kan kopplas till leverantör via supplierId:
+  -> om supplierId är ifyllt måste leverantören finnas + vara aktiv.
 
 POLICY (LÅST):
 - Inga nya storage-keys/datamodell
 - Fail-closed
 - XSS-safe (store renderar inget)
-
-Notis:
-- Detta är en robust baseline-store som kör "demo i minne".
 ============================================================ */
 (function () {
   "use strict";
@@ -47,28 +45,10 @@ Notis:
     try { return JSON.parse(JSON.stringify(obj)); } catch { return obj; }
   }
 
-  function normStr(v) {
-    return String(v || "").trim();
-  }
-
-  function normUpper(v) {
-    return String(v || "").trim().toUpperCase();
-  }
-
-  function normEmail(v) {
-    const s = normStr(v);
-    return s;
-  }
-
-  function normPhone(v) {
-    const s = normStr(v);
-    return s;
-  }
-
-  function normOrg(v) {
-    // Bevarar bara trim – formatvalidering görs i UI om ni vill.
-    return normStr(v);
-  }
+  function normStr(v) { return String(v == null ? "" : v).trim(); }
+  function normEmail(v) { return normStr(v); }   // fail-soft: ingen validering här
+  function normPhone(v) { return normStr(v); }   // fail-soft
+  function normOrg(v) { return normStr(v); }     // valfritt
 
   // ------------------------------------------------------------
   // In-memory state (no new storage keys)
@@ -147,7 +127,6 @@ Notis:
       msg: String(msg || ""),
       meta: meta ? safeClone(meta) : null
     });
-    // håll listan rimlig
     if (_state.history.length > 500) _state.history.length = 500;
   }
 
@@ -167,11 +146,9 @@ Notis:
   }
 
   function getSuppliersSnapshotFromHistory() {
-    // Event-sourcing: senaste event per supplierId gäller.
     const byId = Object.create(null);
-
     const hist = Array.isArray(_state.history) ? _state.history : [];
-    // history är "nyast först" (unshift). Vi vill applicera från äldst -> nyast för korrekt "senast vinner".
+
     for (let i = hist.length - 1; i >= 0; i--) {
       const ev = hist[i];
       if (!isSupplierEvent(ev)) continue;
@@ -181,7 +158,6 @@ Notis:
       const id = normStr(sup.id);
       if (!id) continue;
 
-      // action kan vara: "upsert" | "setActive"
       const action = normStr(meta.action || "upsert");
 
       if (action === "setActive") {
@@ -190,12 +166,11 @@ Notis:
         continue;
       }
 
-      // upsert
       const next = {
         id: id,
         companyName: normStr(sup.companyName),
-        orgNo: normOrg(sup.orgNo),
-        contactPerson: normStr(sup.contactPerson),
+        orgNo: normOrg(sup.orgNo), // kan vara ""
+        contactPerson: normStr(sup.contactPerson), // kan vara ""
         phone: normPhone(sup.phone),
         email: normEmail(sup.email),
         address: normStr(sup.address),
@@ -205,16 +180,12 @@ Notis:
         updatedAt: ev.at || nowIso()
       };
 
-      // bevara createdAt om vi redan har en
       if (byId[id] && byId[id].createdAt) next.createdAt = byId[id].createdAt;
-
       byId[id] = next;
     }
 
-    // till lista
     const list = Object.values(byId);
 
-    // sort: företag A-Ö
     list.sort((a, b) => {
       const an = String(a.companyName || "").toLowerCase();
       const bn = String(b.companyName || "").toLowerCase();
@@ -255,17 +226,12 @@ Notis:
     // KRAV: Företagsnamn
     if (!companyName) return { ok: false, reason: "Företagsnamn krävs." };
 
-    const contactPerson = normStr(d.contactPerson); // en kontaktperson i v1
-    // Om ni vill göra kontaktperson obligatorisk:
-    if (!contactPerson) return { ok: false, reason: "Kontaktperson krävs." };
-
+    // Valfria fält
+    const contactPerson = normStr(d.contactPerson); // valfritt
     const phone = normPhone(d.phone);
-    const email = normEmail(d.email);
+    const email = normEmail(d.email);              // valfritt, ingen validering här
     const address = normStr(d.address);
     const notes = normStr(d.notes);
-
-    // Email enkel sanity (valfritt, fail-soft)
-    if (email && !email.includes("@")) return { ok: false, reason: "Mail verkar ogiltig." };
 
     // Unikhet: orgNo kontrolleras bara om det är ifyllt
     if (orgNo) {
@@ -281,15 +247,7 @@ Notis:
 
     return {
       ok: true,
-      supplier: {
-        companyName,
-        orgNo,
-        contactPerson,
-        phone,
-        email,
-        address,
-        notes
-      }
+      supplier: { companyName, orgNo, contactPerson, phone, email, address, notes }
     };
   }
 
@@ -303,22 +261,15 @@ Notis:
       { id: uid("u"), firstName: "Plock", perms: safeClone(ROLE_PERMS.PICKER), active: true }
     ];
 
-    _state.items = [
-      // tomt baseline – användaren kan lägga till
-    ];
-
+    _state.items = [];
     _state.history = [];
     addHistory("info", "Demo initierad (in-memory).", { role: _state.role });
-
-    // OBS: Vi seedar INTE leverantörer separat (ingen ny state-nyckel).
-    // Vill ni ha demo-suppliers kan ni lägga in supplier-events här via addHistory("supplier", ...).
   }
 
   // ------------------------------------------------------------
   // Public API
   // ------------------------------------------------------------
   const FreezerStore = {
-    // Init must exist
     init(opts) {
       try {
         const role = opts && opts.role ? String(opts.role) : "ADMIN";
@@ -328,7 +279,6 @@ Notis:
         _state.readOnly = ro.readOnly;
         _state.whyReadOnly = ro.why;
 
-        // Baseline: starta alltid demo i minne (ingen ny storage-key).
         seedDemo();
         clearLocked();
         notify();
@@ -342,14 +292,11 @@ Notis:
     subscribe(fn) {
       if (typeof fn !== "function") return () => {};
       _subs.add(fn);
-      // direkt callback
-      try { fn(safeClone(_state)); } catch { /* ignore */ }
-      return () => { try { _subs.delete(fn); } catch { /* ignore */ } };
+      try { fn(safeClone(_state)); } catch {}
+      return () => { try { _subs.delete(fn); } catch {} };
     },
 
-    getState() {
-      return safeClone(_state);
-    },
+    getState() { return safeClone(_state); },
 
     getStatus() {
       return {
@@ -374,34 +321,27 @@ Notis:
       return { ok: true };
     },
 
-    // RBAC helpers
     hasPerm(perm) {
       const p = String(perm || "");
       const map = ROLE_PERMS[_state.role] || {};
       return !!map[p];
     },
 
-    can(perm) {
-      // alias för äldre kod
-      return FreezerStore.hasPerm(perm);
-    },
+    can(perm) { return FreezerStore.hasPerm(perm); },
 
-    // Demo reset
     resetDemo() {
       const st = FreezerStore.getStatus();
       if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
       if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
-
       seedDemo();
       notify();
       return { ok: true };
     },
 
-    // ----------------------------------------------------------
-    // Suppliers API (P0) — använder history som källa
-    // ----------------------------------------------------------
+    // -----------------------------
+    // Suppliers API (P0)
+    // -----------------------------
     listSuppliers(opts) {
-      // opts: { includeInactive?: boolean }
       const includeInactive = !!(opts && opts.includeInactive);
       const list = getSuppliersSnapshotFromHistory();
       const out = includeInactive ? list : list.filter(s => s && s.active !== false);
@@ -412,8 +352,6 @@ Notis:
       const st = FreezerStore.getStatus();
       if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
       if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
-
-      // Vi återanvänder inventory_write som write-gate för inköp/admin.
       if (!FreezerStore.can("inventory_write")) return { ok: false, reason: "Saknar behörighet (inventory_write)." };
 
       const v = validateSupplierInput(data, "create");
@@ -426,7 +364,7 @@ Notis:
         id: supplierId,
         companyName: s.companyName,
         orgNo: s.orgNo, // kan vara ""
-        contactPerson: s.contactPerson,
+        contactPerson: s.contactPerson, // kan vara ""
         phone: s.phone,
         email: s.email,
         address: s.address,
@@ -452,7 +390,6 @@ Notis:
       const cur = findSupplierById(id);
       if (!cur) return { ok: false, reason: "Leverantör hittades inte." };
 
-      // validera med sammanslagen data (så orgNo-unicitet funkar om orgNo är ifyllt)
       const merged = Object.assign({}, cur, (patch && typeof patch === "object" ? patch : {}), { id: id });
       const v = validateSupplierInput(merged, "update");
       if (!v.ok) return { ok: false, reason: v.reason || "Ogiltig leverantör." };
@@ -462,7 +399,7 @@ Notis:
       const supplier = {
         id: id,
         companyName: s.companyName,
-        orgNo: s.orgNo, // kan vara ""
+        orgNo: s.orgNo,
         contactPerson: s.contactPerson,
         phone: s.phone,
         email: s.email,
@@ -494,12 +431,10 @@ Notis:
       return { ok: true };
     },
 
-    // ----------------------------------------------------------
-    // Users API (used by admin/freezer.js)
-    // ----------------------------------------------------------
-    listUsers() {
-      return safeClone(_state.users || []);
-    },
+    // -----------------------------
+    // Users API
+    // -----------------------------
+    listUsers() { return safeClone(_state.users || []); },
 
     createUser(data) {
       const st = FreezerStore.getStatus();
@@ -535,7 +470,6 @@ Notis:
       const nextFirst = patch && typeof patch.firstName === "string" ? patch.firstName.trim() : u.firstName;
       if (!nextFirst) return { ok: false, reason: "Förnamn krävs." };
 
-      // Unik
       const clash = (_state.users || []).some(x => x && x.id !== id && String(x.firstName || "").toLowerCase() === nextFirst.toLowerCase());
       if (clash) return { ok: false, errorCode: "FRZ_E_USER_NAME_NOT_UNIQUE", reason: "Förnamn måste vara unikt." };
 
@@ -563,9 +497,9 @@ Notis:
       return { ok: true };
     },
 
-    // ----------------------------------------------------------
-    // Items API (used by admin/freezer.js)
-    // ----------------------------------------------------------
+    // -----------------------------
+    // Items API (med supplierId)
+    // -----------------------------
     listItems(opts) {
       const includeInactive = !!(opts && opts.includeInactive);
       const items = Array.isArray(_state.items) ? _state.items : [];
@@ -588,7 +522,6 @@ Notis:
       const exists = (_state.items || []).some(x => x && String(x.articleNo || "") === articleNo);
       if (exists) return { ok: false, reason: "articleNo måste vara unikt." };
 
-      // supplierId: får vara tomt, men om ifyllt måste leverantören finnas + vara aktiv
       const supplierId = normStr(p.supplierId);
       if (supplierId) {
         if (!findSupplierById(supplierId)) return { ok: false, reason: "supplierId finns inte (okänd leverantör)." };
@@ -597,10 +530,8 @@ Notis:
 
       const it = safeClone(p);
       it.articleNo = articleNo;
-
-      // Normalisera supplierId fält (om UI skickar det)
-      if (supplierId) it.supplierId = supplierId;
-      else if ("supplierId" in it) it.supplierId = ""; // gör det stabilt
+      if ("supplierId" in it) it.supplierId = supplierId || "";
+      else it.supplierId = supplierId || "";
 
       if (typeof it.isActive !== "boolean") it.isActive = true;
 
@@ -622,7 +553,6 @@ Notis:
 
       const p = patch && typeof patch === "object" ? patch : {};
 
-      // supplierId: får vara tomt, men om ifyllt måste leverantören finnas + vara aktiv
       if ("supplierId" in p) {
         const supId = normStr(p.supplierId);
         if (supId) {
@@ -634,12 +564,8 @@ Notis:
         }
       }
 
-      // articleNo är låst nyckel – uppdatera inte
       it.packSize = String(p.packSize || it.packSize || "");
-
-      // Backwards compat: supplier (text) kan fortfarande finnas (UI kan visa namn).
       it.supplier = String(p.supplier || it.supplier || "");
-
       it.category = String(p.category || it.category || "");
       it.tempClass = String(p.tempClass || it.tempClass || "");
       it.requiresExpiry = ("requiresExpiry" in p) ? !!p.requiresExpiry : !!it.requiresExpiry;
@@ -648,7 +574,7 @@ Notis:
       if ("pricePerKg" in p) it.pricePerKg = p.pricePerKg;
       if ("minLevel" in p) it.minLevel = p.minLevel;
 
-      addHistory("item", "Item uppdaterad.", { articleNo: id, supplierId: ("supplierId" in it) ? String(it.supplierId || "") : "" });
+      addHistory("item", "Item uppdaterad.", { articleNo: id, supplierId: String(it.supplierId || "") });
       notify();
       return { ok: true };
     },
@@ -679,7 +605,6 @@ Notis:
       const idx = (_state.items || []).findIndex(x => x && String(x.articleNo || "") === id);
       if (idx < 0) return { ok: false, reason: "Item hittades inte." };
 
-      // Guard för framtiden: om referenser finns kan ni blockera här
       _state.items.splice(idx, 1);
       addHistory("item", "Item raderad.", { articleNo: id });
       notify();
@@ -697,7 +622,4 @@ Notis:
   // Expose (P0)
   // ------------------------------------------------------------
   window.FreezerStore = FreezerStore;
-
-  // If något går fel ovan ska vi fail-closed på ett kontrollerat sätt
-  // (men här har vi redan definierat API)
 })();
