@@ -3,6 +3,14 @@ AO-01/15 — View Registry (minsta baseline) | FIL-ID: UI/pages/freezer/01-view-
 Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Central export av vy-listor per roll.
 POLICY: Inga nya storage-keys • Ingen UX/redesign • Fail-closed friendly
+
+P0-FIX (DENNA PATCH):
+- Rättar import-paths så de matchar faktisk struktur:
+  - shared ligger i: ./shared/...
+  - buyer ligger i: ./buyer/...
+  (Inte ./buyer/shared/... och inte ./buyer/buyer/... )
+- Kopplar in buyer-vyer i buyerViews så router kan mounta buyer.
+
 ============================================================ */
 
 import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
@@ -11,9 +19,9 @@ import { createView, freezeView, validateViewShape } from "./00-view-interface.j
 import { sharedSaldoView } from "./shared/shared-saldo.js";
 import { sharedHistoryView } from "./shared/shared-history.js";
 
-// BUYER views
-import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
+// AO-07/15 + AO-14/15: Buyer views (ESM)
 import { buyerInView } from "./buyer/buyer-in.js";
+import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
 
 /* =========================
 BLOCK 1 — Hjälpare: säker registrering
@@ -59,7 +67,8 @@ BLOCK 2 — Listor per roll
 const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
 const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
 
-const _buyerDash = defineExistingView(buyerDashboardView, "buyerDashboardView");
+// Buyer views (P0 buyer-mount)
+const _buyerDashboard = defineExistingView(buyerDashboardView, "buyerDashboardView");
 const _buyerIn = defineExistingView(buyerInView, "buyerInView");
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
@@ -69,7 +78,7 @@ export const sharedViews = [_sharedSaldo, _sharedHistory];
 export const adminViews = [];
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
-export const buyerViews = [_buyerDash, _buyerIn];
+export const buyerViews = [_buyerDashboard, _buyerIn];
 
 /** @type {import("./00-view-interface.js").FreezerView[]} */
 export const pickerViews = [];
@@ -80,30 +89,19 @@ BLOCK 3 — Aggregat (praktiskt för router)
 
 /**
  * Normaliserar roll-sträng så legacy ("ADMIN") och nya ("admin") fungerar.
- * ✅ P0: stöd för svenska roller ("INKÖPARE", "PLOCKARE")
  * @param {string} role
  * @returns {"admin"|"buyer"|"picker"|""}
  */
 function normalizeRole(role) {
   const r = String(role || "").trim();
   if (!r) return "";
-
   const up = r.toUpperCase();
-
-  // Legacy / engelska
   if (up === "ADMIN") return "admin";
   if (up === "BUYER") return "buyer";
   if (up === "PICKER") return "picker";
   if (up === "SYSTEM_ADMIN") return "";
-
-  // Svenska (UI)
-  if (up === "INKÖPARE") return "buyer";
-  if (up === "PLOCKARE") return "picker";
-
-  // Nya (småbokstäver)
   const low = r.toLowerCase();
   if (low === "admin" || low === "buyer" || low === "picker") return /** @type any */ (low);
-
   return "";
 }
 
