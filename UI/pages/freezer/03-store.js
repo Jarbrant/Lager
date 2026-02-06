@@ -6,25 +6,21 @@ P0-FIX:
 - Denna fil MÅSTE definiera window.FreezerStore.
 - Den får INTE råka innehålla admin/freezer.js (controller) — det orsakar FRZ_E_NOT_INIT.
 
-P0 SUPPLIERS (DENNA PATCH):
+P0 SUPPLIERS:
 - Leverantörsregister UTAN ny top-level state-nyckel.
 - Återanvänder _state.history som källa (event-sourcing):
   -> create/update supplier skriver "supplier"-event
   -> listSuppliers() bygger listan från history
 - När supplier skapas/uppdateras -> notify() -> UI kan rendera direkt.
 
-NYTT (AUTOPATCH v1.1) — LOKAL PERSISTENS (SUPPLIERS):
-- Spara/återläs _state.history via localStorage (endast history).
-- Minimal scope: leverantörer byggs från history => leverantörer överlever reload.
-- Storage-key: FRZ_DEMO_HISTORY_V1 (1 st, endast history JSON).
-- Fail-closed: om storage är korrupt -> ignorera och fortsätt i demo-läge.
+AUTOPATCH v1.2 — LOKAL PERSISTENS:
+- history (leverantörer): FRZ_DEMO_HISTORY_V1
+- items (produkter):     FRZ_DEMO_ITEMS_V1
+- Endast localStorage i demo; fail-closed om storage saknas/är korrupt.
 
-Beslut:
-- Org-nr (orgNo) får vara TOMT (valfritt).
-- Kontaktperson räcker med 1 st och får vara TOMT (valfritt).
-- supplierId kan vara TOMT på produkt.
-- Produkter kan kopplas till leverantör via supplierId:
-  -> om supplierId är ifyllt måste leverantören finnas + vara aktiv.
+PRODUKTFÄLT (ALLA FRIVILLIGA UTOM articleNo):
+- productName, category, packSize, pricePerKg, unit, tempClass, minLevel,
+  requiresExpiry, ean, notes, location, supplierId, isActive
 
 POLICY (LÅST):
 - Fail-closed
@@ -34,16 +30,16 @@ POLICY (LÅST):
   "use strict";
 
   // ------------------------------------------------------------
-  // Storage (lokal persistens för history)
+  // Storage (lokal persistens för demo)
   // ------------------------------------------------------------
   const STORAGE_KEY_HISTORY = "FRZ_DEMO_HISTORY_V1"; // endast history-array (supplier events)
+  const STORAGE_KEY_ITEMS = "FRZ_DEMO_ITEMS_V1";     // endast items-array (produkter)
 
   function readJsonFromLS(key) {
     try {
       const raw = window.localStorage ? window.localStorage.getItem(key) : null;
       if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      return parsed;
+      return JSON.parse(raw);
     } catch {
       return null;
     }
@@ -52,8 +48,7 @@ POLICY (LÅST):
   function writeJsonToLS(key, value) {
     try {
       if (!window.localStorage) return false;
-      const raw = JSON.stringify(value);
-      window.localStorage.setItem(key, raw);
+      window.localStorage.setItem(key, JSON.stringify(value));
       return true;
     } catch {
       return false;
@@ -75,13 +70,13 @@ POLICY (LÅST):
       for (let i = 0; i < arr.length; i++) {
         const ev = arr[i];
         if (!ev || typeof ev !== "object") continue;
-        const type = String(ev.type || "");
-        const msg = String(ev.msg || "");
-        const at = String(ev.at || "");
-        const id = String(ev.id || "");
-        const meta = (ev.meta && typeof ev.meta === "object") ? ev.meta : null;
-
-        out.push({ id, at, type, msg, meta });
+        out.push({
+          id: String(ev.id || ""),
+          at: String(ev.at || ""),
+          type: String(ev.type || ""),
+          msg: String(ev.msg || ""),
+          meta: (ev.meta && typeof ev.meta === "object") ? ev.meta : null
+        });
         if (out.length >= 500) break;
       }
       return out;
@@ -92,15 +87,77 @@ POLICY (LÅST):
 
   function loadHistoryFromStorage() {
     const parsed = readJsonFromLS(STORAGE_KEY_HISTORY);
-    const safe = sanitizeHistoryArray(parsed);
-    return safe;
+    return sanitizeHistoryArray(parsed);
   }
 
   function persistHistoryToStorage() {
-    // Vi sparar bara _state.history (max 500) för minimal risk/scope.
     try {
       const hist = Array.isArray(_state.history) ? _state.history.slice(0, 500) : [];
       writeJsonToLS(STORAGE_KEY_HISTORY, hist);
+    } catch {}
+  }
+
+  function sanitizeItemsArray(arr) {
+    // Fail-closed: sanera minimalt; artikelnummer måste vara sträng
+    try {
+      if (!Array.isArray(arr)) return [];
+      const byArticle = Object.create(null);
+      const out = [];
+
+      for (let i = 0; i < arr.length; i++) {
+        const it = arr[i];
+        if (!it || typeof it !== "object") continue;
+
+        const articleNo = String(it.articleNo || "").trim();
+        if (!articleNo) continue;
+
+        if (byArticle[articleNo]) continue; // dedupe fail-closed
+        byArticle[articleNo] = true;
+
+        const supplierId = String(it.supplierId || "").trim();
+
+        const next = {
+          articleNo,
+          supplierId,
+
+          // Frivilliga fält (normaliseras)
+          productName: String(it.productName || "").trim(),
+          category: String(it.category || "").trim(),
+          packSize: String(it.packSize || "").trim(),
+          unit: String(it.unit || "").trim(),
+          tempClass: String(it.tempClass || "").trim(),
+          ean: String(it.ean || "").trim(),
+          notes: String(it.notes || "").trim(),
+          location: String(it.location || "").trim(),
+
+          // Tal/boolean (fail-soft: om NaN -> null/0 beroende)
+          pricePerKg: (typeof it.pricePerKg === "number" && isFinite(it.pricePerKg)) ? it.pricePerKg : null,
+          minLevel: (typeof it.minLevel === "number" && isFinite(it.minLevel)) ? it.minLevel : null,
+          requiresExpiry: !!it.requiresExpiry,
+
+          // Aktivitet
+          isActive: ("isActive" in it) ? !!it.isActive : true
+        };
+
+        out.push(next);
+        if (out.length >= 2000) break; // rimlig cap i demo
+      }
+
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  function loadItemsFromStorage() {
+    const parsed = readJsonFromLS(STORAGE_KEY_ITEMS);
+    return sanitizeItemsArray(parsed);
+  }
+
+  function persistItemsToStorage() {
+    try {
+      const items = Array.isArray(_state.items) ? _state.items.slice(0, 2000) : [];
+      writeJsonToLS(STORAGE_KEY_ITEMS, items);
     } catch {}
   }
 
@@ -126,8 +183,15 @@ POLICY (LÅST):
   function normPhone(v) { return normStr(v); }   // fail-soft
   function normOrg(v) { return normStr(v); }     // valfritt
 
+  function normNumOrNull(v) {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    if (!isFinite(n)) return null;
+    return n;
+  }
+
   // ------------------------------------------------------------
-  // In-memory state (history persistas i LS)
+  // In-memory state (history + items persistas i LS)
   // ------------------------------------------------------------
   const _subs = new Set();
 
@@ -143,7 +207,6 @@ POLICY (LÅST):
   };
 
   // Permissions per role (baseline)
-  // SYSTEM_ADMIN: read-only, no writes
   const ROLE_PERMS = {
     ADMIN: {
       users_manage: true,
@@ -205,12 +268,12 @@ POLICY (LÅST):
     });
     if (_state.history.length > 500) _state.history.length = 500;
 
-    // PERSIST: skriv ut history till localStorage (fail-soft)
+    // PERSIST history (fail-soft)
     persistHistoryToStorage();
   }
 
   // ------------------------------------------------------------
-  // SUPPLIERS (P0) — byggs från history (ingen ny state-nyckel)
+  // SUPPLIERS — byggs från history
   // ------------------------------------------------------------
   function isSupplierEvent(ev) {
     try {
@@ -248,8 +311,8 @@ POLICY (LÅST):
       const next = {
         id: id,
         companyName: normStr(sup.companyName),
-        orgNo: normOrg(sup.orgNo), // kan vara ""
-        contactPerson: normStr(sup.contactPerson), // kan vara ""
+        orgNo: normOrg(sup.orgNo),
+        contactPerson: normStr(sup.contactPerson),
         phone: normPhone(sup.phone),
         email: normEmail(sup.email),
         address: normStr(sup.address),
@@ -302,17 +365,14 @@ POLICY (LÅST):
     const companyName = normStr(d.companyName);
     const orgNo = normOrg(d.orgNo); // VALFRITT
 
-    // KRAV: Företagsnamn
     if (!companyName) return { ok: false, reason: "Företagsnamn krävs." };
 
-    // Valfria fält
-    const contactPerson = normStr(d.contactPerson); // valfritt
+    const contactPerson = normStr(d.contactPerson);
     const phone = normPhone(d.phone);
-    const email = normEmail(d.email);              // valfritt, ingen validering här
+    const email = normEmail(d.email);
     const address = normStr(d.address);
     const notes = normStr(d.notes);
 
-    // Unikhet: orgNo kontrolleras bara om det är ifyllt
     if (orgNo) {
       const existing = findSupplierByOrgNo(orgNo);
       if (existing) {
@@ -331,7 +391,7 @@ POLICY (LÅST):
   }
 
   // ------------------------------------------------------------
-  // Demo baseline (in-memory) + history kan återläsas från LS
+  // Demo baseline + hydrate från storage
   // ------------------------------------------------------------
   function seedDemo() {
     _state.users = [
@@ -344,16 +404,18 @@ POLICY (LÅST):
     _state.history = [];
 
     addHistory("info", "Demo initierad (in-memory).", { role: _state.role });
+    persistItemsToStorage(); // tom baseline i LS (fail-soft)
   }
 
   function hydrateFromStorageIfAny() {
-    // Vi håller demo-setup för users/items men återläs history om den finns,
-    // så leverantörer överlever reload.
+    let didRestore = false;
+
+    // 1) history (leverantörer)
     const hist = loadHistoryFromStorage();
     if (hist && Array.isArray(hist) && hist.length > 0) {
       _state.history = hist.slice(0, 500);
-      // Lägg en info-event i minnet (utan att spamma storage för mycket)
-      // (persistHistoryToStorage kallas av addHistory, så vi lägger INTE addHistory här)
+      didRestore = true;
+
       try {
         _state.history.unshift({
           id: uid("h"),
@@ -365,9 +427,28 @@ POLICY (LÅST):
         if (_state.history.length > 500) _state.history.length = 500;
         persistHistoryToStorage();
       } catch {}
-      return true;
     }
-    return false;
+
+    // 2) items (produkter)
+    const items = loadItemsFromStorage();
+    if (items && Array.isArray(items) && items.length > 0) {
+      // Fail-closed: om supplierId pekar på okänd leverantör -> blankas
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        if (!it) continue;
+        const sid = normStr(it.supplierId);
+        if (sid && !findSupplierById(sid)) {
+          it.supplierId = "";
+        }
+      }
+      _state.items = items.slice(0, 2000);
+      didRestore = true;
+
+      // Persist:a sanerad version
+      persistItemsToStorage();
+    }
+
+    return didRestore;
   }
 
   // ------------------------------------------------------------
@@ -383,13 +464,13 @@ POLICY (LÅST):
         _state.readOnly = ro.readOnly;
         _state.whyReadOnly = ro.why;
 
-        // Bas-demo (users/items) men INTE radera history om den finns i LS
+        // Demo-baseline, sedan återläs history/items om de finns
         seedDemo();
         const restored = hydrateFromStorageIfAny();
 
         clearLocked();
         notify();
-        return { ok: true, restoredHistory: !!restored };
+        return { ok: true, restored: !!restored };
       } catch (e) {
         setLocked("FRZ_E_NOT_INIT");
         return { ok: false, reason: (e && e.message) ? e.message : "FRZ_E_NOT_INIT" };
@@ -441,8 +522,9 @@ POLICY (LÅST):
       if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
       if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
 
-      // Rensa lokal history också (annars kommer leverantörer tillbaka efter reload)
+      // Rensa lokal persistens
       removeLS(STORAGE_KEY_HISTORY);
+      removeLS(STORAGE_KEY_ITEMS);
 
       seedDemo();
       notify();
@@ -450,7 +532,7 @@ POLICY (LÅST):
     },
 
     // -----------------------------
-    // Suppliers API (P0)
+    // Suppliers API
     // -----------------------------
     listSuppliers(opts) {
       const includeInactive = !!(opts && opts.includeInactive);
@@ -474,8 +556,8 @@ POLICY (LÅST):
       const supplier = {
         id: supplierId,
         companyName: s.companyName,
-        orgNo: s.orgNo, // kan vara ""
-        contactPerson: s.contactPerson, // kan vara ""
+        orgNo: s.orgNo,
+        contactPerson: s.contactPerson,
         phone: s.phone,
         email: s.email,
         address: s.address,
@@ -609,7 +691,7 @@ POLICY (LÅST):
     },
 
     // -----------------------------
-    // Items API (med supplierId)
+    // Items API (produkter) — persisteras i localStorage
     // -----------------------------
     listItems(opts) {
       const includeInactive = !!(opts && opts.includeInactive);
@@ -639,13 +721,43 @@ POLICY (LÅST):
         if (!isSupplierActive(supplierId)) return { ok: false, reason: "Leverantören är inaktiv." };
       }
 
-      const it = safeClone(p);
-      it.articleNo = articleNo;
-      it.supplierId = supplierId || "";
+      // Frivilliga fält (normalisering)
+      const pricePerKg = normNumOrNull(p.pricePerKg);
+      const minLevel = normNumOrNull(p.minLevel);
 
-      if (typeof it.isActive !== "boolean") it.isActive = true;
+      // Fail-closed: om fält är ifyllt men inte nummer -> stopp
+      if (p.pricePerKg != null && p.pricePerKg !== "" && pricePerKg == null) {
+        return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
+      }
+      if (p.minLevel != null && p.minLevel !== "" && minLevel == null) {
+        return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
+      }
+
+      const it = {
+        articleNo,
+        supplierId: supplierId || "",
+
+        productName: String(p.productName || "").trim(),
+        category: String(p.category || "").trim(),
+        packSize: String(p.packSize || "").trim(),
+        unit: String(p.unit || "").trim(),
+        tempClass: String(p.tempClass || "").trim(),
+        ean: String(p.ean || "").trim(),
+        notes: String(p.notes || "").trim(),
+        location: String(p.location || "").trim(),
+
+        pricePerKg: pricePerKg,
+        minLevel: minLevel,
+        requiresExpiry: !!p.requiresExpiry,
+
+        isActive: ("isActive" in p) ? !!p.isActive : true
+      };
 
       _state.items.push(it);
+
+      // PERSIST items
+      persistItemsToStorage();
+
       addHistory("item", "Item skapad.", { articleNo, supplierId: supplierId || "" });
       notify();
       return { ok: true };
@@ -674,15 +786,36 @@ POLICY (LÅST):
         }
       }
 
-      it.packSize = String(p.packSize || it.packSize || "");
-      it.supplier = String(p.supplier || it.supplier || "");
-      it.category = String(p.category || it.category || "");
-      it.tempClass = String(p.tempClass || it.tempClass || "");
-      it.requiresExpiry = ("requiresExpiry" in p) ? !!p.requiresExpiry : !!it.requiresExpiry;
-      it.isActive = ("isActive" in p) ? !!p.isActive : (it.isActive !== false);
+      if ("productName" in p) it.productName = String(p.productName || "").trim();
+      if ("category" in p) it.category = String(p.category || "").trim();
+      if ("packSize" in p) it.packSize = String(p.packSize || "").trim();
+      if ("unit" in p) it.unit = String(p.unit || "").trim();
+      if ("tempClass" in p) it.tempClass = String(p.tempClass || "").trim();
+      if ("ean" in p) it.ean = String(p.ean || "").trim();
+      if ("notes" in p) it.notes = String(p.notes || "").trim();
+      if ("location" in p) it.location = String(p.location || "").trim();
 
-      if ("pricePerKg" in p) it.pricePerKg = p.pricePerKg;
-      if ("minLevel" in p) it.minLevel = p.minLevel;
+      if ("requiresExpiry" in p) it.requiresExpiry = !!p.requiresExpiry;
+      if ("isActive" in p) it.isActive = !!p.isActive;
+
+      if ("pricePerKg" in p) {
+        const n = normNumOrNull(p.pricePerKg);
+        if (p.pricePerKg != null && p.pricePerKg !== "" && n == null) {
+          return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
+        }
+        it.pricePerKg = n;
+      }
+
+      if ("minLevel" in p) {
+        const n = normNumOrNull(p.minLevel);
+        if (p.minLevel != null && p.minLevel !== "" && n == null) {
+          return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
+        }
+        it.minLevel = n;
+      }
+
+      // PERSIST items
+      persistItemsToStorage();
 
       addHistory("item", "Item uppdaterad.", { articleNo: id, supplierId: String(it.supplierId || "") });
       notify();
@@ -700,6 +833,10 @@ POLICY (LÅST):
       if (!it) return { ok: false, reason: "Item hittades inte." };
 
       it.isActive = false;
+
+      // PERSIST items
+      persistItemsToStorage();
+
       addHistory("item", "Item arkiverad.", { articleNo: id });
       notify();
       return { ok: true };
@@ -716,6 +853,10 @@ POLICY (LÅST):
       if (idx < 0) return { ok: false, reason: "Item hittades inte." };
 
       _state.items.splice(idx, 1);
+
+      // PERSIST items
+      persistItemsToStorage();
+
       addHistory("item", "Item raderad.", { articleNo: id });
       notify();
       return { ok: true };
