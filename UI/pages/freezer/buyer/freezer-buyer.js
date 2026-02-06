@@ -9,10 +9,6 @@ Syfte:
   - mount/render/unmount av aktiv vy i #freezerViewRoot
   - status/mode/lock/reset demo (fail-closed friendly)
 
-PATCH (PROD):
-- P0 FIX: Öppna INTE första vyn automatiskt vid load (ingen auto-modal).
-- Startläge: visa "Välj en ruta ovan" tills användaren klickar.
-
 POLICY (LÅST):
 - Ingen storage-ändring här (store sköter state)
 - XSS-safe (DOM via createElement/textContent)
@@ -29,6 +25,10 @@ Förväntade DOM-id i buyer/freezer.html:
 Kritisk koppling:
 - UI/pages/freezer/01-view-registry.js (ESM) exponerar window.FreezerViewRegistry (bridge)
 - UI/pages/freezer/03-store.js exponerar window.FreezerStore
+
+P0 FIX (DENNA PATCH):
+- Öppna INTE första vyn automatiskt (kan vara modal).
+- Defaulta till icke-modal “Sök Leverantör” om den finns.
 ============================================================ */
 
 (function () {
@@ -144,7 +144,6 @@ Kritisk koppling:
   }
 
   function renderDebug(msg) {
-    // Valfri debug: visas bara om msg finns
     try {
       if (!DOM.debugPanel || !DOM.debugText) return;
       if (!msg) {
@@ -154,19 +153,6 @@ Kritisk koppling:
       DOM.debugPanel.hidden = false;
       DOM.debugText.textContent = String(msg);
     } catch {}
-  }
-
-  function showStartHint() {
-    // Startläge: ingen vy vald, visa hint (fail-soft)
-    try {
-      if (!DOM.fallback) return;
-      DOM.fallback.hidden = false;
-      DOM.fallback.textContent = "Välj en ruta ovan för att börja.";
-    } catch {}
-  }
-
-  function hideStartHint() {
-    try { if (DOM.fallback) DOM.fallback.hidden = true; } catch {}
   }
 
   /* =========================
@@ -195,13 +181,9 @@ Kritisk koppling:
 
     var ctx = buildCtx();
 
-    // Clear root before mount (stable)
     clear(DOM.root);
 
-    // mount
     safeCall(view.mount, { root: DOM.root, ctx: ctx });
-
-    // initial render (if supported)
     safeCall(view.render, { root: DOM.root, state: (active.lastState || {}), ctx: ctx });
 
     active.mounted = true;
@@ -216,37 +198,7 @@ Kritisk koppling:
     } catch {}
   }
 
-  function setActiveViewById(id) {
-    var reg = window.FreezerViewRegistry;
-    if (!reg) return;
-
-    var list = active.list || [];
-    var v = null;
-    try { v = reg.findView(list, id); } catch { v = null; }
-    if (!v) return;
-
-    // Lock/readOnly -> navigation ok i read-only, men om locked: stoppa
-    var st = null;
-    try { st = window.FreezerStore && window.FreezerStore.getStatus ? window.FreezerStore.getStatus() : null; } catch {}
-    if (st && st.locked) {
-      renderStatus();
-      renderDebug("Låst läge: navigation stoppad.");
-      return;
-    }
-
-    // unmount previous
-    unmountActive();
-
-    active.viewId = String(id || "");
-    active.view = v;
-
-    // När vi väljer en vy: göm hint
-    hideStartHint();
-
-    // mount new
-    mountView(v);
-
-    // update buttons aria-selected
+  function updateMenuSelected() {
     try {
       if (!DOM.menu) return;
       var btns = DOM.menu.querySelectorAll("button[data-view-id]");
@@ -256,6 +208,32 @@ Kritisk koppling:
         b.setAttribute("aria-selected", isOn ? "true" : "false");
       }
     } catch {}
+  }
+
+  function setActiveViewById(id) {
+    var reg = window.FreezerViewRegistry;
+    if (!reg) return;
+
+    var list = active.list || [];
+    var v = null;
+    try { v = reg.findView(list, id); } catch { v = null; }
+    if (!v) return;
+
+    var st = null;
+    try { st = window.FreezerStore && window.FreezerStore.getStatus ? window.FreezerStore.getStatus() : null; } catch {}
+    if (st && st.locked) {
+      renderStatus();
+      renderDebug("Låst läge: navigation stoppad.");
+      return;
+    }
+
+    unmountActive();
+
+    active.viewId = String(id || "");
+    active.view = v;
+
+    mountView(v);
+    updateMenuSelected();
   }
 
   function buildMenuForBuyer() {
@@ -286,7 +264,6 @@ Kritisk koppling:
       btn.setAttribute("role", "tab");
       btn.setAttribute("aria-selected", "false");
 
-      // permission hint (fail-soft): disable knapp om saknar perm
       try {
         var req = it.requiredPerm;
         if (req && window.FreezerStore && typeof window.FreezerStore.can === "function") {
@@ -321,7 +298,6 @@ Kritisk koppling:
 
     try { s.init({ role: "BUYER" }); } catch (e) { return { ok: false, reason: (e && e.message) ? e.message : "init-fail" }; }
 
-    // bind reset demo
     try {
       if (DOM.resetBtn) {
         DOM.resetBtn.addEventListener("click", function () {
@@ -334,13 +310,11 @@ Kritisk koppling:
       }
     } catch {}
 
-    // subscribe
     try {
       if (typeof s.subscribe === "function") {
         active.unsub = s.subscribe(function (stateSnap) {
           active.lastState = stateSnap || {};
           renderStatus();
-          // render active view on every state change
           renderActive();
         });
       }
@@ -348,6 +322,19 @@ Kritisk koppling:
 
     renderStatus();
     return { ok: true };
+  }
+
+  function findPreferredDefaultViewId() {
+    // P0: Välj en icke-modal “landningsvy”.
+    // Vi prioriterar Sök Leverantör om den finns.
+    var preferred = "buyer-supplier-search";
+    try {
+      if (!DOM.menu) return "";
+      var btn = DOM.menu.querySelector('button[data-view-id="' + preferred + '"]');
+      if (btn) return preferred;
+    } catch {}
+    // annars: ingen auto-activate (viktigt för att inte råka öppna modal)
+    return "";
   }
 
   function waitForRegistryThenStart() {
@@ -360,6 +347,7 @@ Kritisk koppling:
 
       var reg = window.FreezerViewRegistry;
       if (reg && typeof reg.getViewsForRole === "function" && typeof reg.findView === "function") {
+        try { if (DOM.fallback) DOM.fallback.hidden = true; } catch {}
 
         var m = buildMenuForBuyer();
         if (!m.ok) {
@@ -367,16 +355,23 @@ Kritisk koppling:
           return;
         }
 
-        // P0 FIX: Öppna INTE första vyn automatiskt.
-        // Startläge: visa hint tills användaren klickar.
-        showStartHint();
+        // P0: Auto-activate bara om vi hittar en “safe” default (icke-modal)
+        try {
+          var defId = findPreferredDefaultViewId();
+          if (defId) setActiveViewById(defId);
+          else {
+            // Visa inget auto – vänta på klick
+            active.viewId = "";
+            updateMenuSelected();
+            try { if (DOM.root) clear(DOM.root); } catch {}
+          }
+        } catch {}
 
         if (timer) clearInterval(timer);
         return;
       }
 
       if (tries >= maxTries) {
-        // Fail-closed friendly: visa fallback och stoppa
         try {
           if (DOM.fallback) {
             DOM.fallback.hidden = false;
@@ -397,13 +392,11 @@ Kritisk koppling:
   ========================= */
 
   (function boot() {
-    // Basic fail-soft: om root/menu saknas -> inget att göra
     if (!DOM.menu || !DOM.root) {
       renderDebug("DOM saknas (freezerViewMenu/freezerViewRoot).");
       return;
     }
 
-    // init store
     var initRes = initStoreBuyer();
     if (!initRes.ok) {
       renderStatus();
@@ -417,7 +410,6 @@ Kritisk koppling:
       return;
     }
 
-    // wait for registry (ESM)
     waitForRegistryThenStart();
   })();
 
