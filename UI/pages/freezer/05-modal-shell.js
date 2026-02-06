@@ -2,8 +2,11 @@
 AO-16/15 (EXTRA) — Modal Shell (JS, window-bridge) | FIL-ID: UI/pages/freezer/05-modal-shell.js
 Projekt: Fryslager (UI-only / localStorage-first)
 Syfte: Gemensam modal som kan användas av vy-moduler (varje ruta kan ha egen fil).
-POLICY: Ingen storage • XSS-safe (bygger DOM) • Fail-soft • Ingen UX-redesign utanför modal
-Laddas som vanlig <script> (inte module) så freezer.js + moduler kan använda window.FreezerModal
+POLICY: Ingen storage • XSS-safe (bygger DOM) • Fail-soft • Ingen UX/redesign utanför modal
+
+P0 TRACE/WRAP FIX (DENNA PATCH):
+- Stäng/overlay/ESC ska anropa window.FreezerModal.close() dynamiskt
+  så att en senare wrapper (close-tracer) alltid fångar anropet.
 ============================================================ */
 
 (function () {
@@ -24,6 +27,14 @@ Laddas som vanlig <script> (inte module) så freezer.js + moduler kan använda w
 
   function el(tag) { return document.createElement(tag); }
   function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
+
+  function safeClose() {
+    try {
+      if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
+        window.FreezerModal.close();
+      }
+    } catch {}
+  }
 
   function ensureRoot() {
     try {
@@ -87,16 +98,16 @@ Laddas som vanlig <script> (inte module) så freezer.js + moduler kan använda w
       overlay.addEventListener("click", (ev) => {
         // klick utanför dialog stänger
         try {
-          if (ev.target === overlay) api.close();
+          if (ev.target === overlay) safeClose();
         } catch {}
       });
 
-      closeBtn.addEventListener("click", () => api.close());
+      closeBtn.addEventListener("click", () => safeClose());
 
       document.addEventListener("keydown", (ev) => {
         try {
           if (!STATE.isOpen) return;
-          if (ev.key === "Escape") api.close();
+          if (ev.key === "Escape") safeClose();
         } catch {}
       });
 
@@ -170,4 +181,3 @@ Laddas som vanlig <script> (inte module) så freezer.js + moduler kan använda w
 
   window.FreezerModal = api;
 })();
-
