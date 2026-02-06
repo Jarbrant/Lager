@@ -1,6 +1,6 @@
 /* ============================================================
 AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 4/4
-AUTOPATCH | FIL: admin/freezer.js
+AUTOPATCH | FIL: Lager/admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
 
 AO-04/15 — Produktregister (Items) CRUD (Admin) — delegation (tills flytt i AO-12)
@@ -11,6 +11,8 @@ AO-15/15 — QA-stabilisering:
 - Robust scope-guard + readVal
 
 P0 FIX (DENNA PATCH):
+- BUYER (INKÖPARE) ska ha egen sida: Lager/buyer/freezer.html
+- När man väljer roll=BUYER i admin-sidan -> redirect direkt till buyer-sidan.
 - Undvik dubbel-navigering: om legacy-tabs finns (Dashboard/Saldo/Historik),
   så ska router-menyn INTE visa "shared-saldo" + "shared-history".
 - Förbättra label: "Inköp • Dashboard" -> "Inköp" (endast UI-text, ingen logik ändras).
@@ -62,6 +64,43 @@ Policy:
   const cbInvWrite = byId("perm_inventory_write");
   const cbHistWrite = byId("perm_history_write");
   const cbDashView = byId("perm_dashboard_view");
+
+  // ------------------------------------------------------------
+  // P0: ROLE -> PAGE ROUTING (Admin -> Buyer)
+  // MAPP: Lager/buyer/freezer.html
+  // Denna fil ligger i: Lager/admin/freezer.js
+  // ------------------------------------------------------------
+  const ROLE_PAGE = {
+    BUYER: "../buyer/freezer.html",     // från Lager/admin/ -> Lager/buyer/
+    ADMIN: "./freezer.html",            // här
+    PICKER: "./freezer.html",
+    SYSTEM_ADMIN: "./freezer.html"
+  };
+
+  function normalizeRoleKey(role) {
+    const r = String(role || "").toUpperCase().trim();
+    if (r === "ADMIN" || r === "BUYER" || r === "PICKER" || r === "SYSTEM_ADMIN") return r;
+    return "ADMIN";
+  }
+
+  function navToRolePageIfNeeded(role) {
+    // P0: från admin-sidan ska BUYER alltid till buyer-sidan.
+    const key = normalizeRoleKey(role);
+    const target = ROLE_PAGE[key] || "./freezer.html";
+
+    // Endast redirect om vi faktiskt ska lämna admin-sidan (BUYER)
+    if (key !== "BUYER") return;
+
+    try {
+      // Anti-loop: om vi redan är på buyer-sidan så gör inget.
+      const href = String(window.location.href || "");
+      if (href.includes("/buyer/freezer.html")) return;
+
+      window.location.assign(target);
+    } catch {
+      // fail-soft: gör inget
+    }
+  }
 
   // Page state
   let activeTab = "dashboard";
@@ -171,6 +210,9 @@ Policy:
   // ------------------------------------------------------------
   const initialRole = (userSelect && userSelect.value) ? userSelect.value : "ADMIN";
 
+  // P0: Om admin-sidan råkar öppnas i BUYER-läge -> gå till buyer-sidan direkt.
+  navToRolePageIfNeeded(initialRole);
+
   // Init store fail-soft
   if (!store || typeof store.init !== "function") {
     console.error("Freezer baseline saknar FreezerStore.");
@@ -220,6 +262,10 @@ Policy:
   if (userSelect) {
     userSelect.addEventListener("change", () => {
       const role = userSelect.value || "ADMIN";
+
+      // P0: BUYER -> egen sida
+      navToRolePageIfNeeded(role);
+
       const s = getStore();
 
       try {
