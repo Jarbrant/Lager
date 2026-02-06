@@ -2,14 +2,33 @@
 AO-06/15 — BUYER Controller (router + init) | FIL-ID: UI/pages/freezer/buyer/freezer-buyer.js
 Projekt: Fryslager (UI-only / localStorage-first)
 
-P0 FIX (DENNA PATCH):
-- Ingen auto-activate av första vyn (annars öppnas modal direkt vid load).
-- Visa neutral “Välj en ruta…” i root tills användaren klickar.
+Syfte:
+- Driver BUYER-sidan (buyer/freezer.html):
+  - init: FreezerStore.init({ role:"BUYER" })
+  - bygger meny från FreezerViewRegistry.getViewsForRole("BUYER")
+  - mount/render/unmount av aktiv vy i #freezerViewRoot
+  - status/mode/lock/reset demo (fail-closed friendly)
+
+PATCH (PROD):
+- P0 FIX: Öppna INTE första vyn automatiskt vid load (ingen auto-modal).
+- Startläge: visa "Välj en ruta ovan" tills användaren klickar.
 
 POLICY (LÅST):
 - Ingen storage-ändring här (store sköter state)
 - XSS-safe (DOM via createElement/textContent)
 - Fail-closed: om registry/store saknas -> visa fallback och stoppa
+
+Förväntade DOM-id i buyer/freezer.html:
+- frzStatusText, frzStatusPill
+- frzModeText
+- frzLockPanel, frzLockReason
+- frzDebugPanel, frzDebugText (valfritt)
+- frzResetDemoBtn
+- freezerViewMenu, freezerViewRoot, frzBuyerFallback (valfritt)
+
+Kritisk koppling:
+- UI/pages/freezer/01-view-registry.js (ESM) exponerar window.FreezerViewRegistry (bridge)
+- UI/pages/freezer/03-store.js exponerar window.FreezerStore
 ============================================================ */
 
 (function () {
@@ -41,25 +60,6 @@ POLICY (LÅST):
     b.className = "tabBtn";
     b.textContent = String(label || "—");
     return b;
-  }
-
-  function showRootHint(text) {
-    if (!DOM.root) return;
-    clear(DOM.root);
-
-    var box = document.createElement("div");
-    box.className = "panel";
-    box.style.background = "#fff";
-    box.style.border = "1px solid #e6e6e6";
-    box.style.borderRadius = "12px";
-    box.style.padding = "12px";
-
-    var t = document.createElement("div");
-    t.className = "muted";
-    t.textContent = String(text || "Välj en ruta ovan för att börja.");
-    box.appendChild(t);
-
-    DOM.root.appendChild(box);
   }
 
   /* =========================
@@ -144,12 +144,29 @@ POLICY (LÅST):
   }
 
   function renderDebug(msg) {
+    // Valfri debug: visas bara om msg finns
     try {
       if (!DOM.debugPanel || !DOM.debugText) return;
-      if (!msg) { DOM.debugPanel.hidden = true; return; }
+      if (!msg) {
+        DOM.debugPanel.hidden = true;
+        return;
+      }
       DOM.debugPanel.hidden = false;
       DOM.debugText.textContent = String(msg);
     } catch {}
+  }
+
+  function showStartHint() {
+    // Startläge: ingen vy vald, visa hint (fail-soft)
+    try {
+      if (!DOM.fallback) return;
+      DOM.fallback.hidden = false;
+      DOM.fallback.textContent = "Välj en ruta ovan för att börja.";
+    } catch {}
+  }
+
+  function hideStartHint() {
+    try { if (DOM.fallback) DOM.fallback.hidden = true; } catch {}
   }
 
   /* =========================
@@ -173,12 +190,18 @@ POLICY (LÅST):
   }
 
   function mountView(view) {
-    if (!view || !DOM.root) return false;
+    if (!view) return false;
+    if (!DOM.root) return false;
 
     var ctx = buildCtx();
+
+    // Clear root before mount (stable)
     clear(DOM.root);
 
+    // mount
     safeCall(view.mount, { root: DOM.root, ctx: ctx });
+
+    // initial render (if supported)
     safeCall(view.render, { root: DOM.root, state: (active.lastState || {}), ctx: ctx });
 
     active.mounted = true;
@@ -202,6 +225,7 @@ POLICY (LÅST):
     try { v = reg.findView(list, id); } catch { v = null; }
     if (!v) return;
 
+    // Lock/readOnly -> navigation ok i read-only, men om locked: stoppa
     var st = null;
     try { st = window.FreezerStore && window.FreezerStore.getStatus ? window.FreezerStore.getStatus() : null; } catch {}
     if (st && st.locked) {
@@ -210,13 +234,19 @@ POLICY (LÅST):
       return;
     }
 
+    // unmount previous
     unmountActive();
 
     active.viewId = String(id || "");
     active.view = v;
 
+    // När vi väljer en vy: göm hint
+    hideStartHint();
+
+    // mount new
     mountView(v);
 
+    // update buttons aria-selected
     try {
       if (!DOM.menu) return;
       var btns = DOM.menu.querySelectorAll("button[data-view-id]");
@@ -256,6 +286,7 @@ POLICY (LÅST):
       btn.setAttribute("role", "tab");
       btn.setAttribute("aria-selected", "false");
 
+      // permission hint (fail-soft): disable knapp om saknar perm
       try {
         var req = it.requiredPerm;
         if (req && window.FreezerStore && typeof window.FreezerStore.can === "function") {
@@ -277,7 +308,6 @@ POLICY (LÅST):
       DOM.menu.appendChild(btn);
     }
 
-    // P0: INGEN auto-activate här (förhindrar att modal öppnas direkt)
     return { ok: true };
   }
 
@@ -289,9 +319,9 @@ POLICY (LÅST):
     var s = window.FreezerStore;
     if (!s || typeof s.init !== "function") return { ok: false, reason: "FreezerStore saknas" };
 
-    try { s.init({ role: "BUYER" }); }
-    catch (e) { return { ok: false, reason: (e && e.message) ? e.message : "init-fail" }; }
+    try { s.init({ role: "BUYER" }); } catch (e) { return { ok: false, reason: (e && e.message) ? e.message : "init-fail" }; }
 
+    // bind reset demo
     try {
       if (DOM.resetBtn) {
         DOM.resetBtn.addEventListener("click", function () {
@@ -304,11 +334,13 @@ POLICY (LÅST):
       }
     } catch {}
 
+    // subscribe
     try {
       if (typeof s.subscribe === "function") {
         active.unsub = s.subscribe(function (stateSnap) {
           active.lastState = stateSnap || {};
           renderStatus();
+          // render active view on every state change
           renderActive();
         });
       }
@@ -328,24 +360,27 @@ POLICY (LÅST):
 
       var reg = window.FreezerViewRegistry;
       if (reg && typeof reg.getViewsForRole === "function" && typeof reg.findView === "function") {
-        try { if (DOM.fallback) DOM.fallback.hidden = true; } catch {}
 
         var m = buildMenuForBuyer();
-        if (!m.ok) { renderDebug("Kunde inte bygga meny: " + (m.reason || "okänt")); return; }
+        if (!m.ok) {
+          renderDebug("Kunde inte bygga meny: " + (m.reason || "okänt"));
+          return;
+        }
 
-        // Neutral start: låt användaren klicka (ingen modal på load)
-        if (!active.viewId && !active.view) showRootHint("Välj en ruta ovan för att börja.");
+        // P0 FIX: Öppna INTE första vyn automatiskt.
+        // Startläge: visa hint tills användaren klickar.
+        showStartHint();
 
         if (timer) clearInterval(timer);
         return;
       }
 
       if (tries >= maxTries) {
+        // Fail-closed friendly: visa fallback och stoppa
         try {
           if (DOM.fallback) {
             DOM.fallback.hidden = false;
-            DOM.fallback.textContent =
-              "Kunde inte ladda vy-registret (FreezerViewRegistry). Kontrollera att 01-view-registry.js laddas utan fel.";
+            DOM.fallback.textContent = "Kunde inte ladda vy-registret (FreezerViewRegistry). Kontrollera att 01-view-registry.js laddas utan fel.";
           }
         } catch {}
         renderDebug("Registry saknas efter timeout.");
@@ -362,8 +397,13 @@ POLICY (LÅST):
   ========================= */
 
   (function boot() {
-    if (!DOM.menu || !DOM.root) { renderDebug("DOM saknas (freezerViewMenu/freezerViewRoot)."); return; }
+    // Basic fail-soft: om root/menu saknas -> inget att göra
+    if (!DOM.menu || !DOM.root) {
+      renderDebug("DOM saknas (freezerViewMenu/freezerViewRoot).");
+      return;
+    }
 
+    // init store
     var initRes = initStoreBuyer();
     if (!initRes.ok) {
       renderStatus();
@@ -377,7 +417,7 @@ POLICY (LÅST):
       return;
     }
 
-    showRootHint("Laddar vyer…");
+    // wait for registry (ESM)
     waitForRegistryThenStart();
   })();
 
