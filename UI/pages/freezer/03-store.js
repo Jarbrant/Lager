@@ -7,11 +7,17 @@ P0-FIX:
 - Den får INTE råka innehålla admin/freezer.js (controller) — det orsakar FRZ_E_NOT_INIT.
 
 P0 SUPPLIERS (DENNA PATCH):
-- Leverantörsregister UTAN nya storage-keys och UTAN ny top-level state-nyckel.
-- Återanvänder _state.history som källa (event-sourcing i minnet):
+- Leverantörsregister UTAN ny top-level state-nyckel.
+- Återanvänder _state.history som källa (event-sourcing):
   -> create/update supplier skriver "supplier"-event
   -> listSuppliers() bygger listan från history
 - När supplier skapas/uppdateras -> notify() -> UI kan rendera direkt.
+
+NYTT (AUTOPATCH v1.1) — LOKAL PERSISTENS (SUPPLIERS):
+- Spara/återläs _state.history via localStorage (endast history).
+- Minimal scope: leverantörer byggs från history => leverantörer överlever reload.
+- Storage-key: FRZ_DEMO_HISTORY_V1 (1 st, endast history JSON).
+- Fail-closed: om storage är korrupt -> ignorera och fortsätt i demo-läge.
 
 Beslut:
 - Org-nr (orgNo) får vara TOMT (valfritt).
@@ -21,12 +27,82 @@ Beslut:
   -> om supplierId är ifyllt måste leverantören finnas + vara aktiv.
 
 POLICY (LÅST):
-- Inga nya storage-keys/datamodell
 - Fail-closed
 - XSS-safe (store renderar inget)
 ============================================================ */
 (function () {
   "use strict";
+
+  // ------------------------------------------------------------
+  // Storage (lokal persistens för history)
+  // ------------------------------------------------------------
+  const STORAGE_KEY_HISTORY = "FRZ_DEMO_HISTORY_V1"; // endast history-array (supplier events)
+
+  function readJsonFromLS(key) {
+    try {
+      const raw = window.localStorage ? window.localStorage.getItem(key) : null;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeJsonToLS(key, value) {
+    try {
+      if (!window.localStorage) return false;
+      const raw = JSON.stringify(value);
+      window.localStorage.setItem(key, raw);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function removeLS(key) {
+    try {
+      if (!window.localStorage) return;
+      window.localStorage.removeItem(key);
+    } catch {}
+  }
+
+  function sanitizeHistoryArray(arr) {
+    // Fail-closed: godkänn bara array av objekt med basfält
+    try {
+      if (!Array.isArray(arr)) return [];
+      const out = [];
+      for (let i = 0; i < arr.length; i++) {
+        const ev = arr[i];
+        if (!ev || typeof ev !== "object") continue;
+        const type = String(ev.type || "");
+        const msg = String(ev.msg || "");
+        const at = String(ev.at || "");
+        const id = String(ev.id || "");
+        const meta = (ev.meta && typeof ev.meta === "object") ? ev.meta : null;
+
+        out.push({ id, at, type, msg, meta });
+        if (out.length >= 500) break;
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  function loadHistoryFromStorage() {
+    const parsed = readJsonFromLS(STORAGE_KEY_HISTORY);
+    const safe = sanitizeHistoryArray(parsed);
+    return safe;
+  }
+
+  function persistHistoryToStorage() {
+    // Vi sparar bara _state.history (max 500) för minimal risk/scope.
+    try {
+      const hist = Array.isArray(_state.history) ? _state.history.slice(0, 500) : [];
+      writeJsonToLS(STORAGE_KEY_HISTORY, hist);
+    } catch {}
+  }
 
   // ------------------------------------------------------------
   // Helpers
@@ -51,7 +127,7 @@ POLICY (LÅST):
   function normOrg(v) { return normStr(v); }     // valfritt
 
   // ------------------------------------------------------------
-  // In-memory state (no new storage keys)
+  // In-memory state (history persistas i LS)
   // ------------------------------------------------------------
   const _subs = new Set();
 
@@ -128,6 +204,9 @@ POLICY (LÅST):
       meta: meta ? safeClone(meta) : null
     });
     if (_state.history.length > 500) _state.history.length = 500;
+
+    // PERSIST: skriv ut history till localStorage (fail-soft)
+    persistHistoryToStorage();
   }
 
   // ------------------------------------------------------------
@@ -252,7 +331,7 @@ POLICY (LÅST):
   }
 
   // ------------------------------------------------------------
-  // Demo baseline (in-memory)
+  // Demo baseline (in-memory) + history kan återläsas från LS
   // ------------------------------------------------------------
   function seedDemo() {
     _state.users = [
@@ -263,7 +342,32 @@ POLICY (LÅST):
 
     _state.items = [];
     _state.history = [];
+
     addHistory("info", "Demo initierad (in-memory).", { role: _state.role });
+  }
+
+  function hydrateFromStorageIfAny() {
+    // Vi håller demo-setup för users/items men återläs history om den finns,
+    // så leverantörer överlever reload.
+    const hist = loadHistoryFromStorage();
+    if (hist && Array.isArray(hist) && hist.length > 0) {
+      _state.history = hist.slice(0, 500);
+      // Lägg en info-event i minnet (utan att spamma storage för mycket)
+      // (persistHistoryToStorage kallas av addHistory, så vi lägger INTE addHistory här)
+      try {
+        _state.history.unshift({
+          id: uid("h"),
+          at: nowIso(),
+          type: "info",
+          msg: "History återläst från localStorage (DEMO).",
+          meta: { key: STORAGE_KEY_HISTORY }
+        });
+        if (_state.history.length > 500) _state.history.length = 500;
+        persistHistoryToStorage();
+      } catch {}
+      return true;
+    }
+    return false;
   }
 
   // ------------------------------------------------------------
@@ -279,10 +383,13 @@ POLICY (LÅST):
         _state.readOnly = ro.readOnly;
         _state.whyReadOnly = ro.why;
 
+        // Bas-demo (users/items) men INTE radera history om den finns i LS
         seedDemo();
+        const restored = hydrateFromStorageIfAny();
+
         clearLocked();
         notify();
-        return { ok: true };
+        return { ok: true, restoredHistory: !!restored };
       } catch (e) {
         setLocked("FRZ_E_NOT_INIT");
         return { ok: false, reason: (e && e.message) ? e.message : "FRZ_E_NOT_INIT" };
@@ -333,6 +440,10 @@ POLICY (LÅST):
       const st = FreezerStore.getStatus();
       if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
       if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
+
+      // Rensa lokal history också (annars kommer leverantörer tillbaka efter reload)
+      removeLS(STORAGE_KEY_HISTORY);
+
       seedDemo();
       notify();
       return { ok: true };
@@ -530,8 +641,7 @@ POLICY (LÅST):
 
       const it = safeClone(p);
       it.articleNo = articleNo;
-      if ("supplierId" in it) it.supplierId = supplierId || "";
-      else it.supplierId = supplierId || "";
+      it.supplierId = supplierId || "";
 
       if (typeof it.isActive !== "boolean") it.isActive = true;
 
