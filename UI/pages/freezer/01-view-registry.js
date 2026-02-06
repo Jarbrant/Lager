@@ -1,473 +1,183 @@
 /* ============================================================
-AO-01/15 — View Registry (minsta baseline) | FIL-ID: UI/pages/freezer/01-view-registry.js
+AO-16/15 (EXTRA) — Modal Shell (JS, window-bridge) | FIL-ID: UI/pages/freezer/05-modal-shell.js
 Projekt: Fryslager (UI-only / localStorage-first)
-Syfte: Central export av vy-listor per roll.
-POLICY: Inga nya storage-keys • Ingen UX/redesign • Fail-closed friendly
+Syfte: Gemensam modal som kan användas av vy-moduler (varje ruta kan ha egen fil).
+POLICY: Ingen storage • XSS-safe (bygger DOM) • Fail-soft • Ingen UX/redesign utanför modal
 
-P0 BUYER MENU FIX (DENNA PATCH):
-- BUYER-router ska visa 4 inköpsrutor (inte shared saldo/historik).
-- Etiketter: Ny Leverantör / Ny produkt / Lägga in produkter / Sök Leverantör
-- De tre första öppnas i modal (fail-soft om FreezerModal saknas).
-- Återanvänder befintliga buyer-vyer (buyer-in/buyer-dashboard) som motor tills riktiga vyer finns.
+P0 TRACE/WRAP FIX (DENNA PATCH):
+- Stäng/overlay/ESC ska anropa window.FreezerModal.close() dynamiskt
+  så att en senare wrapper (close-tracer) alltid fångar anropet.
 ============================================================ */
 
-import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
+(function () {
+  "use strict";
 
-// AO-11/15: Shared views (Saldo/Historik)
-import { sharedSaldoView } from "./shared/shared-saldo.js";
-import { sharedHistoryView } from "./shared/shared-history.js";
+  if (window.FreezerModal) return;
 
-// AO-07/15 + AO-14/15: Buyer views (router mount)
-import { buyerInView } from "./buyer/buyer-in.js";
-import { buyerDashboardView } from "./buyer/buyer-dashboard.js";
+  const STATE = {
+    root: null,
+    overlay: null,
+    dialog: null,
+    title: null,
+    body: null,
+    closeBtn: null,
+    isOpen: false,
+    onClose: null
+  };
 
-/* =========================
-BLOCK 1 — Hjälpare: säker registrering
-========================= */
+  function el(tag) { return document.createElement(tag); }
+  function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
 
-/**
- * Skapar + validerar + fryser en vy.
- * @param {Parameters<typeof createView>[0]} spec
- * @returns {import("./00-view-interface.js").FreezerView}
- */
-export function defineView(spec) {
-  const view = createView(spec);
-  const v = validateViewShape(view);
-  if (!v.ok) {
-    throw new Error(
-      "AO-01/15 view-registry: View validation failed: " + v.errors.join("; ")
-    );
-  }
-  return freezeView(view);
-}
-
-/**
- * Validerar + fryser en redan-skapad vy (t.ex. importerad).
- * Fail-closed med tydligt fel.
- * @param {any} view
- * @param {string} name
- * @returns {import("./00-view-interface.js").FreezerView}
- */
-function defineExistingView(view, name) {
-  const v = validateViewShape(view);
-  if (!v.ok) {
-    throw new Error(
-      `AO-11/15 view-registry: Importerad vy är ogiltig (${name}): ` + v.errors.join("; ")
-    );
-  }
-  return freezeView(view);
-}
-
-/* =========================
-BLOCK 1.1 — Modal helper (fail-soft)
-========================= */
-
-/**
- * Fail-soft modal open: försöker använda window.FreezerModal om den finns.
- * Om modal saknas/okänt API -> return null och vi renderar inline istället.
- * @param {{ title: string, contentRoot: HTMLElement, onClose?: Function }} opts
- * @returns {{ close: Function }|null}
- */
-function tryOpenModal(opts) {
-  try {
-    const m = window.FreezerModal;
-    if (!m) return null;
-
-    // Stöd flera möjliga API: open/show
-    const openFn =
-      (typeof m.open === "function" && m.open) ||
-      (typeof m.show === "function" && m.show) ||
-      null;
-
-    if (!openFn) return null;
-
-    // Vi skickar ett robust payload utan att anta för mycket
-    const res = openFn({
-      title: String(opts.title || ""),
-      contentRoot: opts.contentRoot,
-      onClose: typeof opts.onClose === "function" ? opts.onClose : undefined
-    });
-
-    // Res kan vara controller eller inget alls -> normalisera close
-    if (res && typeof res.close === "function") return res;
-    if (typeof m.close === "function") {
-      return { close: () => { try { m.close(); } catch {} } };
-    }
-    return { close: () => {} };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Skapar en modal-vy.
- * Fail-soft: om modal inte går -> renderas inline i viewRoot.
- * @param {{ id:string, label:string, requiredPerm:string|null, title:string, renderBody:(root:HTMLElement, args:any)=>void }} spec
- * @returns {import("./00-view-interface.js").FreezerView}
- */
-function defineModalView(spec) {
-  const viewId = String(spec.id || "").trim();
-  const label = String(spec.label || spec.id || "").trim();
-  const title = String(spec.title || spec.label || spec.id || "").trim();
-
-  return defineView({
-    id: viewId,
-    label,
-    requiredPerm: spec.requiredPerm ?? null,
-
-    mount: ({ root, ctx }) => {
-      // Skapa container för body
-      const body = document.createElement("div");
-      body.className = "panel";
-      body.style.background = "#fff";
-      body.style.border = "1px solid #e6e6e6";
-      body.style.borderRadius = "12px";
-      body.style.padding = "12px";
-
-      // Försök öppna modal
-      const ctrl = tryOpenModal({
-        title,
-        contentRoot: body,
-        onClose: () => {}
-      });
-
-      // Om modal inte finns -> rendera inline i root istället (fail-soft)
-      if (!ctrl) {
-        // Rensa root
-        while (root.firstChild) root.removeChild(root.firstChild);
-        root.appendChild(body);
-      }
-
-      // Spara controller på root så vi kan stänga på unmount
-      try {
-        root.__frzModalCtrl = ctrl;
-        root.__frzModalBody = body;
-      } catch {}
-
-      // Rendera första body
-      try {
-        spec.renderBody(body, { root, ctx });
-      } catch {
-        // fail-soft
-      }
-    },
-
-    unmount: ({ root }) => {
-      try {
-        const ctrl = root.__frzModalCtrl;
-        if (ctrl && typeof ctrl.close === "function") ctrl.close();
-      } catch {}
-      try {
-        delete root.__frzModalCtrl;
-        delete root.__frzModalBody;
-      } catch {}
-    },
-
-    render: ({ root, state, ctx }) => {
-      // Om vi kör i modal: rendera i body
-      try {
-        const body = root.__frzModalBody;
-        if (body && body instanceof HTMLElement) {
-          // Rensa body och rendera på nytt
-          while (body.firstChild) body.removeChild(body.firstChild);
-          spec.renderBody(body, { root, state, ctx });
-          return;
-        }
-      } catch {}
-
-      // Inline fallback: rendera i root
-      try {
-        while (root.firstChild) root.removeChild(root.firstChild);
-        const box = document.createElement("div");
-        box.className = "panel";
-        box.style.background = "#fff";
-        box.style.border = "1px solid #e6e6e6";
-        box.style.borderRadius = "12px";
-        box.style.padding = "12px";
-        spec.renderBody(box, { root, state, ctx });
-        root.appendChild(box);
-      } catch {
-        // fail-soft
-      }
-    }
-  });
-}
-
-/**
- * Skapar en wrapper-vy med nytt id/label men som delegatar till en befintlig vy.
- * @param {{ id:string, label:string, requiredPerm:string|null, base: import("./00-view-interface.js").FreezerView }} spec
- * @returns {import("./00-view-interface.js").FreezerView}
- */
-function defineWrappedView(spec) {
-  const base = spec.base;
-  return defineView({
-    id: String(spec.id || "").trim(),
-    label: String(spec.label || "").trim(),
-    requiredPerm: spec.requiredPerm ?? (base.requiredPerm ?? null),
-
-    mount: ({ root, ctx }) => {
-      try {
-        if (typeof base.mount === "function") base.mount({ root, ctx });
-      } catch {
-        // fail-soft
-      }
-    },
-
-    unmount: ({ root, ctx }) => {
-      try {
-        if (typeof base.unmount === "function") base.unmount({ root, ctx });
-      } catch {
-        // fail-soft
-      }
-    },
-
-    render: ({ root, state, ctx }) => {
-      try {
-        if (typeof base.render === "function") base.render({ root, state, ctx });
-      } catch {
-        // fail-soft
-      }
-    }
-  });
-}
-
-/* =========================
-BLOCK 2 — Listor per roll
-========================= */
-
-const _sharedSaldo = defineExistingView(sharedSaldoView, "sharedSaldoView");
-const _sharedHistory = defineExistingView(sharedHistoryView, "sharedHistoryView");
-
-const _buyerDashboardBase = defineExistingView(buyerDashboardView, "buyerDashboardView");
-const _buyerInBase = defineExistingView(buyerInView, "buyerInView");
-
-/** @type {import("./00-view-interface.js").FreezerView[]} */
-export const sharedViews = [_sharedSaldo, _sharedHistory];
-
-/** @type {import("./00-view-interface.js").FreezerView[]} */
-export const adminViews = []; // fylls när admin-moduler finns
-
-/* =========================
-BLOCK 2.1 — BUYER: korrekta 4 rutor
-- Ny Leverantör (modal) — placeholder
-- Ny produkt (modal) — placeholder
-- Lägga in produkter (modal) — wrap buyer-in
-- Sök Leverantör (inline vy) — wrap buyer-dashboard
-========================= */
-
-const buyerSupplierNewModal = defineModalView({
-  id: "buyer-supplier-new",
-  label: "Ny Leverantör",
-  title: "Ny Leverantör",
-  requiredPerm: null,
-  renderBody: (root) => {
-    const h = document.createElement("h3");
-    h.style.margin = "0 0 8px 0";
-    h.textContent = "Ny Leverantör";
-
-    const p = document.createElement("div");
-    p.className = "muted";
-    p.textContent = "Placeholder: här byggs formulär för att registrera ny leverantör (kommer i AO).";
-
-    root.appendChild(h);
-    root.appendChild(p);
-  }
-});
-
-const buyerItemNewModal = defineModalView({
-  id: "buyer-item-new",
-  label: "Ny produkt",
-  title: "Ny produkt",
-  requiredPerm: "inventory_write",
-  renderBody: (root, args) => {
-    const h = document.createElement("h3");
-    h.style.margin = "0 0 8px 0";
-    h.textContent = "Ny produkt";
-
-    const p = document.createElement("div");
-    p.className = "muted";
-    p.textContent = "Placeholder: här byggs produktformulär (artikelnummer, leverantör, kategori, pris) i AO.";
-
-    // Enkel hint om behörighet
+  function safeClose() {
     try {
-      const canWrite = !!(args && args.ctx && typeof args.ctx.can === "function" && args.ctx.can("inventory_write"));
-      if (!canWrite) {
-        const w = document.createElement("div");
-        w.className = "panel warn";
-        w.style.marginTop = "10px";
-        const b = document.createElement("b");
-        b.textContent = "Skrivning spärrad";
-        const m = document.createElement("div");
-        m.className = "muted";
-        m.textContent = "Du saknar inventory_write eller är i read-only läge.";
-        w.appendChild(b);
-        w.appendChild(m);
-        root.appendChild(w);
+      if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
+        window.FreezerModal.close();
       }
     } catch {}
-
-    root.appendChild(h);
-    root.appendChild(p);
   }
-});
 
-// Modal wrapper för "Lägga in produkter" -> använder buyer-in motorn
-const buyerStockInModal = defineModalView({
-  id: "buyer-stock-in",
-  label: "Lägga in produkter",
-  title: "Lägga in produkter",
-  requiredPerm: null,
-  renderBody: (root, args) => {
-    // Vi renderar base-vyn inuti modal-body genom att låta base.render använda just "root" som container.
-    // NOTE: base-vyn förväntar sig {root,state,ctx}, så vi emulerar det.
+  function ensureRoot() {
     try {
-      // Rensa root och låt base rendera
-      while (root.firstChild) root.removeChild(root.firstChild);
+      if (STATE.root && document.body.contains(STATE.root)) return STATE.root;
 
-      // Skapa en intern container så base får en stabil yta
-      const inner = document.createElement("div");
-      root.appendChild(inner);
+      const overlay = el("div");
+      overlay.setAttribute("data-frz-modal", "overlay");
+      overlay.style.position = "fixed";
+      overlay.style.inset = "0";
+      overlay.style.background = "rgba(0,0,0,0.35)";
+      overlay.style.display = "none";
+      overlay.style.alignItems = "center";
+      overlay.style.justifyContent = "center";
+      overlay.style.zIndex = "9999";
+      overlay.style.padding = "16px";
 
-      if (typeof _buyerInBase.render === "function") {
-        _buyerInBase.render({
-          root: inner,
-          state: (args && args.state) ? args.state : {},
-          ctx: (args && args.ctx) ? args.ctx : {}
-        });
-      } else {
-        const p = document.createElement("div");
-        p.className = "muted";
-        p.textContent = "buyer-in saknar render().";
-        root.appendChild(p);
-      }
+      const dialog = el("div");
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.style.width = "min(900px, 96vw)";
+      dialog.style.maxHeight = "90vh";
+      dialog.style.overflow = "auto";
+      dialog.style.background = "#fff";
+      dialog.style.borderRadius = "14px";
+      dialog.style.border = "1px solid #e6e6e6";
+      dialog.style.boxShadow = "0 12px 40px rgba(0,0,0,0.25)";
+
+      const head = el("div");
+      head.style.display = "flex";
+      head.style.gap = "10px";
+      head.style.alignItems = "center";
+      head.style.padding = "12px 12px";
+      head.style.borderBottom = "1px solid #eee";
+
+      const title = el("b");
+      title.textContent = "—";
+
+      const spacer = el("div");
+      spacer.style.flex = "1";
+
+      const closeBtn = el("button");
+      closeBtn.type = "button";
+      closeBtn.textContent = "Stäng";
+      closeBtn.style.border = "1px solid #e6e6e6";
+      closeBtn.style.background = "#fff";
+      closeBtn.style.borderRadius = "10px";
+      closeBtn.style.padding = "8px 10px";
+      closeBtn.style.cursor = "pointer";
+
+      const body = el("div");
+      body.style.padding = "12px 12px";
+
+      head.appendChild(title);
+      head.appendChild(spacer);
+      head.appendChild(closeBtn);
+
+      dialog.appendChild(head);
+      dialog.appendChild(body);
+      overlay.appendChild(dialog);
+
+      overlay.addEventListener("click", (ev) => {
+        // klick utanför dialog stänger
+        try {
+          if (ev.target === overlay) safeClose();
+        } catch {}
+      });
+
+      closeBtn.addEventListener("click", () => safeClose());
+
+      document.addEventListener("keydown", (ev) => {
+        try {
+          if (!STATE.isOpen) return;
+          if (ev.key === "Escape") safeClose();
+        } catch {}
+      });
+
+      document.body.appendChild(overlay);
+
+      STATE.root = overlay;
+      STATE.overlay = overlay;
+      STATE.dialog = dialog;
+      STATE.title = title;
+      STATE.body = body;
+      STATE.closeBtn = closeBtn;
+
+      return overlay;
     } catch {
-      const p = document.createElement("div");
-      p.className = "muted";
-      p.textContent = "Kunde inte rendera Lägga in produkter (buyer-in).";
-      root.appendChild(p);
+      return null;
     }
   }
-});
 
-// Inline view för "Sök Leverantör" -> använder buyer-dashboard motorn (tills riktig supplier-search finns)
-const buyerSupplierSearchInline = defineWrappedView({
-  id: "buyer-supplier-search",
-  label: "Sök Leverantör",
-  requiredPerm: _buyerDashboardBase.requiredPerm ?? null,
-  base: _buyerDashboardBase
-});
+  const api = {
+    ensureRoot,
 
-/** @type {import("./00-view-interface.js").FreezerView[]} */
-export const buyerViews = [
-  buyerSupplierNewModal,
-  buyerItemNewModal,
-  buyerStockInModal,
-  buyerSupplierSearchInline
-];
+    open: function (opts) {
+      try {
+        ensureRoot();
+        if (!STATE.overlay || !STATE.title || !STATE.body) return;
 
-/** @type {import("./00-view-interface.js").FreezerView[]} */
-export const pickerViews = [];
+        const title = opts && opts.title ? String(opts.title) : "—";
+        STATE.title.textContent = title;
 
-/* =========================
-BLOCK 3 — Aggregat (praktiskt för router)
-========================= */
+        clear(STATE.body);
 
-/**
- * Normaliserar roll-sträng så legacy ("ADMIN") och nya ("admin") fungerar.
- * @param {string} role
- * @returns {"admin"|"buyer"|"picker"|""}
- */
-function normalizeRole(role) {
-  const r = String(role || "").trim();
-  if (!r) return "";
-  const up = r.toUpperCase();
-  if (up === "ADMIN") return "admin";
-  if (up === "BUYER") return "buyer";
-  if (up === "PICKER") return "picker";
-  if (up === "SYSTEM_ADMIN") return "";
-  const low = r.toLowerCase();
-  if (low === "admin" || low === "buyer" || low === "picker") return /** @type any */ (low);
-  return "";
-}
+        // allow caller to render DOM safely
+        if (opts && typeof opts.render === "function") {
+          opts.render(STATE.body);
+        } else if (opts && typeof opts.text === "string") {
+          const p = el("div");
+          p.textContent = opts.text;
+          STATE.body.appendChild(p);
+        }
 
-/**
- * @param {"admin"|"buyer"|"picker"|string} role
- * @returns {import("./00-view-interface.js").FreezerView[]}
- */
-export function getViewsForRole(role) {
-  const nr = normalizeRole(role);
+        STATE.onClose = (opts && typeof opts.onClose === "function") ? opts.onClose : null;
 
-  // ADMIN/PICKER: behåll shared + roll-specifika
-  if (nr === "admin") return [...sharedViews, ...adminViews];
-  if (nr === "picker") return [...sharedViews, ...pickerViews];
+        STATE.overlay.style.display = "flex";
+        STATE.isOpen = true;
 
-  // BUYER: VISA INTE shared i router-menyn (Saldo/Historik finns redan som legacy tabs)
-  if (nr === "buyer") return [...buyerViews];
+        // focus close for accessibility
+        try { STATE.closeBtn && STATE.closeBtn.focus(); } catch {}
+      } catch {
+        /* fail-soft */
+      }
+    },
 
-  // Default: shared
-  return [...sharedViews];
-}
+    close: function () {
+      try {
+        if (!STATE.overlay) return;
+        STATE.overlay.style.display = "none";
+        STATE.isOpen = false;
 
-/**
- * @param {import("./00-view-interface.js").FreezerView[]} list
- * @param {string} id
- * @returns {import("./00-view-interface.js").FreezerView|null}
- */
-export function findView(list, id) {
-  const want = String(id || "").trim();
-  if (!want) return null;
-  for (const v of list) {
-    if (v && v.id === want) return v;
-  }
-  return null;
-}
+        try {
+          if (typeof STATE.onClose === "function") STATE.onClose();
+        } catch {}
 
-/* =========================
-BLOCK 4 — Export för meny
-========================= */
+        STATE.onClose = null;
+      } catch {
+        /* fail-soft */
+      }
+    },
 
-/**
- * @param {import("./00-view-interface.js").FreezerView[]} list
- * @returns {{ id: string, label: string, requiredPerm: string|null }[]}
- */
-export function toMenuItems(list) {
-  return (Array.isArray(list) ? list : [])
-    .filter(Boolean)
-    .map((v) => ({ id: v.id, label: v.label, requiredPerm: v.requiredPerm ?? null }));
-}
+    isOpen: function () { return !!STATE.isOpen; }
+  };
 
-/* =========================
-BLOCK 5 — AO-11 BRIDGE: gör registry tillgänglig för non-module freezer.js
-========================= */
-/**
- * POLICY: ingen storage, bara en window-bridge.
- * Detta behövs eftersom admin/freezer.js laddas som vanlig <script>.
- */
-try {
-  if (!window.FreezerViewRegistry) {
-    window.FreezerViewRegistry = {
-      // helpers
-      defineView,
-      getViewsForRole,
-      findView,
-      toMenuItems,
-      // lists (read-only)
-      sharedViews,
-      adminViews,
-      buyerViews,
-      pickerViews
-    };
-  } else {
-    // fail-soft: uppdatera listor/funcs om registry redan finns (t.ex. vid hot reload)
-    window.FreezerViewRegistry.defineView = defineView;
-    window.FreezerViewRegistry.getViewsForRole = getViewsForRole;
-    window.FreezerViewRegistry.findView = findView;
-    window.FreezerViewRegistry.toMenuItems = toMenuItems;
-    window.FreezerViewRegistry.sharedViews = sharedViews;
-    window.FreezerViewRegistry.adminViews = adminViews;
-    window.FreezerViewRegistry.buyerViews = buyerViews;
-    window.FreezerViewRegistry.pickerViews = pickerViews;
-  }
-} catch {
-  // fail-soft
-}
+  window.FreezerModal = api;
+})();
