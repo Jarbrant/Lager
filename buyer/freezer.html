@@ -15,6 +15,7 @@ POLICY (LÅST):
 KRAV:
 - ModalShell laddas som vanlig <script> så window.FreezerModal finns.
 - ESM-moduler laddas som type="module" (view-interface/registry/vyer).
+- P0: buyer-controller måste INTE köra före registry -> använd defer.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -145,7 +146,7 @@ KRAV:
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → Render/Dash → ModalShell → ESM views/registry → buyer controller
+  Core → Contract → Store → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
   =========================================================== -->
 
   <!-- Core -->
@@ -164,8 +165,7 @@ KRAV:
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
 
-  <!-- Buyer controller (vanlig script – se AO-06/15) -->
-  <script src="../UI/pages/freezer/buyer/freezer-buyer.js"></script>
+  <!-- Buyer controller (P0: defer så registry hinner sättas) -->
+  <script defer src="../UI/pages/freezer/buyer/freezer-buyer.js"></script>
 </body>
 </html>
-
