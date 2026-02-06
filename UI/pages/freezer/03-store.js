@@ -13,14 +13,20 @@ P0 SUPPLIERS:
   -> listSuppliers() bygger listan från history
 - När supplier skapas/uppdateras -> notify() -> UI kan rendera direkt.
 
-AUTOPATCH v1.2 — LOKAL PERSISTENS:
-- history (leverantörer): FRZ_DEMO_HISTORY_V1
-- items (produkter):     FRZ_DEMO_ITEMS_V1
-- Endast localStorage i demo; fail-closed om storage saknas/är korrupt.
+AUTOPATCH v1.3 — LOKAL PERSISTENS + LAGERSALDO (utan ny state-nyckel):
+- history (leverantörer + lagersaldo-events): FRZ_DEMO_HISTORY_V1
+- items  (produkter/masterdata):             FRZ_DEMO_ITEMS_V1
+- Lagersaldo byggs från history (event-sourcing): INGA nya storage-keys.
 
 PRODUKTFÄLT (ALLA FRIVILLIGA UTOM articleNo):
 - productName, category, packSize, pricePerKg, unit, tempClass, minLevel,
-  requiresExpiry, ean, notes, location, supplierId, isActive
+  requiresExpiry, ean, notes, location, supplierId, isActive,
+  (extra frivilliga): maxLevel, targetLevel, lastPrice, lastPriceAt, lastSupplierRef, lastInventoryAt
+
+LAGERSALDO (events i history, inga nya state-nycklar):
+- Stock-event: type:"stock" meta:{ action:"adjust"|"set", articleNo, delta?, qty?, unit?, reasonCode?, note?, ref?, at? }
+- listStock() bygger snapshot { articleNo, onHand, unit, updatedAt, lastReasonCode }
+- adjustStock()/setStock() skriver events och persisterar via history-nyckeln.
 
 POLICY (LÅST):
 - Fail-closed
@@ -32,12 +38,16 @@ POLICY (LÅST):
   // ------------------------------------------------------------
   // Storage (lokal persistens för demo)
   // ------------------------------------------------------------
-  const STORAGE_KEY_HISTORY = "FRZ_DEMO_HISTORY_V1"; // endast history-array (supplier events)
-  const STORAGE_KEY_ITEMS = "FRZ_DEMO_ITEMS_V1";     // endast items-array (produkter)
+  const STORAGE_KEY_HISTORY = "FRZ_DEMO_HISTORY_V1"; // history-array (supplier + stock events)
+  const STORAGE_KEY_ITEMS = "FRZ_DEMO_ITEMS_V1";     // items-array (produkter/masterdata)
+
+  function hasLocalStorage() {
+    try { return !!window.localStorage; } catch { return false; }
+  }
 
   function readJsonFromLS(key) {
     try {
-      const raw = window.localStorage ? window.localStorage.getItem(key) : null;
+      const raw = hasLocalStorage() ? window.localStorage.getItem(key) : null;
       if (!raw) return null;
       return JSON.parse(raw);
     } catch {
@@ -47,7 +57,7 @@ POLICY (LÅST):
 
   function writeJsonToLS(key, value) {
     try {
-      if (!window.localStorage) return false;
+      if (!hasLocalStorage()) return false;
       window.localStorage.setItem(key, JSON.stringify(value));
       return true;
     } catch {
@@ -57,7 +67,7 @@ POLICY (LÅST):
 
   function removeLS(key) {
     try {
-      if (!window.localStorage) return;
+      if (!hasLocalStorage()) return;
       window.localStorage.removeItem(key);
     } catch {}
   }
@@ -130,10 +140,18 @@ POLICY (LÅST):
           notes: String(it.notes || "").trim(),
           location: String(it.location || "").trim(),
 
-          // Tal/boolean (fail-soft: om NaN -> null/0 beroende)
+          // Tal/boolean (fail-soft: om NaN -> null)
           pricePerKg: (typeof it.pricePerKg === "number" && isFinite(it.pricePerKg)) ? it.pricePerKg : null,
           minLevel: (typeof it.minLevel === "number" && isFinite(it.minLevel)) ? it.minLevel : null,
           requiresExpiry: !!it.requiresExpiry,
+
+          // Extra frivilliga fält (P2, men stöds)
+          maxLevel: (typeof it.maxLevel === "number" && isFinite(it.maxLevel)) ? it.maxLevel : null,
+          targetLevel: (typeof it.targetLevel === "number" && isFinite(it.targetLevel)) ? it.targetLevel : null,
+          lastPrice: (typeof it.lastPrice === "number" && isFinite(it.lastPrice)) ? it.lastPrice : null,
+          lastPriceAt: String(it.lastPriceAt || "").trim(),
+          lastSupplierRef: String(it.lastSupplierRef || "").trim(),
+          lastInventoryAt: String(it.lastInventoryAt || "").trim(),
 
           // Aktivitet
           isActive: ("isActive" in it) ? !!it.isActive : true
@@ -179,7 +197,7 @@ POLICY (LÅST):
   }
 
   function normStr(v) { return String(v == null ? "" : v).trim(); }
-  function normEmail(v) { return normStr(v); }   // fail-soft: ingen validering här
+  function normEmail(v) { return normStr(v); }   // fail-soft
   function normPhone(v) { return normStr(v); }   // fail-soft
   function normOrg(v) { return normStr(v); }     // valfritt
 
@@ -188,6 +206,14 @@ POLICY (LÅST):
     const n = Number(v);
     if (!isFinite(n)) return null;
     return n;
+  }
+
+  function normIntOrNull(v) {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    if (!isFinite(n)) return null;
+    const i = Math.trunc(n);
+    return i;
   }
 
   // ------------------------------------------------------------
@@ -391,64 +417,152 @@ POLICY (LÅST):
   }
 
   // ------------------------------------------------------------
-  // Demo baseline + hydrate från storage
+  // LAGERSALDO — byggs från history (inga nya state-nycklar)
   // ------------------------------------------------------------
-  function seedDemo() {
+  function isStockEvent(ev) {
+    try {
+      if (!ev) return false;
+      if (String(ev.type || "") !== "stock") return false;
+      const m = ev.meta && typeof ev.meta === "object" ? ev.meta : null;
+      if (!m) return false;
+      const action = normStr(m.action);
+      if (action !== "adjust" && action !== "set") return false;
+      const articleNo = normStr(m.articleNo);
+      if (!articleNo) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function getItemByArticleNo(articleNo) {
+    const id = normStr(articleNo);
+    if (!id) return null;
+    const items = Array.isArray(_state.items) ? _state.items : [];
+    return items.find(it => it && normStr(it.articleNo) === id) || null;
+  }
+
+  function getStockSnapshotFromHistory() {
+    const byArticle = Object.create(null);
+    const hist = Array.isArray(_state.history) ? _state.history : [];
+
+    // process oldest -> newest
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const ev = hist[i];
+      if (!isStockEvent(ev)) continue;
+
+      const m = ev.meta || {};
+      const articleNo = normStr(m.articleNo);
+      if (!articleNo) continue;
+
+      const action = normStr(m.action);
+      const unit = normStr(m.unit);
+      const reasonCode = normStr(m.reasonCode);
+      const at = normStr(ev.at) || nowIso();
+
+      const cur = byArticle[articleNo] || { articleNo, onHand: 0, unit: "", updatedAt: "", lastReasonCode: "" };
+
+      if (action === "set") {
+        const qty = normIntOrNull(m.qty);
+        if (qty == null) continue; // fail-closed: ignorera korrupt
+        cur.onHand = qty;
+      } else if (action === "adjust") {
+        const delta = normIntOrNull(m.delta);
+        if (delta == null) continue;
+        cur.onHand = (Number(cur.onHand) || 0) + delta;
+      }
+
+      // Enhet: om event har unit sätts den, annars behåll tidigare
+      if (unit) cur.unit = unit;
+
+      cur.updatedAt = at;
+      cur.lastReasonCode = reasonCode || cur.lastReasonCode || "";
+
+      byArticle[articleNo] = cur;
+    }
+
+    const out = Object.values(byArticle);
+
+    // Stabil sort: articleNo
+    out.sort((a, b) => String(a.articleNo || "").localeCompare(String(b.articleNo || "")));
+    return out;
+  }
+
+  function validateStockWriteCommon(st) {
+    if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
+    if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
+    if (!FreezerStore.can("inventory_write")) return { ok: false, reason: "Saknar inventory_write." };
+    return { ok: true };
+  }
+
+  // ------------------------------------------------------------
+  // Demo baseline + hydrate från storage (P0-fix: radera inte LS vid init)
+  // ------------------------------------------------------------
+  function seedUsers() {
     _state.users = [
       { id: uid("u"), firstName: "Admin", perms: safeClone(ROLE_PERMS.ADMIN), active: true },
       { id: uid("u"), firstName: "Inköp", perms: safeClone(ROLE_PERMS.BUYER), active: true },
       { id: uid("u"), firstName: "Plock", perms: safeClone(ROLE_PERMS.PICKER), active: true }
     ];
-
-    _state.items = [];
-    _state.history = [];
-
-    addHistory("info", "Demo initierad (in-memory).", { role: _state.role });
-    persistItemsToStorage(); // tom baseline i LS (fail-soft)
   }
 
-  function hydrateFromStorageIfAny() {
-    let didRestore = false;
+  function initDemoStateFromStorageOrEmpty() {
+    // 1) Always seed users
+    seedUsers();
 
-    // 1) history (leverantörer)
+    // 2) Attempt restore (do NOT overwrite LS before reading)
     const hist = loadHistoryFromStorage();
-    if (hist && Array.isArray(hist) && hist.length > 0) {
-      _state.history = hist.slice(0, 500);
-      didRestore = true;
-
-      try {
-        _state.history.unshift({
-          id: uid("h"),
-          at: nowIso(),
-          type: "info",
-          msg: "History återläst från localStorage (DEMO).",
-          meta: { key: STORAGE_KEY_HISTORY }
-        });
-        if (_state.history.length > 500) _state.history.length = 500;
-        persistHistoryToStorage();
-      } catch {}
-    }
-
-    // 2) items (produkter)
     const items = loadItemsFromStorage();
-    if (items && Array.isArray(items) && items.length > 0) {
-      // Fail-closed: om supplierId pekar på okänd leverantör -> blankas
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i];
+
+    const hasHist = Array.isArray(hist) && hist.length > 0;
+    const hasItems = Array.isArray(items) && items.length > 0;
+
+    _state.history = hasHist ? hist.slice(0, 500) : [];
+    _state.items = hasItems ? items.slice(0, 2000) : [];
+
+    // Fail-closed: om item.supplierId pekar på okänd leverantör -> blankas
+    if (_state.items.length > 0) {
+      for (let i = 0; i < _state.items.length; i++) {
+        const it = _state.items[i];
         if (!it) continue;
         const sid = normStr(it.supplierId);
-        if (sid && !findSupplierById(sid)) {
-          it.supplierId = "";
-        }
+        if (sid && !findSupplierById(sid)) it.supplierId = "";
       }
-      _state.items = items.slice(0, 2000);
-      didRestore = true;
-
-      // Persist:a sanerad version
-      persistItemsToStorage();
     }
 
-    return didRestore;
+    // 3) Markera restore/baseline i history (och persist)
+    if (hasHist || hasItems) {
+      _state.history.unshift({
+        id: uid("h"),
+        at: nowIso(),
+        type: "info",
+        msg: "DEMO återläst från localStorage.",
+        meta: { historyKey: STORAGE_KEY_HISTORY, itemsKey: STORAGE_KEY_ITEMS }
+      });
+      if (_state.history.length > 500) _state.history.length = 500;
+
+      // Persist sanerad version
+      persistHistoryToStorage();
+      persistItemsToStorage();
+      return true;
+    }
+
+    // 4) Empty baseline (första gången)
+    _state.history = [];
+    _state.items = [];
+
+    _state.history.unshift({
+      id: uid("h"),
+      at: nowIso(),
+      type: "info",
+      msg: "Demo initierad (localStorage-first).",
+      meta: { role: _state.role }
+    });
+    if (_state.history.length > 500) _state.history.length = 500;
+
+    persistHistoryToStorage();
+    persistItemsToStorage();
+    return false;
   }
 
   // ------------------------------------------------------------
@@ -464,9 +578,7 @@ POLICY (LÅST):
         _state.readOnly = ro.readOnly;
         _state.whyReadOnly = ro.why;
 
-        // Demo-baseline, sedan återläs history/items om de finns
-        seedDemo();
-        const restored = hydrateFromStorageIfAny();
+        const restored = initDemoStateFromStorageOrEmpty();
 
         clearLocked();
         notify();
@@ -526,7 +638,23 @@ POLICY (LÅST):
       removeLS(STORAGE_KEY_HISTORY);
       removeLS(STORAGE_KEY_ITEMS);
 
-      seedDemo();
+      // Nollställ state (men håll roll)
+      seedUsers();
+      _state.items = [];
+      _state.history = [];
+
+      _state.history.unshift({
+        id: uid("h"),
+        at: nowIso(),
+        type: "info",
+        msg: "Demo återställd (localStorage rensad).",
+        meta: { role: _state.role }
+      });
+      if (_state.history.length > 500) _state.history.length = 500;
+
+      persistHistoryToStorage();
+      persistItemsToStorage();
+
       notify();
       return { ok: true };
     },
@@ -691,7 +819,7 @@ POLICY (LÅST):
     },
 
     // -----------------------------
-    // Items API (produkter) — persisteras i localStorage
+    // Items API (produkter/masterdata) — persisteras i localStorage
     // -----------------------------
     listItems(opts) {
       const includeInactive = !!(opts && opts.includeInactive);
@@ -724,14 +852,16 @@ POLICY (LÅST):
       // Frivilliga fält (normalisering)
       const pricePerKg = normNumOrNull(p.pricePerKg);
       const minLevel = normNumOrNull(p.minLevel);
+      const maxLevel = normNumOrNull(p.maxLevel);
+      const targetLevel = normNumOrNull(p.targetLevel);
+      const lastPrice = normNumOrNull(p.lastPrice);
 
       // Fail-closed: om fält är ifyllt men inte nummer -> stopp
-      if (p.pricePerKg != null && p.pricePerKg !== "" && pricePerKg == null) {
-        return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
-      }
-      if (p.minLevel != null && p.minLevel !== "" && minLevel == null) {
-        return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
-      }
+      if (p.pricePerKg != null && p.pricePerKg !== "" && pricePerKg == null) return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
+      if (p.minLevel != null && p.minLevel !== "" && minLevel == null) return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
+      if (p.maxLevel != null && p.maxLevel !== "" && maxLevel == null) return { ok: false, reason: "Max-nivå (maxLevel) måste vara ett nummer." };
+      if (p.targetLevel != null && p.targetLevel !== "" && targetLevel == null) return { ok: false, reason: "Mål-nivå (targetLevel) måste vara ett nummer." };
+      if (p.lastPrice != null && p.lastPrice !== "" && lastPrice == null) return { ok: false, reason: "Senaste pris (lastPrice) måste vara ett nummer." };
 
       const it = {
         articleNo,
@@ -749,6 +879,14 @@ POLICY (LÅST):
         pricePerKg: pricePerKg,
         minLevel: minLevel,
         requiresExpiry: !!p.requiresExpiry,
+
+        // Extra frivilliga fält (styrning/ekonomi/spårbarhet)
+        maxLevel: maxLevel,
+        targetLevel: targetLevel,
+        lastPrice: lastPrice,
+        lastPriceAt: String(p.lastPriceAt || "").trim(),
+        lastSupplierRef: String(p.lastSupplierRef || "").trim(),
+        lastInventoryAt: String(p.lastInventoryAt || "").trim(),
 
         isActive: ("isActive" in p) ? !!p.isActive : true
       };
@@ -800,19 +938,37 @@ POLICY (LÅST):
 
       if ("pricePerKg" in p) {
         const n = normNumOrNull(p.pricePerKg);
-        if (p.pricePerKg != null && p.pricePerKg !== "" && n == null) {
-          return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
-        }
+        if (p.pricePerKg != null && p.pricePerKg !== "" && n == null) return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
         it.pricePerKg = n;
       }
 
       if ("minLevel" in p) {
         const n = normNumOrNull(p.minLevel);
-        if (p.minLevel != null && p.minLevel !== "" && n == null) {
-          return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
-        }
+        if (p.minLevel != null && p.minLevel !== "" && n == null) return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
         it.minLevel = n;
       }
+
+      if ("maxLevel" in p) {
+        const n = normNumOrNull(p.maxLevel);
+        if (p.maxLevel != null && p.maxLevel !== "" && n == null) return { ok: false, reason: "Max-nivå (maxLevel) måste vara ett nummer." };
+        it.maxLevel = n;
+      }
+
+      if ("targetLevel" in p) {
+        const n = normNumOrNull(p.targetLevel);
+        if (p.targetLevel != null && p.targetLevel !== "" && n == null) return { ok: false, reason: "Mål-nivå (targetLevel) måste vara ett nummer." };
+        it.targetLevel = n;
+      }
+
+      if ("lastPrice" in p) {
+        const n = normNumOrNull(p.lastPrice);
+        if (p.lastPrice != null && p.lastPrice !== "" && n == null) return { ok: false, reason: "Senaste pris (lastPrice) måste vara ett nummer." };
+        it.lastPrice = n;
+      }
+
+      if ("lastPriceAt" in p) it.lastPriceAt = String(p.lastPriceAt || "").trim();
+      if ("lastSupplierRef" in p) it.lastSupplierRef = String(p.lastSupplierRef || "").trim();
+      if ("lastInventoryAt" in p) it.lastInventoryAt = String(p.lastInventoryAt || "").trim();
 
       // PERSIST items
       persistItemsToStorage();
@@ -860,6 +1016,98 @@ POLICY (LÅST):
       addHistory("item", "Item raderad.", { articleNo: id });
       notify();
       return { ok: true };
+    },
+
+    // -----------------------------
+    // Stock API (lagersaldo) — events i history (ingen ny state-nyckel, ingen ny storage-key)
+    // -----------------------------
+    listStock() {
+      // Returnerar snapshot för allt som har stock events
+      return safeClone(getStockSnapshotFromHistory());
+    },
+
+    getStock(articleNo) {
+      const id = normStr(articleNo);
+      if (!id) return null;
+      const snap = getStockSnapshotFromHistory();
+      return snap.find(x => x && normStr(x.articleNo) === id) || { articleNo: id, onHand: 0, unit: "", updatedAt: "", lastReasonCode: "" };
+    },
+
+    adjustStock(input) {
+      const st = FreezerStore.getStatus();
+      const ok = validateStockWriteCommon(st);
+      if (!ok.ok) return ok;
+
+      const p = (input && typeof input === "object") ? input : {};
+      const articleNo = normStr(p.articleNo);
+      if (!articleNo) return { ok: false, reason: "articleNo krävs." };
+
+      // Fail-closed: artikel måste finnas i produktregistret
+      const it = getItemByArticleNo(articleNo);
+      if (!it) return { ok: false, reason: "Okänt artikelnummer (skapa produkt först)." };
+
+      const delta = normIntOrNull(p.delta);
+      if (delta == null || delta === 0) return { ok: false, reason: "delta måste vara ett heltal (≠ 0)." };
+
+      const unit = normStr(p.unit) || normStr(it.unit) || "";
+      const reasonCode = normStr(p.reasonCode); // ex: INLEVERANS / UTTAG / INVENTERING / KORRIGERING
+      const note = normStr(p.note);
+      const ref = normStr(p.ref);
+
+      addHistory("stock", "Lagersaldo ändrat.", {
+        action: "adjust",
+        articleNo,
+        delta,
+        unit,
+        reasonCode,
+        note,
+        ref
+      });
+
+      notify();
+      return { ok: true };
+    },
+
+    setStock(input) {
+      const st = FreezerStore.getStatus();
+      const ok = validateStockWriteCommon(st);
+      if (!ok.ok) return ok;
+
+      const p = (input && typeof input === "object") ? input : {};
+      const articleNo = normStr(p.articleNo);
+      if (!articleNo) return { ok: false, reason: "articleNo krävs." };
+
+      const it = getItemByArticleNo(articleNo);
+      if (!it) return { ok: false, reason: "Okänt artikelnummer (skapa produkt först)." };
+
+      const qty = normIntOrNull(p.qty);
+      if (qty == null || qty < 0) return { ok: false, reason: "qty måste vara ett heltal (>= 0)." };
+
+      const unit = normStr(p.unit) || normStr(it.unit) || "";
+      const reasonCode = normStr(p.reasonCode);
+      const note = normStr(p.note);
+      const ref = normStr(p.ref);
+
+      addHistory("stock", "Lagersaldo satt.", {
+        action: "set",
+        articleNo,
+        qty,
+        unit,
+        reasonCode,
+        note,
+        ref
+      });
+
+      // (valfritt men nyttigt) uppdatera lastInventoryAt om man anger reasonCode INVENTERING
+      try {
+        if (reasonCode.toUpperCase() === "INVENTERING") {
+          it.lastInventoryAt = nowIso();
+          persistItemsToStorage();
+        }
+      } catch {}
+
+      notify();
+      return { ok: true };
     }
   };
 
@@ -874,3 +1122,24 @@ POLICY (LÅST):
   // ------------------------------------------------------------
   window.FreezerStore = FreezerStore;
 })();
+
+/* ============================================================
+ÄNDRINGSLOGG (≤8)
+1) P0: Fixade init så den inte skriver över localStorage innan restore (tidigare kunde history/items nollas).
+2) Behöll samma storage-keys: FRZ_DEMO_HISTORY_V1 + FRZ_DEMO_ITEMS_V1.
+3) Lagersaldo implementerat som history-events (type:"stock") → ingen ny state-nyckel.
+4) Nya API: listStock(), getStock(), adjustStock(), setStock().
+5) Fail-closed: stock kräver att artikel finns i items (skapa produkt först).
+6) Items utökade med frivilliga fält (max/target/lastPrice/lastInventoryAt) + sanering.
+7) Persist: history persisteras alltid via addHistory(); items persisteras vid create/update/archive/delete.
+8) ResetDemo rensar båda keys och skapar ny baseline.
+
+TESTNOTERINGAR (3–10)
+- Skapa leverantör → reload → leverantör kvar.
+- Skapa produkt (artikelnummer) → reload → produkt kvar.
+- adjustStock({articleNo, delta:+5, reasonCode:"INLEVERANS"}) → listStock() visar onHand=5.
+- adjustStock({articleNo, delta:-2, reasonCode:"UTTAG"}) → onHand=3.
+- setStock({articleNo, qty:10, reasonCode:"INVENTERING"}) → onHand=10 + item.lastInventoryAt sätts.
+- Försök adjustStock med okänt artikelNo → fail-closed fel.
+- SYSTEM_ADMIN-roll: adjustStock/setStock/createItem/createSupplier ska blockas (read-only).
+============================================================ */
