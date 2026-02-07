@@ -15,11 +15,11 @@ POLICY (LÅST):
 KRAV:
 - ModalShell laddas som vanlig <script> så window.FreezerModal finns.
 - ESM-moduler laddas som type="module" (view-interface/registry/vyer).
-- P0: buyer-controller måste INTE köra före registry -> använd defer.
+- P0: buyer-controller får INTE init före ESM registry är redo -> väntar/pollar (i freezer-buyer.js).
 
 P0-FIX (denna patch):
-- BUYER-sidan måste initiera FreezerStore (role=BUYER) efter att 03-store.js laddats,
-  annars hydreras inte items/history från localStorage och state blir tom efter reload.
+- Flyttar bort init/hydrate från HTML (fick inte köras före registry).
+- FreezerStore init/hydrate sker nu endast i freezer-buyer.js efter att registry är redo (AO-05/15).
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -100,7 +100,7 @@ P0-FIX (denna patch):
         </div>
       </section>
 
-      <!-- Debug (visas bara vid avvikelse enligt freezer-render.js) -->
+      <!-- Debug (visas bara vid avvikelse enligt freezer-buyer.js) -->
       <section id="frzDebugPanel" class="panel" hidden>
         <div class="row">
           <b>Debug</b>
@@ -150,7 +150,7 @@ P0-FIX (denna patch):
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → (INIT BUYER ROLE) → (MINI BOOTSTRAP) → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
+  Core → Contract → Store → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
   =========================================================== -->
 
   <!-- Core -->
@@ -160,75 +160,32 @@ P0-FIX (denna patch):
   <!-- Store (MÅSTE skapa window.FreezerStore) -->
   <script src="../UI/pages/freezer/03-store.js"></script>
 
-  <!-- P0: INIT STORE (BUYER) — behövs för hydrate från localStorage vid reload -->
-  <script>
-    (function () {
-      "use strict";
-
-      function byId(id) { try { return document.getElementById(id); } catch { return null; } }
-      function setTxt(id, txt) { const el = byId(id); if (el) el.textContent = String(txt || ""); }
-      function show(id, on) { const el = byId(id); if (el) el.hidden = !on; }
-
-      function lock(reason) {
-        show("frzLockPanel", true);
-        setTxt("frzLockReason", "Orsak: " + String(reason || "FRZ_E_NOT_INIT"));
-        setTxt("frzStatusText", "Låst");
-        const pill = byId("frzStatusPill");
-        try {
-          if (pill) { pill.classList.remove("ok"); pill.classList.add("danger"); }
-        } catch {}
-      }
-
-      function okStatus(text) {
-        setTxt("frzStatusText", text || "OK");
-        const pill = byId("frzStatusPill");
-        try {
-          if (pill) { pill.classList.remove("danger"); pill.classList.add("ok"); }
-        } catch {}
-      }
-
-      try {
-        var S = window.FreezerStore;
-        if (S && typeof S.init === "function") {
-          // Fail-soft: initierar store med rätt roll så items/history hydreras.
-          // Inga nya storage-keys/datamodell.
-          window.__FRZ_BUYER_INIT__ = S.init({ role: "BUYER" });
-
-          // Minimal bootstrap (fail-closed) även om freezer-render saknas:
-          if (typeof S.getStatus === "function") {
-            var st = S.getStatus();
-            if (st && st.locked) lock(st.reason || "FRZ_E_NOT_INIT");
-            else {
-              okStatus("OK");
-              setTxt("frzModeText", (st && st.readOnly) ? "READ-ONLY" : "NORMAL");
-            }
-          } else {
-            okStatus("OK");
-            setTxt("frzModeText", "—");
-          }
-        } else {
-          lock("FreezerStore saknas eller init() saknas.");
-          try { console.warn("FRZ: FreezerStore saknas eller init() saknas."); } catch {}
-        }
-      } catch (e) {
-        lock("FreezerStore.init error");
-        try { console.warn("FRZ: FreezerStore.init error", e); } catch {}
-      }
-    })();
-  </script>
-
-  <!-- Render + dash (status/mode/lock/debug) -->
+  <!-- Render + dash (valfritt men bra att ha, buyer-controller hanterar ändå status/lock/debug) -->
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
 
   <!-- Modal shell (window.FreezerModal) -->
   <script src="../UI/pages/freezer/05-modal-shell.js"></script>
 
-  <!-- ESM views + registry -->
+  <!-- ESM views + registry (MÅSTE vara type="module") -->
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
 
-  <!-- Buyer controller (P0: defer så registry hinner sättas) -->
+  <!-- Buyer controller (P0: defer + väntar/pollar på registry innan init/hydrate) -->
   <script defer src="../UI/pages/freezer/buyer/freezer-buyer.js"></script>
+
+  <!-- ==========================================================
+  ÄNDRINGSLOGG (≤8)
+  1) P0: Tog bort HTML-inline init av FreezerStore (fick inte köras före ESM registry).
+  2) Init/hydrate sker nu endast via freezer-buyer.js efter registry-ready (AO-05/15 policy).
+  =========================================================== -->
+
+  <!-- ==========================================================
+  TESTNOTERINGAR (klicktest)
+  - Öppna buyer/freezer.html → Console:
+    - window.FreezerViewRegistry?.getViewsForRole?.("buyer")  (ska ge 4)
+  - Skapa produkt → reload → produkten ska ligga kvar (hydration sker i freezer-buyer.js).
+  - Ingen extra “Lagersaldo”-knapp ska visas (men saldo visas inne i “Lägga in produkter”).
+  =========================================================== -->
 </body>
 </html>
