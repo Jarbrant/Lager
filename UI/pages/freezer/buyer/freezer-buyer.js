@@ -1,10 +1,11 @@
 /* ============================================================
+
 AO-05/15 — BUYER Controller (router + menu + mount) | FIL-ID: UI/pages/freezer/buyer/freezer-buyer.js
 Projekt: Fryslager (UI-only / localStorage-first)
 
 Syfte:
 - Gör buyer/freezer.html fungerande:
-  - Bygger router-meny (EXAKT 4 BUYER-rutor) via FreezerViewRegistry
+  - Bygger router-meny (EXAKT 5 BUYER-rutor) via FreezerViewRegistry
   - Mountar aktiv vy i #freezerViewRoot
   - Fail-closed: om registry/router/store saknas -> visa fallback + lås-panel
 
@@ -16,21 +17,25 @@ POLICY (LÅST):
 AUTOPATCH (P0):
 - Store.init ska få role="BUYER" (store normaliserar ADMIN/BUYER/PICKER/SYSTEM_ADMIN).
 - Registry kan vara case-känslig -> prova buyer/BUYER fail-soft.
+
+KRAV (uppdaterat):
+- BUYER-menyn ska visa 5 rutor:
+  Ny Leverantör / Ny produkt / Lägga in produkter / Sök Leverantör / Lagersaldo
 ============================================================ */
 
 (function () {
   "use strict";
 
   /* =========================
-  BLOCK 0 — Kontrakt: EXAKT 4 BUYER-rutor i menyn (AO-05/15)
+  BLOCK 0 — Kontrakt: EXAKT 5 BUYER-rutor i menyn (AO-05/15)
   ========================= */
 
   const BUYER_MENU_ALLOWLIST = [
     "buyer-supplier-new",     // Ny Leverantör
     "buyer-item-new",         // Ny produkt
     "buyer-stock-in",         // Lägga in produkter
-    "buyer-supplier-search"   // Sök Leverantör
-    // OBS: buyer-saldo finns i registry men ska INTE synas i buyer-menyn i AO-05/15
+    "buyer-supplier-search",  // Sök Leverantör
+    "buyer-saldo"             // Lagersaldo
   ];
 
   /* =========================
@@ -120,7 +125,6 @@ AUTOPATCH (P0):
       if (typeof store.getStatus === "function") {
         const st = store.getStatus() || {};
         if (!st.locked) {
-          // Om store redan initats tidigare i sidan (buyer/freezer.html inline-init), hoppa.
           return { ok: true, why: "already-inited" };
         }
       }
@@ -244,7 +248,7 @@ AUTOPATCH (P0):
   }
 
   /* =========================
-  BLOCK 5 — Menu render (BUYER: exakt 4)
+  BLOCK 5 — Menu render (BUYER: exakt 5)
   ========================= */
 
   function renderMenu(menuRoot, menuItems, activeId, onPick) {
@@ -442,7 +446,7 @@ AUTOPATCH (P0):
     // Views (buyer)
     const views = getBuyerViewsForRegistry(reg);
 
-    // Menyitems: EXAKT 4 enligt allowlist
+    // Menyitems: EXAKT 5 enligt allowlist
     const menuItems = buildBuyerMenuItems(reg, views);
 
     // ROUTE
@@ -459,7 +463,7 @@ AUTOPATCH (P0):
     function pick(id) {
       const nextId = safeStr(id).trim();
       if (!nextId) return;
-      if (!isAllowedBuyerMenuId(nextId)) return; // fail-closed: endast 4 vyer
+      if (!isAllowedBuyerMenuId(nextId)) return; // fail-closed: endast allowlist
       setRouteHash(nextId);
     }
 
@@ -551,22 +555,17 @@ AUTOPATCH (P0):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Role-normalisering: store.init får role=\"BUYER\" (store accepterar uppercase).
-2) Fail-soft: hämtar buyer-views via getViewsForRole(\"buyer\") ELLER \"BUYER\" (case-känslighet).
-3) Undviker dubbel-init om store redan är initad via buyer/freezer.html inline-init (getStatus().locked===false).
-4) I övrigt oförändrat: BUYER-menyn låst till exakt 4 vyer + fail-closed routing.
+1) KRAV: BUYER-menyn visar nu 5 rutor (inkl. buyer-saldo).
+2) Fail-closed routing uppdaterad: endast allowlist (5) kan väljas.
+3) I övrigt oförändrat: väntar på ESM registry innan store.init/hydrate körs.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
 - Öppna buyer/freezer.html → Console:
-  - window.FreezerStore?.getStatus?.()  (locked ska vara false)
-  - window.FreezerStore?.getState?.().items  (ska INTE vara [] om LS redan har items)
-- Reload sidan:
-  - items ska vara kvar
-- Klicka mellan 4 flikar:
-  - hash blir #view=...
-  - bara de 4 tillåtna vyerna kan väljas
-- Om 00/01-moduler saknas:
-  - efter ~4s ska fallback säga att registry inte är redo.
+  - window.FreezerViewRegistry?.getViewsForRole?.("buyer") (ska ge 5)
+- UI:
+  - Fem knappar ska synas: Ny Leverantör, Ny produkt, Lägga in produkter, Sök Leverantör, Lagersaldo
+- Klicka “Lagersaldo”:
+  - ska mounta buyer-saldo view utan fel
 ============================================================ */
