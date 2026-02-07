@@ -94,6 +94,60 @@ POLICY (LÅST):
   }
 
   /* =========================
+  BLOCK 2.1 — P0: Store init/hydrate (NO NEW STORAGE KEYS)
+  - Målet: efter reload ska getState().items INTE vara [] om LS redan har items.
+  - Fail-soft: stöd flera init-namn (init/bootstrap/start) utan att kräva viss API-form.
+  ========================= */
+
+  let __frzStoreInitAttempted = false;
+
+  function tryInitStoreOnce(registryIsReady) {
+    // Policy: initas först när registry är redo (AO-05/15).
+    if (!registryIsReady) return { ok: false, why: "registry-not-ready" };
+    if (__frzStoreInitAttempted) return { ok: true, why: "already-attempted" };
+
+    __frzStoreInitAttempted = true;
+
+    const store = getStore();
+    if (!store) return { ok: false, why: "store-missing" };
+
+    // Om store redan verkar initad, gör inget.
+    try {
+      if (typeof store.getState === "function") {
+        const s = store.getState() || {};
+        // Heuristik: om store har “hydrated” flag eller items redan finns
+        if (s && (s.hydrated === true || (Array.isArray(s.items) && s.items.length > 0))) {
+          return { ok: true, why: "already-hydrated" };
+        }
+      }
+    } catch {}
+
+    // Prova init-funktioner i prioriterad ordning
+    const initFn =
+      (typeof store.init === "function" && store.init) ||
+      (typeof store.bootstrap === "function" && store.bootstrap) ||
+      (typeof store.start === "function" && store.start) ||
+      null;
+
+    if (!initFn) return { ok: false, why: "no-init-fn" };
+
+    try {
+      // Viktigt: inga nya keys/datamodell – bara init/hydrate.
+      // Om store ignorerar argument, är det ok.
+      const res = initFn.call(store, { role: "buyer" });
+
+      // Om init returnerar objekt med ok:false, respektera fail-closed
+      if (res && typeof res === "object" && res.ok === false) {
+        return { ok: false, why: "init-returned-fail", reason: safeStr(res.reason || res.error || "") };
+      }
+
+      return { ok: true, why: "init-called" };
+    } catch (e) {
+      return { ok: false, why: "init-threw", reason: safeStr(e && e.message ? e.message : "init-fel") };
+    }
+  }
+
+  /* =========================
   BLOCK 3 — Router state (no storage)
   ========================= */
 
@@ -216,7 +270,7 @@ POLICY (LÅST):
   BLOCK 6 — UI status/lock/debug/demo reset
   ========================= */
 
-  function updateTopStatus() {
+  function updateTopStatus(extraDebugMsg) {
     const pillText = $("frzStatusText");
     const modeText = $("frzModeText");
     const lockPanel = $("frzLockPanel");
@@ -243,10 +297,12 @@ POLICY (LÅST):
     // Debug panel (visas bara vid avvikelse)
     const dbgPanel = $("frzDebugPanel");
     const dbgText = $("frzDebugText");
-    const needsDbg = (!st.ok) || (!store) || (store && typeof store.getStatus !== "function");
+    const needsDbg = (!!extraDebugMsg) || (!st.ok) || (!store) || (store && typeof store.getStatus !== "function");
     if (needsDbg) {
       setHidden(dbgPanel, false);
-      const msg = !store ? "FreezerStore saknas" : (typeof store.getStatus !== "function" ? "FreezerStore.getStatus() saknas" : "—");
+      const base = !store ? "FreezerStore saknas"
+        : (typeof store.getStatus !== "function" ? "FreezerStore.getStatus() saknas" : "—");
+      const msg = extraDebugMsg ? (base + " • " + safeStr(extraDebugMsg)) : base;
       setText(dbgText, msg);
     } else {
       setHidden(dbgPanel, true);
@@ -343,11 +399,20 @@ POLICY (LÅST):
       return false;
     }
 
+    // P0 FIX: initiera store (hydrera LS) först när registry är redo
+    const initRes = tryInitStoreOnce(true);
+    if (!initRes.ok) {
+      // fail-soft: låt sidan fortsätta om store finns, men visa debug info
+      // (vyer kan ändå visa “FreezerStore saknas” tydligt)
+      updateTopStatus("Store init: " + safeStr(initRes.why || "fail") + (initRes.reason ? " (" + initRes.reason + ")" : ""));
+    } else {
+      updateTopStatus(initRes.why ? ("Store init: " + initRes.why) : "");
+    }
+
     // klart: göm "Laddar vyer…"
     try { if (fallback) fallback.hidden = true; } catch {}
 
-    // status/lock/demo
-    updateTopStatus();
+    // demo reset wire
     wireResetDemo();
 
     // Views (buyer)
@@ -462,16 +527,17 @@ POLICY (LÅST):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) Låser BUYER-menyn till EXAKT 4 rutor via allowlist (AO-05/15).
-2) Fail-closed: blockerar hash-route till vyer utanför allowlist.
-3) Menylabels hämtas från registry (view.label) men ordningen styrs av allowlist.
+1) P0 FIX: initierar/hydrerar FreezerStore en gång (fail-soft) när registry är redo, så items/history överlever reload.
+2) Visar tydlig debugrad om init-funktion saknas eller om init returnerar fail.
+3) I övrigt oförändrat: BUYER-menyn låst till exakt 4 vyer + fail-closed routing.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Ladda buyer/freezer.html: ska först visa “Laddar vyer…” och sen 4 knappar.
-- Klicka knappar: URL hash ska ändras (#view=...) och vyn ska bytas utan refresh.
-- Försök manuellt sätta hash till #view=buyer-saldo: ska fail-closed och hoppa tillbaka till default.
-- Om du sabbar sökväg till 01-view-registry.js: efter ~4s ska tydligt fallback-fel visas (ej blank sida).
-- Tryck “Återställ demo”: ska faila tydligt om store saknas/locked/read-only.
+- Öppna buyer/freezer.html → öppna Console:
+  - kör: window.FreezerStore?.getState?.().items  (ska INTE vara [] om LS har items)
+- Reload sidan:
+  - items ska vara kvar
+  - Ny produkt med samma artikel ska fortfarande blockeras (dedupe) – men du ska kunna se den gamla produkten efter reload.
+- Incognito utan extensions: “async listener”-felet ska normalt försvinna.
 ============================================================ */
