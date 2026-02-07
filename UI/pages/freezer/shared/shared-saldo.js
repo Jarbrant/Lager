@@ -25,7 +25,7 @@ export const sharedSaldoView = defineView({
   label: "Saldo",
   requiredPerm: null, // Kopplas via router/roll senare. Wrappern är neutral.
 
-  mount(root, ctx) {
+  mount: ({ root, ctx }) => {
     try {
       if (!root || !(root instanceof HTMLElement)) return;
 
@@ -87,26 +87,25 @@ export const sharedSaldoView = defineView({
       root.appendChild(wrap);
 
       // Initial render
-      renderSaldoNow(ctx);
-      applyWriteGate(ctx);
+      renderSaldoNow({ ctx });
+      applyWriteGate({ ctx });
     } catch {
       /* fail-soft */
     }
-z
   },
 
-  render(ctx) {
+  render: ({ ctx, state }) => {
     try {
       if (!_viewState.root || !_viewState.mounted) return;
 
-      renderSaldoNow(ctx);
-      applyWriteGate(ctx);
+      renderSaldoNow({ ctx, state });
+      applyWriteGate({ ctx });
     } catch {
       /* fail-soft */
     }
   },
 
-  unmount() {
+  unmount: () => {
     _viewState.root = null;
     _viewState.mounted = false;
   }
@@ -116,25 +115,25 @@ z
 BLOCK 3 — Rendering helpers
 ========================= */
 
-function renderSaldoNow(ctx) {
-  // Robust: hämta state antingen från ctx eller direkt från FreezerStore.
-  const state =
+function renderSaldoNow({ ctx, state }) {
+  // Robust: hämta state från render-arg, ctx.state eller FreezerStore.
+  const resolvedState =
+    (state && typeof state === "object" ? state : null) ||
     (ctx && ctx.state) ||
     (window.FreezerStore && typeof window.FreezerStore.getState === "function"
       ? window.FreezerStore.getState()
       : null);
 
-  if (!state) return;
+  if (!resolvedState) return;
 
   // FreezerRender kan ha olika API beroende på var ni är i refactor.
   // Vi försöker den mest specifika först, sedan fallbacks.
   const R = window.FreezerRender;
-
   if (!R) return;
 
   // 1) Om det finns en dedikerad renderSaldo → använd den.
   if (typeof R.renderSaldo === "function") {
-    R.renderSaldo(state);
+    R.renderSaldo(resolvedState);
     return;
   }
 
@@ -159,14 +158,14 @@ function renderSaldoNow(ctx) {
       itemsMsg: "—"
     };
 
-    R.renderAll(state, itemsUIStub);
+    R.renderAll(resolvedState, itemsUIStub);
     return;
   }
 
   // 3) Sista fallback: om inget finns, gör inget (fail-soft).
 }
 
-function applyWriteGate(ctx) {
+function applyWriteGate({ ctx }) {
   // Respektera ctx.can("inventory_write") för actions/knappar (om render stödjer).
   // Eftersom render kan vara “global” och använda document.getElementById,
   // gör vi en extra spärr i vyn: disable/enable item-actions inom vyns root.
@@ -187,13 +186,9 @@ function applyWriteGate(ctx) {
   // Om render skapar inputs/selects för items-edit i denna vy, disable dem också.
   const controls = root.querySelectorAll("input, select, textarea");
   for (const el of controls) {
-    // Vi vill inte disable hela vyn generellt (t.ex. sök), men placeholder-stöd:
-    // endast items-formfält brukar ligga i saldo wrap. Vi håller det enkelt:
-    // disable om element-id börjar med "frzItem" (kontrakt i controller/render).
     const id = (el instanceof HTMLElement && el.id) ? el.id : "";
     if (id && id.startsWith("frzItem")) {
       /** @type {any} */ (el).disabled = !canWrite;
     }
   }
 }
-
