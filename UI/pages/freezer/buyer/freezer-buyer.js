@@ -4,7 +4,7 @@ Projekt: Fryslager (UI-only / localStorage-first)
 
 Syfte:
 - Gör buyer/freezer.html fungerande:
-  - Bygger router-meny (exakt 4 BUYER-rutor) från FreezerViewRegistry
+  - Bygger router-meny (EXAKT 4 BUYER-rutor) via FreezerViewRegistry
   - Mountar aktiv vy i #freezerViewRoot
   - Fail-closed: om registry/router/store saknas -> visa fallback + lås-panel
 
@@ -16,6 +16,18 @@ POLICY (LÅST):
 
 (function () {
   "use strict";
+
+  /* =========================
+  BLOCK 0 — Kontrakt: EXAKT 4 BUYER-rutor i menyn (AO-05/15)
+  ========================= */
+
+  const BUYER_MENU_ALLOWLIST = [
+    "buyer-supplier-new",     // Ny Leverantör
+    "buyer-item-new",         // Ny produkt
+    "buyer-stock-in",         // Lägga in produkter
+    "buyer-supplier-search"   // Sök Leverantör
+    // OBS: buyer-saldo finns i registry men ska INTE synas i buyer-menyn i AO-05/15
+  ];
 
   /* =========================
   BLOCK 1 — DOM helpers + safe utils
@@ -111,6 +123,12 @@ POLICY (LÅST):
     } catch {}
   }
 
+  function isAllowedBuyerMenuId(id) {
+    const vid = safeStr(id).trim();
+    if (!vid) return false;
+    return BUYER_MENU_ALLOWLIST.indexOf(vid) !== -1;
+  }
+
   /* =========================
   BLOCK 4 — View mount/unmount pipeline
   ========================= */
@@ -190,7 +208,7 @@ POLICY (LÅST):
     }
 
     if (!list.length) {
-      menuRoot.appendChild(el("div", "muted", "Inga vyer definierade för BUYER ännu."));
+      menuRoot.appendChild(el("div", "muted", "Inga BUYER-vyer definierade ännu."));
     }
   }
 
@@ -222,7 +240,7 @@ POLICY (LÅST):
       setText(lockReason, "Orsak: —");
     }
 
-    // Debug panel (visas bara vid avvikelse — vi använder det om vi har tydligt skäl)
+    // Debug panel (visas bara vid avvikelse)
     const dbgPanel = $("frzDebugPanel");
     const dbgText = $("frzDebugText");
     const needsDbg = (!st.ok) || (!store) || (store && typeof store.getStatus !== "function");
@@ -296,6 +314,22 @@ POLICY (LÅST):
     root.appendChild(box);
   }
 
+  function buildBuyerMenuItems(reg, views) {
+    // Bygg menyitems i samma ordning som allowlist, men med labels från registry (view.label)
+    const items = [];
+    for (let i = 0; i < BUYER_MENU_ALLOWLIST.length; i++) {
+      const id = BUYER_MENU_ALLOWLIST[i];
+      const v = reg.findView(views, id);
+      if (!v) continue;
+      items.push({
+        id: safeStr(v.id),
+        label: safeStr(v.label || v.id),
+        requiredPerm: (v.requiredPerm == null ? null : safeStr(v.requiredPerm))
+      });
+    }
+    return items;
+  }
+
   function initWhenReady() {
     const menuRoot = $("freezerViewMenu");
     const viewRoot = $("freezerViewRoot");
@@ -305,8 +339,7 @@ POLICY (LÅST):
 
     // P0: vänta på registry (ESM) + interface
     const reg = getRegistry();
-    if (!reg || typeof reg.getViewsForRole !== "function" || typeof reg.toMenuItems !== "function" || typeof reg.findView !== "function") {
-      // fortfarande inte redo
+    if (!reg || typeof reg.getViewsForRole !== "function" || typeof reg.findView !== "function") {
       return false;
     }
 
@@ -319,10 +352,13 @@ POLICY (LÅST):
 
     // Views (buyer)
     const views = reg.getViewsForRole("buyer") || [];
-    const menuItems = reg.toMenuItems(views) || [];
+
+    // Menyitems: EXAKT 4 enligt allowlist
+    const menuItems = buildBuyerMenuItems(reg, views);
 
     // ROUTE
     let activeId = parseRouteFromHash();
+    if (!isAllowedBuyerMenuId(activeId)) activeId = "";
     if (!activeId) activeId = getDefaultViewId(menuItems);
 
     // Validate route id exists; annars default
@@ -334,13 +370,21 @@ POLICY (LÅST):
     function pick(id) {
       const nextId = safeStr(id).trim();
       if (!nextId) return;
-
-      // update hash (driver)
+      if (!isAllowedBuyerMenuId(nextId)) return; // fail-closed: endast 4 vyer
       setRouteHash(nextId);
     }
 
     function applyRoute(nextId) {
       const vid = safeStr(nextId).trim();
+      if (!isAllowedBuyerMenuId(vid)) {
+        // fail-closed: tvinga default
+        const def = getDefaultViewId(menuItems);
+        if (def && def !== vid) {
+          setRouteHash(def);
+          return;
+        }
+      }
+
       const view = reg.findView(views, vid);
       if (!view) {
         showFailClosed(viewRoot, "Okänd vy: " + vid);
@@ -368,8 +412,9 @@ POLICY (LÅST):
     // hash change => route
     window.addEventListener("hashchange", () => {
       try {
-        const id = parseRouteFromHash() || getDefaultViewId(menuItems);
-        applyRoute(id);
+        const id = parseRouteFromHash();
+        const useId = isAllowedBuyerMenuId(id) ? id : getDefaultViewId(menuItems);
+        applyRoute(useId);
       } catch {}
     });
 
@@ -400,7 +445,12 @@ POLICY (LÅST):
 
       if (tries >= maxTries) {
         try { window.clearInterval(t); } catch {}
-        if (viewRoot) showFailClosed(viewRoot, "View registry är inte redo. Kontrollera att 00-view-interface.js och 01-view-registry.js laddas som type=\"module\" före buyer-controller.");
+        if (viewRoot) {
+          showFailClosed(
+            viewRoot,
+            "View registry är inte redo. Kontrollera att 00-view-interface.js och 01-view-registry.js laddas som type=\"module\" före buyer-controller."
+          );
+        }
       }
     }, 50);
   }
@@ -412,16 +462,16 @@ POLICY (LÅST):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) Ny buyer-controller som väntar på ESM registry (P0) och startar först när APIs finns.
-2) Router via hash (#view=...) utan storage.
-3) Renderar meny (4 BUYER items) + mount/unmount pipeline för vyer.
-4) Fail-closed fallback i #freezerViewRoot om registry inte blir redo.
+1) Låser BUYER-menyn till EXAKT 4 rutor via allowlist (AO-05/15).
+2) Fail-closed: blockerar hash-route till vyer utanför allowlist.
+3) Menylabels hämtas från registry (view.label) men ordningen styrs av allowlist.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
 - Ladda buyer/freezer.html: ska först visa “Laddar vyer…” och sen 4 knappar.
 - Klicka knappar: URL hash ska ändras (#view=...) och vyn ska bytas utan refresh.
+- Försök manuellt sätta hash till #view=buyer-saldo: ska fail-closed och hoppa tillbaka till default.
 - Om du sabbar sökväg till 01-view-registry.js: efter ~4s ska tydligt fallback-fel visas (ej blank sida).
 - Tryck “Återställ demo”: ska faila tydligt om store saknas/locked/read-only.
 ============================================================ */
