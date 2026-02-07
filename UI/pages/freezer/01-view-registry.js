@@ -5,11 +5,12 @@ Projekt: Fryslager (UI-only / localStorage-first)
 Syfte:
 - Central export av vy-listor per roll (shared/admin/buyer/picker).
 - P0 FIX: inga externa view-imports som kan ge 404 och krascha ESM-modulen.
-- BUYER: exakt 4 rutor (enligt AO-05/15 buyer/freezer.html):
-  - Ny Leverantör (modal)
-  - Ny produkt (modal FORM -> FreezerStore.createItem)
-  - Lägga in produkter (placeholder)
-  - Sök Leverantör (inline: lista + sök)
+
+BUYER (EXAKT 4 rutor i meny, enligt shell/krav):
+  1) Ny Leverantör (modal/inline)
+  2) Ny produkt (modal/inline)
+  3) Lägga in produkter (INLEVERANS via store.adjustStock + produktlista + saldo)
+  4) Sök Leverantör (inline)
 
 POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell i UI
@@ -178,6 +179,20 @@ function pill(msg, kind) {
   return p;
 }
 
+function formatDateTime(ts) {
+  try {
+    if (!ts) return "";
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString("sv-SE", {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit"
+    });
+  } catch {
+    return "";
+  }
+}
+
 /* =========================
 BLOCK 1.1 — Modal helper (fail-soft)
 ========================= */
@@ -325,6 +340,325 @@ const sharedHistoryView = defineView({
   },
   render: () => {},
   unmount: () => {}
+});
+
+/* =========================
+BLOCK 2.0 — BUYER: Lagersaldo (INLINE)
+(behålls som intern vy/byggkloss — INTE i buyer-menyn)
+========================= */
+
+function extractStockRowsFromStoreOrState(store, state) {
+  const rows = [];
+
+  function pushRow(r) {
+    if (!r) return;
+    const articleNo = safeStr(r.articleNo || r.sku || r.itemId).trim();
+    if (!articleNo) return;
+    rows.push({
+      articleNo,
+      productName: safeStr(r.productName || r.name || r.title).trim(),
+      supplierName: safeStr(r.supplierName || r.supplier || r.companyName).trim(),
+      onHand: r.onHand,
+      unit: safeStr(r.unit || r.uom).trim(),
+      updatedAt: r.updatedAt || r.ts || r.timestamp || ""
+    });
+  }
+
+  // 1) listStock()
+  try {
+    if (store && typeof store.listStock === "function") {
+      const list = store.listStock({}) || store.listStock() || [];
+      if (Array.isArray(list)) {
+        for (const it of list) pushRow(it);
+        if (rows.length) return rows;
+      }
+    }
+  } catch {}
+
+  // 2) getStock()
+  try {
+    if (store && typeof store.getStock === "function") {
+      const list = store.getStock({}) || store.getStock() || [];
+      if (Array.isArray(list)) {
+        for (const it of list) pushRow(it);
+        if (rows.length) return rows;
+      }
+    }
+  } catch {}
+
+  // 3) state heuristics
+  const s = state && typeof state === "object" ? state : {};
+
+  const candidates = [
+    s.stock,
+    s.saldo,
+    s.inventory,
+    s.stockRows,
+    s.saldoRows,
+    s.stockSnapshot,
+    (s.stock && s.stock.rows) ? s.stock.rows : null,
+    (s.saldo && s.saldo.rows) ? s.saldo.rows : null
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (!c) continue;
+    if (Array.isArray(c)) {
+      for (const it of c) pushRow(it);
+      if (rows.length) return rows;
+    }
+  }
+
+  return rows;
+}
+
+function buildItemIndex(store) {
+  const map = new Map();
+  try {
+    if (!store || typeof store.listItems !== "function") return map;
+    const list = store.listItems({ includeInactive: true }) || store.listItems() || [];
+    if (!Array.isArray(list)) return map;
+
+    for (const it of list) {
+      if (!it) continue;
+      const a = safeStr(it.articleNo || it.sku || it.itemId).trim();
+      if (!a) continue;
+      map.set(a, {
+        productName: safeStr(it.productName || it.name || it.title).trim(),
+        unit: safeStr(it.unit || it.uom).trim(),
+        supplierId: safeStr(it.supplierId || it.supplier || it.supplier_id).trim()
+      });
+    }
+  } catch {}
+  return map;
+}
+
+function buildSupplierIndex(store) {
+  const map = new Map();
+  try {
+    if (!store || typeof store.listSuppliers !== "function") return map;
+    const list = store.listSuppliers({ includeInactive: true }) || store.listSuppliers() || [];
+    if (!Array.isArray(list)) return map;
+
+    for (const s of list) {
+      if (!s) continue;
+      const id = safeStr(s.id).trim();
+      if (!id) continue;
+      map.set(id, safeStr(s.companyName || s.name).trim());
+    }
+  } catch {}
+  return map;
+}
+
+const buyerSaldo = defineView({
+  id: "buyer-saldo",
+  label: "Lagersaldo",
+  requiredPerm: null,
+
+  mount: ({ root }) => {
+    clear(root);
+
+    const wrap = el("div", "panel", null);
+    wrap.style.background = "#fff";
+    wrap.style.border = "1px solid #e6e6e6";
+    wrap.style.borderRadius = "12px";
+    wrap.style.padding = "12px";
+
+    const head = el("div", null, null);
+    head.style.display = "flex";
+    head.style.alignItems = "center";
+    head.style.gap = "10px";
+    head.style.marginBottom = "10px";
+
+    const h = el("h3", null, "Lagersaldo");
+    h.style.margin = "0";
+    h.style.flex = "1";
+
+    const countPill = el("div", null, null);
+    countPill.style.display = "inline-flex";
+    countPill.style.gap = "8px";
+    countPill.style.alignItems = "center";
+    countPill.style.padding = "6px 10px";
+    countPill.style.borderRadius = "999px";
+    countPill.style.border = "1px solid #e6e6e6";
+    countPill.style.background = "#fafafa";
+    countPill.style.fontSize = "13px";
+
+    const countLabel = el("span", null, "Artiklar:");
+    countLabel.style.opacity = "0.75";
+    const countVal = el("b", null, "0");
+    countVal.style.fontWeight = "700";
+
+    countPill.appendChild(countLabel);
+    countPill.appendChild(countVal);
+
+    head.appendChild(h);
+    head.appendChild(countPill);
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.placeholder = "Sök artikelnummer, produkt eller leverantör…";
+    search.style.width = "100%";
+    search.style.border = "1px solid #e6e6e6";
+    search.style.borderRadius = "10px";
+    search.style.padding = "10px";
+    search.autocomplete = "off";
+
+    const msgBox = el("div", null, null);
+    msgBox.style.marginTop = "10px";
+
+    const tableWrap = el("div", null, null);
+    tableWrap.style.marginTop = "10px";
+    tableWrap.style.border = "1px solid #e6e6e6";
+    tableWrap.style.borderRadius = "12px";
+    tableWrap.style.overflow = "hidden";
+
+    const table = document.createElement("table");
+    table.style.width = "100%";
+    table.style.borderCollapse = "collapse";
+    table.style.fontSize = "14px";
+
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+    const cols = ["Artikel", "Produkt", "Leverantör", "Saldo", "Enhet", "Uppdaterad"];
+    for (const c of cols) {
+      const th = document.createElement("th");
+      th.textContent = c;
+      th.style.textAlign = "left";
+      th.style.padding = "10px";
+      th.style.borderBottom = "1px solid #eee";
+      th.style.background = "#fafafa";
+      th.style.fontWeight = "700";
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+
+    const tbody = document.createElement("tbody");
+
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+
+    wrap.appendChild(head);
+    wrap.appendChild(search);
+    wrap.appendChild(msgBox);
+    wrap.appendChild(tableWrap);
+
+    root.appendChild(wrap);
+
+    try {
+      root.__buyerSaldo = { search, tbody, countVal, msgBox };
+    } catch {}
+
+    search.addEventListener("input", () => {
+      try {
+        if (root.__buyerSaldoLast) {
+          buyerSaldo.render({ root, state: root.__buyerSaldoLast.state || {}, ctx: root.__buyerSaldoLast.ctx || {} });
+        }
+      } catch {}
+    });
+  },
+
+  render: ({ root, state, ctx }) => {
+    const ui = root && root.__buyerSaldo ? root.__buyerSaldo : null;
+    if (!ui) return;
+
+    try { root.__buyerSaldoLast = { state: state || {}, ctx: ctx || {} }; } catch {}
+
+    const store = (ctx && ctx.store) ? ctx.store : (window.FreezerStore || null);
+
+    try { clear(ui.msgBox); } catch {}
+    try { while (ui.tbody.firstChild) ui.tbody.removeChild(ui.tbody.firstChild); } catch {}
+
+    if (!store) {
+      try { ui.msgBox.appendChild(pill("FreezerStore saknas. Kan inte läsa saldo.", "err")); } catch {}
+      try { ui.countVal.textContent = "0"; } catch {}
+      return;
+    }
+
+    const rawRows = extractStockRowsFromStoreOrState(store, state || {});
+    const itemIdx = buildItemIndex(store);
+    const supIdx = buildSupplierIndex(store);
+
+    const rows = rawRows.map(r => {
+      const a = safeStr(r.articleNo).trim();
+      const it = itemIdx.get(a) || {};
+      const supplierName =
+        safeStr(r.supplierName).trim() ||
+        (it.supplierId ? (supIdx.get(it.supplierId) || "") : "");
+      const productName =
+        safeStr(r.productName).trim() ||
+        safeStr(it.productName).trim();
+
+      const unit =
+        safeStr(r.unit).trim() ||
+        safeStr(it.unit).trim();
+
+      let onHand = r.onHand;
+      if (onHand == null || onHand === "") onHand = r.qty;
+      const onHandText = (onHand == null || onHand === "") ? "—" : safeStr(onHand);
+
+      return {
+        articleNo: a,
+        productName: productName || "—",
+        supplierName: supplierName || "—",
+        onHandText,
+        unit: unit || "—",
+        updatedAt: formatDateTime(r.updatedAt) || ""
+      };
+    });
+
+    const q = safeStr(ui.search.value).trim().toLowerCase();
+    const filtered = !q ? rows : rows.filter(r => (
+      safeStr(r.articleNo).toLowerCase().includes(q) ||
+      safeStr(r.productName).toLowerCase().includes(q) ||
+      safeStr(r.supplierName).toLowerCase().includes(q)
+    ));
+
+    filtered.sort((a, b) => safeStr(a.articleNo).localeCompare(safeStr(b.articleNo), "sv-SE"));
+
+    try { ui.countVal.textContent = String(filtered.length); } catch {}
+
+    if (!rawRows.length) {
+      try {
+        ui.msgBox.appendChild(
+          pill("Inget saldo hittades än. (Saldo skapas när du gör en in-/ut-leverans i 'Lägga in produkter'.)", "warn")
+        );
+      } catch {}
+    }
+
+    if (!filtered.length) {
+      try { ui.msgBox.appendChild(pill("Inga matchningar.", "warn")); } catch {}
+      return;
+    }
+
+    for (const r of filtered) {
+      const tr = document.createElement("tr");
+
+      function td(text) {
+        const cell = document.createElement("td");
+        cell.textContent = safeStr(text);
+        cell.style.padding = "10px";
+        cell.style.borderBottom = "1px solid #f2f2f2";
+        cell.style.verticalAlign = "top";
+        return cell;
+      }
+
+      tr.appendChild(td(r.articleNo));
+      tr.appendChild(td(r.productName));
+      tr.appendChild(td(r.supplierName));
+      tr.appendChild(td(r.onHandText));
+      tr.appendChild(td(r.unit));
+      tr.appendChild(td(r.updatedAt || "—"));
+
+      ui.tbody.appendChild(tr);
+    }
+  },
+
+  unmount: ({ root }) => {
+    try { delete root.__buyerSaldo; } catch {}
+    try { delete root.__buyerSaldoLast; } catch {}
+  }
 });
 
 /* =========================
@@ -528,10 +862,7 @@ const buyerItemNew = defineModalOrInlineView({
   id: "buyer-item-new",
   label: "Ny produkt",
   title: "Ny produkt",
-
-  // P0 (AO-05): buyer-sidan ska visa 4 rutor utan att RBAC döljer dem.
-  // Behörigheter kan kopplas in senare i en separat AO.
-  requiredPerm: null,
+  requiredPerm: "inventory_write",
 
   renderBody: (root, args) => {
     const ctx = (args && args.ctx) ? args.ctx : {};
@@ -590,7 +921,6 @@ const buyerItemNew = defineModalOrInlineView({
     const rPack = inputRow("Förpackningsstorlek (valfritt)", "Ex: 2x2,5 kg eller 10 kg", "text");
     const rPrice = inputRow("kg/pris (valfritt)", "Ex: 79.90", "number");
 
-    // --- Övrigt (frivilligt)
     const hr = el("div", null, null);
     hr.style.height = "1px";
     hr.style.background = "#eee";
@@ -605,7 +935,6 @@ const buyerItemNew = defineModalOrInlineView({
     const rNotes = textareaRow("Notering (valfritt)", "Ex: Intern info, hantering, leveransdag…");
     const rExpiry = checkboxRow("Kräver bäst-före / batch (valfritt)");
 
-    // Defaults (frivilliga)
     try { rUnit.input.value = "kg"; } catch {}
     try { rTemp.input.value = "FRYS"; } catch {}
 
@@ -670,7 +999,6 @@ const buyerItemNew = defineModalOrInlineView({
       } catch {}
     });
 
-    // Hälsa (fail-soft)
     if (!store || typeof store.createItem !== "function") {
       msgBox.appendChild(pill("FreezerStore saknas eller stöd för createItem() finns inte. Kontrollera att 03-store.js laddas före registry/controller.", "err"));
     } else {
@@ -701,17 +1029,14 @@ const buyerItemNew = defineModalOrInlineView({
 
       try {
         const payload = {
-          // UI-ordning enligt krav (payload skickas samlat)
           supplierId: safeStr(rSupplier.select.value).trim(),
           category: safeStr(rCategory.input.value).trim(),
           productName: safeStr(rProductName.input.value).trim(),
           packSize: safeStr(rPack.input.value).trim(),
           pricePerKg: safeStr(rPrice.input.value).trim(),
 
-          // P0
           articleNo,
 
-          // Övrigt (frivilligt)
           unit: safeStr(rUnit.input.value).trim(),
           tempClass: safeStr(rTemp.input.value).trim(),
           minLevel: safeStr(rMin.input.value).trim(),
@@ -729,9 +1054,8 @@ const buyerItemNew = defineModalOrInlineView({
           return;
         }
 
-        msgBox.appendChild(pill("Produkt sparad.", "ok"));
+        msgBox.appendChild(pill("Produkt sparad. Tips: gå till 'Lägga in produkter' för att göra första inleverans och se saldo.", "ok"));
 
-        // Rensa (behåll defaults)
         try {
           rArticle.input.value = "";
           rSupplier.select.value = "";
@@ -754,11 +1078,9 @@ const buyerItemNew = defineModalOrInlineView({
       }
     });
 
-    // Bygg form
     root.appendChild(head);
     root.appendChild(note);
 
-    // KRAV: ordning
     form.appendChild(rSupplier.wrap);
     form.appendChild(rCategory.wrap);
     form.appendChild(rProductName.wrap);
@@ -784,17 +1106,407 @@ const buyerItemNew = defineModalOrInlineView({
 });
 
 /* =========================
-BLOCK 2.3 — BUYER placeholders
+BLOCK 2.3 — BUYER: Lägga in produkter (INLEVERANS)
+- Löser ditt P0: man kan nu lägga in produkter direkt efter att man skapat dem.
+- Bekräftelse: visar produktlista + saldo-tabell (buyerSaldo som intern byggkloss).
+- Skriver lager-event via store.adjustStock() (ingen ny storage-key/datamodell).
 ========================= */
 
-const buyerStockIn = defineModalOrInlineView({
+function buildBuyerItemOptions(store) {
+  const out = [];
+  try {
+    if (!store || typeof store.listItems !== "function") return out;
+    const list = store.listItems({ includeInactive: false }) || [];
+    if (!Array.isArray(list)) return out;
+
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i] || {};
+      const a = safeStr(it.articleNo).trim();
+      if (!a) continue;
+      const name = safeStr(it.productName).trim();
+      const cat = safeStr(it.category).trim();
+      const unit = safeStr(it.unit).trim();
+      const label = `${a}${name ? " • " + name : ""}${cat ? " • " + cat : ""}${unit ? " • " + unit : ""}`;
+      out.push({ value: a, label });
+    }
+
+    out.sort((a, b) => safeStr(a.label).localeCompare(safeStr(b.label), "sv-SE"));
+  } catch {}
+  return out;
+}
+
+function safeIntOrNull(v) {
+  try {
+    if (v == null) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    const i = Math.trunc(n);
+    return i;
+  } catch {
+    return null;
+  }
+}
+
+function getUnitForArticle(store, articleNo) {
+  try {
+    if (!store || typeof store.listItems !== "function") return "";
+    const list = store.listItems({ includeInactive: true }) || [];
+    if (!Array.isArray(list)) return "";
+    const a = safeStr(articleNo).trim();
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i] || {};
+      if (safeStr(it.articleNo).trim() === a) return safeStr(it.unit).trim();
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+const buyerStockIn = defineView({
   id: "buyer-stock-in",
   label: "Lägga in produkter",
-  title: "Lägga in produkter",
-  requiredPerm: null,
-  renderBody: (root) => {
-    root.appendChild(el("h3", null, "Lägga in produkter"));
-    root.appendChild(el("div", "muted", "Placeholder: lagerinlägg / registrera inleverans byggs i kommande AO."));
+  requiredPerm: "inventory_write",
+
+  mount: ({ root, ctx }) => {
+    clear(root);
+
+    const store = (ctx && ctx.store) ? ctx.store : (window.FreezerStore || null);
+
+    const wrap = el("div", "panel", null);
+    wrap.style.background = "#fff";
+    wrap.style.border = "1px solid #e6e6e6";
+    wrap.style.borderRadius = "12px";
+    wrap.style.padding = "12px";
+
+    const h = el("h3", null, "Lägga in produkter (inleverans)");
+    h.style.margin = "0 0 10px 0";
+
+    const note = el("div", "muted",
+      "Välj produkt, ange antal (heltal) och spara. Detta skapar ett stock-event i history (event-sourcing) och syns i saldo."
+    );
+    note.style.margin = "0 0 12px 0";
+
+    const msgBox = el("div", null, null);
+    msgBox.style.marginTop = "10px";
+
+    // Produktval (byggs från items)
+    const itemOpts = buildBuyerItemOptions(store);
+    const rItem = selectRow("Produkt (artikelnummer) *", itemOpts, itemOpts.length ? "Välj produkt…" : "Inga produkter ännu (skapa först)");
+    const rQty = inputRow("Antal (heltal) *", "Ex: 10", "number");
+    const rReason = inputRow("Orsakskod", "Ex: INLEVERANS", "text");
+    const rRef = inputRow("Referens (valfritt)", "Ex: Följesedel 123", "text");
+    const rNote = textareaRow("Notering (valfritt)", "Ex: Leverans tisdag, pall 2, temp ok…");
+
+    // Defaults
+    try { rReason.input.value = "INLEVERANS"; } catch {}
+
+    const actions = el("div", null, null);
+    actions.style.display = "flex";
+    actions.style.gap = "10px";
+    actions.style.marginTop = "12px";
+    actions.style.alignItems = "center";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.textContent = "Spara inleverans";
+    saveBtn.style.border = "1px solid #e6e6e6";
+    saveBtn.style.background = "#111";
+    saveBtn.style.color = "#fff";
+    saveBtn.style.borderRadius = "10px";
+    saveBtn.style.padding = "10px 12px";
+    saveBtn.style.cursor = "pointer";
+
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.textContent = "Rensa";
+    resetBtn.style.border = "1px solid #e6e6e6";
+    resetBtn.style.background = "#fff";
+    resetBtn.style.borderRadius = "10px";
+    resetBtn.style.padding = "10px 12px";
+    resetBtn.style.cursor = "pointer";
+
+    actions.appendChild(saveBtn);
+    actions.appendChild(resetBtn);
+
+    // --- “Bekräftelse”-panel: produktlista + saldo
+    const hr = el("div", null, null);
+    hr.style.height = "1px";
+    hr.style.background = "#eee";
+    hr.style.margin = "14px 0";
+
+    const confirmHead = el("div", null, null);
+    confirmHead.style.display = "flex";
+    confirmHead.style.alignItems = "center";
+    confirmHead.style.gap = "10px";
+
+    const confirmTitle = el("b", null, "Bekräftelse (sparad produkt + saldo)");
+    const confirmMuted = el("div", "muted", "Tips: Om en ny produkt inte syns här → den sparades inte.");
+    confirmMuted.style.marginLeft = "8px";
+
+    confirmHead.appendChild(confirmTitle);
+    confirmHead.appendChild(confirmMuted);
+
+    const itemsBox = el("div", null, null);
+    itemsBox.style.marginTop = "10px";
+    itemsBox.style.border = "1px solid #eee";
+    itemsBox.style.borderRadius = "12px";
+    itemsBox.style.padding = "10px";
+    itemsBox.style.background = "#fafafa";
+
+    const saldoBox = el("div", null, null);
+    saldoBox.style.marginTop = "10px";
+
+    function renderItemsList() {
+      clear(itemsBox);
+
+      if (!store || typeof store.listItems !== "function") {
+        itemsBox.appendChild(pill("FreezerStore.listItems() saknas. Kontrollera 03-store.js.", "err"));
+        return;
+      }
+
+      let items = [];
+      try { items = store.listItems({ includeInactive: false }) || []; } catch { items = []; }
+      if (!Array.isArray(items) || !items.length) {
+        itemsBox.appendChild(pill("Inga produkter ännu. Skapa en produkt via 'Ny produkt'.", "warn"));
+        return;
+      }
+
+      // Enkel lista (artikel + namn)
+      const ul = document.createElement("ul");
+      ul.style.margin = "0 0 0 18px";
+      ul.style.padding = "0";
+
+      // sort stabilt på artikel
+      items = items.slice().sort((a, b) => safeStr(a.articleNo).localeCompare(safeStr(b.articleNo), "sv-SE"));
+
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i] || {};
+        const li = document.createElement("li");
+        const a = safeStr(it.articleNo).trim();
+        const name = safeStr(it.productName).trim();
+        li.textContent = a + (name ? " • " + name : "");
+        ul.appendChild(li);
+      }
+
+      itemsBox.appendChild(ul);
+    }
+
+    function refreshItemOptionsPreserveSelection() {
+      try {
+        if (!store || typeof store.listItems !== "function") return;
+        const current = safeStr(rItem.select.value).trim();
+        const opts = buildBuyerItemOptions(store);
+
+        // rebuild select options (fail-soft)
+        while (rItem.select.firstChild) rItem.select.removeChild(rItem.select.firstChild);
+
+        const first = document.createElement("option");
+        first.value = "";
+        first.textContent = opts.length ? "Välj produkt…" : "Inga produkter ännu (skapa först)";
+        rItem.select.appendChild(first);
+
+        for (let i = 0; i < opts.length; i++) {
+          const o = document.createElement("option");
+          o.value = safeStr(opts[i].value);
+          o.textContent = safeStr(opts[i].label);
+          rItem.select.appendChild(o);
+        }
+
+        // restore selection if still exists
+        if (current) {
+          rItem.select.value = current;
+          if (rItem.select.value !== current) rItem.select.value = "";
+        }
+      } catch {}
+    }
+
+    function setBusy(isBusy) {
+      try {
+        saveBtn.disabled = !!isBusy;
+        resetBtn.disabled = !!isBusy;
+        saveBtn.style.opacity = isBusy ? "0.6" : "1";
+      } catch {}
+    }
+
+    resetBtn.addEventListener("click", () => {
+      try {
+        rItem.select.value = "";
+        rQty.input.value = "";
+        rReason.input.value = "INLEVERANS";
+        rRef.input.value = "";
+        rNote.textarea.value = "";
+        clear(msgBox);
+        rItem.select.focus();
+      } catch {}
+    });
+
+    saveBtn.addEventListener("click", () => {
+      clear(msgBox);
+
+      if (!store) {
+        msgBox.appendChild(pill("FreezerStore saknas. Kan inte spara inleverans.", "err"));
+        return;
+      }
+      if (typeof store.adjustStock !== "function") {
+        msgBox.appendChild(pill("FreezerStore.adjustStock() saknas. (Behövs för att skapa stock-events)", "err"));
+        return;
+      }
+      if (typeof store.getStatus === "function") {
+        try {
+          const st = store.getStatus() || {};
+          if (st.locked) { msgBox.appendChild(pill("Låst läge: " + safeStr(st.reason || "FRZ_E_LOCKED"), "err")); return; }
+          if (st.readOnly) { msgBox.appendChild(pill("Read-only: " + safeStr(st.whyReadOnly || "read-only"), "warn")); return; }
+        } catch {}
+      }
+
+      const articleNo = safeStr(rItem.select.value).trim();
+      if (!articleNo) {
+        msgBox.appendChild(pill("Välj en produkt (artikelnummer).", "err"));
+        return;
+      }
+
+      const qty = safeIntOrNull(rQty.input.value);
+      if (qty == null || qty <= 0) {
+        msgBox.appendChild(pill("Antal måste vara ett heltal > 0.", "err"));
+        try { rQty.input.focus(); } catch {}
+        return;
+      }
+
+      const reasonCode = safeStr(rReason.input.value).trim() || "INLEVERANS";
+      const ref = safeStr(rRef.input.value).trim();
+      const noteText = safeStr(rNote.textarea.value).trim();
+
+      // delta = +qty (inleverans)
+      const delta = qty;
+
+      const unit = getUnitForArticle(store, articleNo);
+
+      setBusy(true);
+
+      try {
+        const res = store.adjustStock({
+          articleNo,
+          delta,
+          unit,
+          reasonCode,
+          note: noteText,
+          ref
+        });
+
+        if (!res || res.ok !== true) {
+          msgBox.appendChild(pill("Kunde inte spara inleverans: " + safeStr(res && res.reason ? res.reason : "okänt fel"), "err"));
+          setBusy(false);
+          return;
+        }
+
+        // visa “nytt saldo” om möjligt
+        let newOnHand = null;
+        try {
+          if (typeof store.getStock === "function") {
+            const s = store.getStock(articleNo);
+            if (s && typeof s === "object" && "onHand" in s) newOnHand = s.onHand;
+          }
+        } catch {}
+
+        msgBox.appendChild(pill("Inleverans sparad." + (newOnHand != null ? " Nytt saldo: " + safeStr(newOnHand) : ""), "ok"));
+
+        // refresh: items + saldo
+        try { renderItemsList(); } catch {}
+        try { refreshItemOptionsPreserveSelection(); } catch {}
+
+        // render saldo table inside saldoBox using buyerSaldo building block
+        try {
+          // mount saldo view into saldoBox once
+          if (!saldoBox.__frzSaldoMounted) {
+            buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
+            saldoBox.__frzSaldoMounted = true;
+          }
+          buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+        } catch {}
+
+        // clear qty/ref/note (behåll product + reason)
+        try {
+          rQty.input.value = "";
+          rRef.input.value = "";
+          rNote.textarea.value = "";
+          rQty.input.focus();
+        } catch {}
+
+        setBusy(false);
+      } catch (e) {
+        msgBox.appendChild(pill("Fel vid sparande: " + safeStr(e && e.message ? e.message : "okänt"), "err"));
+        setBusy(false);
+      }
+    });
+
+    // initial health hint
+    if (!store) msgBox.appendChild(pill("FreezerStore saknas. Kontrollera script-order i buyer/freezer.html.", "err"));
+    else {
+      try {
+        if (typeof store.can === "function" && store.can("inventory_write") === false) {
+          msgBox.appendChild(pill("Saknar inventory_write (behörighet).", "err"));
+        }
+      } catch {}
+    }
+
+    wrap.appendChild(h);
+    wrap.appendChild(note);
+
+    wrap.appendChild(rItem.wrap);
+    wrap.appendChild(rQty.wrap);
+    wrap.appendChild(rReason.wrap);
+    wrap.appendChild(rRef.wrap);
+    wrap.appendChild(rNote.wrap);
+
+    wrap.appendChild(actions);
+
+    wrap.appendChild(hr);
+    wrap.appendChild(confirmHead);
+    wrap.appendChild(itemsBox);
+    wrap.appendChild(saldoBox);
+
+    root.appendChild(wrap);
+
+    // initial render confirm
+    try { renderItemsList(); } catch {}
+    try { refreshItemOptionsPreserveSelection(); } catch {}
+    try {
+      // show saldo (even if empty) as confirmation
+      buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
+      saldoBox.__frzSaldoMounted = true;
+      buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+    } catch {}
+  },
+
+  render: ({ root, ctx }) => {
+    // This view is mostly self-contained; we refresh saldo on rerender
+    try {
+      const store = (ctx && ctx.store) ? ctx.store : (window.FreezerStore || null);
+      if (!store) return;
+
+      // If we mounted saldo inside, rerender it
+      const panels = root ? root.querySelectorAll("div") : null;
+      // fail-soft: find saldoBox by marker
+      // (we stored __frzSaldoMounted on saldoBox element, but we don't keep direct ref here)
+      // => do nothing; mount path already renders on save.
+    } catch {}
+  },
+
+  unmount: ({ root }) => {
+    try {
+      // unmount nested saldo if mounted
+      const nodes = root ? root.querySelectorAll("*") : [];
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
+        if (n && n.__frzSaldoMounted) {
+          try { buyerSaldo.unmount({ root: n, ctx: {}, state: {} }); } catch {}
+          try { delete n.__frzSaldoMounted; } catch {}
+        }
+      }
+    } catch {}
   }
 });
 
@@ -888,8 +1600,13 @@ BLOCK 3 — Listor per roll
 export const sharedViews = [sharedSaldoView, sharedHistoryView];
 export const adminViews = [];   // fylls senare
 
-// BUYER: exakt 4 rutor (matchar buyer/freezer.html AO-05/15)
-export const buyerViews = [buyerSupplierNew, buyerItemNew, buyerStockIn, buyerSupplierSearch];
+// BUYER: EXAKT 4 vyer i menyn (KRAV från buyer/freezer.html)
+export const buyerViews = [
+  buyerSupplierNew,
+  buyerItemNew,
+  buyerStockIn,
+  buyerSupplierSearch
+];
 
 export const pickerViews = [];  // fylls senare
 
@@ -953,23 +1670,16 @@ try {
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Buyer-rollen exporterar nu exakt 4 views (matchar AO-05/15 buyer/freezer.html).
-2) P0: buyer-item-new requiredPerm -> null så rutan inte kan döljas av RBAC innan RBAC är definierat.
-3) Uppdaterad topp-kommentar så “BUYER: 4 rutor” är källan för denna AO.
+1) P0: “Lägga in produkter” är nu en riktig inleverans-vy (buyer-stock-in) kopplad till store.adjustStock().
+2) Bekräftelse inbyggd: listar produkter (så du ser att “Ny produkt” faktiskt sparas) + visar saldo-tabell.
+3) BUYER-menyn är nu EXAKT 4 rutor enligt krav (saldo är intern byggkloss, ej menyval).
+4) Fortsatt XSS-safe (createElement/textContent), inga nya storage-keys/datamodell.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Öppna buyer/freezer.html: ska visa exakt 4 knappar i menyn.
-- Klicka “Ny Leverantör”: modal om FreezerModal finns, annars inline-form; Spara ska ge OK om store.createSupplier finns.
-- Klicka “Ny produkt”: samma; Artikelnummer krävs; Spara ska ge OK om store.createItem finns.
-- Klicka “Lägga in produkter”: placeholder ska visas (modal/inline).
-- Klicka “Sök Leverantör”: lista ska renderas och filtrera på input.
-- Om 03-store.js saknas: varje vy ska visa tydligt fel (pill) men sidan får inte krascha.
-============================================================ */
-
-/* ============================================================
-RISK/EDGE CASES (kort)
-- Om buyer-controller filtrerar views på requiredPerm: nu är requiredPerm null => alltid synlig (avsikt i denna AO).
-- Om FreezerModal API inte heter open/show/close: vyerna faller tillbaka inline (avsikt).
+- Skapa produkt (Ny produkt) med articleNo → gå till “Lägga in produkter” → produkten ska synas i listan + dropdown.
+- Välj produkt → antal 10 → Spara inleverans → ska visa “Inleverans sparad” och saldo ska uppdateras.
+- Reload sidan → produkten kvar (items LS) och saldo kvar (history LS).
+- Testa saknad store: om 03-store.js inte laddas → vy visar tydligt fel.
 ============================================================ */
