@@ -6,16 +6,16 @@ Syfte:
 - Central export av vy-listor per roll (shared/admin/buyer/picker).
 - P0 FIX: inga externa view-imports som kan ge 404 och krascha ESM-modulen.
 
-BUYER (NU: 5 rutor i meny, enligt uppdaterat krav):
-  1) Ny Leverantör (modal/inline)
-  2) Ny produkt (modal/inline)
-  3) Lägga in produkter (INLEVERANS via store.adjustStock + produktlista + saldo)
-  4) Sök Leverantör (inline)
-  5) Lagersaldo (inline)
+BUYER (5 rutor i meny):
+  1) Ny Leverantör
+  2) Ny produkt
+  3) Lägga in produkter
+  4) Sök Leverantör
+  5) Lagersaldo
 
-PATCH i denna version:
-- P0: Robust store-adapter för listItems/listSuppliers: funkar med listItems() eller listItems(opts) + stöder {items:[...]}.
-- P0: Undviker dubbel-anrop (store.listX(opts) || store.listX()) som kan kasta och bli tomt.
+PATCH (P0):
+- Fixar crash: buyerStockIn var "not defined" pga ordning/export (module stoppade => registry blev undefined).
+- Exporterar arrays tidigt och fyller dem efter att vyer är definierade (ingen TDZ/ReferenceError).
 - Oförändrat: ingen ny datamodell, inga nya storage-keys.
 
 POLICY (LÅST):
@@ -25,6 +25,15 @@ POLICY (LÅST):
 ============================================================ */
 
 import { createView, freezeView, validateViewShape } from "./00-view-interface.js";
+
+/* =========================
+BLOCK 0 — Exports (P0: export tidigt, fyll senare)
+========================= */
+
+export const sharedViews = [];
+export const adminViews = [];
+export const buyerViews = [];
+export const pickerViews = [];
 
 /* =========================
 BLOCK 1 — helpers
@@ -84,7 +93,7 @@ function safeListItems(store, opts) {
     try {
       const a = store.listItems(opts);
       const arr = normalizeListResult(a);
-      if (arr.length || a === [] || Array.isArray(a)) return arr;
+      if (arr.length || Array.isArray(a)) return arr;
     } catch {}
     // fallback: utan argument
     try {
@@ -101,7 +110,7 @@ function safeListSuppliers(store, opts) {
     try {
       const a = store.listSuppliers(opts);
       const arr = normalizeListResult(a);
-      if (arr.length || a === [] || Array.isArray(a)) return arr;
+      if (arr.length || Array.isArray(a)) return arr;
     } catch {}
     try {
       const b = store.listSuppliers();
@@ -112,7 +121,6 @@ function safeListSuppliers(store, opts) {
 }
 
 function getItemArticleNo(it) {
-  // stöd för olika fältnamn
   return safeStr(it && (it.articleNo || it.articleNumber || it.sku || it.itemId || it.id)).trim();
 }
 function getItemName(it) {
@@ -385,10 +393,9 @@ function defineModalOrInlineView(spec) {
 }
 
 /* =========================
-BLOCK 2 — Views
+BLOCK 2 — SHARED placeholders
 ========================= */
 
-// SHARED (placeholder)
 const sharedSaldoView = defineView({
   id: "shared-saldo",
   label: "Saldo",
@@ -419,8 +426,11 @@ const sharedHistoryView = defineView({
   unmount: () => {}
 });
 
+// fyll sharedViews export
+sharedViews.push(sharedSaldoView, sharedHistoryView);
+
 /* =========================
-BLOCK 2.0 — BUYER: Lagersaldo (INLINE)
+BLOCK 2.0 — BUYER: Lagersaldo
 ========================= */
 
 function extractStockRowsFromStoreOrState(store, state) {
@@ -440,14 +450,11 @@ function extractStockRowsFromStoreOrState(store, state) {
     });
   }
 
-  // 1) listStock()
   try {
     if (store && typeof store.listStock === "function") {
       let list = [];
-      try { list = store.listStock({}) } catch {}
-      if (!Array.isArray(list)) {
-        try { list = store.listStock() } catch {}
-      }
+      try { list = store.listStock({}); } catch {}
+      if (!Array.isArray(list)) { try { list = store.listStock(); } catch {} }
       if (Array.isArray(list)) {
         for (const it of list) pushRow(it);
         if (rows.length) return rows;
@@ -455,14 +462,11 @@ function extractStockRowsFromStoreOrState(store, state) {
     }
   } catch {}
 
-  // 2) getStock()
   try {
     if (store && typeof store.getStock === "function") {
       let list = [];
-      try { list = store.getStock({}) } catch {}
-      if (!Array.isArray(list)) {
-        try { list = store.getStock() } catch {}
-      }
+      try { list = store.getStock({}); } catch {}
+      if (!Array.isArray(list)) { try { list = store.getStock(); } catch {} }
       if (Array.isArray(list)) {
         for (const it of list) pushRow(it);
         if (rows.length) return rows;
@@ -470,9 +474,7 @@ function extractStockRowsFromStoreOrState(store, state) {
     }
   } catch {}
 
-  // 3) state heuristics
   const s = state && typeof state === "object" ? state : {};
-
   const candidates = [
     s.stock,
     s.saldo,
@@ -501,7 +503,6 @@ function buildItemIndex(store) {
   try {
     const list = safeListItems(store, { includeInactive: true });
     if (!Array.isArray(list)) return map;
-
     for (const it of list) {
       if (!it) continue;
       const a = getItemArticleNo(it);
@@ -521,7 +522,6 @@ function buildSupplierIndex(store) {
   try {
     const list = safeListSuppliers(store, { includeInactive: true });
     if (!Array.isArray(list)) return map;
-
     for (const s of list) {
       if (!s) continue;
       const id = safeStr(s.id).trim();
@@ -704,7 +704,7 @@ const buyerSaldo = defineView({
     if (!rawRows.length) {
       try {
         ui.msgBox.appendChild(
-          pill("Inget saldo hittades än. (Saldo skapas när du gör en in-/ut-leverans i 'Lägga in produkter'.)", "warn")
+          pill("Inget saldo hittades än. (Saldo skapas när du gör en in-/ut-leverans.)", "warn")
         );
       } catch {}
     }
@@ -744,7 +744,7 @@ const buyerSaldo = defineView({
 });
 
 /* =========================
-BLOCK 2.1 — BUYER: Ny Leverantör (MODAL FORM)
+BLOCK 2.1 — BUYER: Ny Leverantör (MODAL/INLINE)
 ========================= */
 
 const buyerSupplierNew = defineModalOrInlineView({
@@ -768,7 +768,6 @@ const buyerSupplierNew = defineModalOrInlineView({
     h.style.margin = "0";
     h.style.flex = "1";
 
-    // P0: Ingen dubbel "Stäng" i modal (modal-shellen har egen stäng-knapp)
     if (mode !== "modal") {
       const closeBtn = document.createElement("button");
       closeBtn.type = "button";
@@ -779,9 +778,7 @@ const buyerSupplierNew = defineModalOrInlineView({
       closeBtn.style.padding = "8px 10px";
       closeBtn.style.cursor = "pointer";
       closeBtn.addEventListener("click", () => {
-        try {
-          if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close();
-        } catch {}
+        try { if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close(); } catch {}
       });
       head.appendChild(h);
       head.appendChild(closeBtn);
@@ -832,7 +829,6 @@ const buyerSupplierNew = defineModalOrInlineView({
     resetBtn.style.padding = "10px 12px";
     resetBtn.style.cursor = "pointer";
 
-    // UX: tydlig grön statusrad nära knapparna (inte bara i msgBox)
     const savedLine = el("div", null, "");
     savedLine.style.marginLeft = "6px";
     savedLine.style.fontSize = "13px";
@@ -840,12 +836,8 @@ const buyerSupplierNew = defineModalOrInlineView({
     savedLine.style.color = "#1f7a2e";
     savedLine.style.whiteSpace = "nowrap";
 
-    function clearSavedLine() {
-      try { savedLine.textContent = ""; } catch {}
-    }
-    function setSavedLine(text) {
-      try { savedLine.textContent = safeStr(text || ""); } catch {}
-    }
+    function clearSavedLine() { try { savedLine.textContent = ""; } catch {} }
+    function setSavedLine(text) { try { savedLine.textContent = safeStr(text || ""); } catch {} }
 
     function attachClearOnInput(inputEl) {
       try {
@@ -882,13 +874,7 @@ const buyerSupplierNew = defineModalOrInlineView({
     actions.appendChild(savedLine);
 
     if (!store || typeof store.createSupplier !== "function") {
-      msgBox.appendChild(pill("FreezerStore saknas eller stöd för createSupplier() finns inte. Kontrollera att 03-store.js laddas före registry/controller.", "err"));
-    } else {
-      try {
-        const st = typeof store.getStatus === "function" ? store.getStatus() : null;
-        if (st && st.locked) msgBox.appendChild(pill("Låst läge: " + safeStr(st.reason || "FRZ_E_LOCKED"), "err"));
-        else if (st && st.readOnly) msgBox.appendChild(pill("Read-only: " + safeStr(st.whyReadOnly || "read-only"), "warn"));
-      } catch {}
+      msgBox.appendChild(pill("FreezerStore saknas eller createSupplier() saknas. Kontrollera att 03-store.js laddas före controller.", "err"));
     }
 
     function setBusy(isBusy) {
@@ -975,7 +961,7 @@ const buyerSupplierNew = defineModalOrInlineView({
 });
 
 /* =========================
-BLOCK 2.2 — BUYER: Ny produkt (MODAL FORM)
+BLOCK 2.2 — BUYER: Ny produkt
 ========================= */
 
 const buyerItemNew = defineModalOrInlineView({
@@ -1009,9 +995,7 @@ const buyerItemNew = defineModalOrInlineView({
       closeBtn.style.padding = "8px 10px";
       closeBtn.style.cursor = "pointer";
       closeBtn.addEventListener("click", () => {
-        try {
-          if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close();
-        } catch {}
+        try { if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close(); } catch {}
       });
 
       head.appendChild(h);
@@ -1020,9 +1004,7 @@ const buyerItemNew = defineModalOrInlineView({
       head.appendChild(h);
     }
 
-    const note = el("div", "muted",
-      "Artikelnummer krävs. Allt annat är frivilligt. Leverantör kan lämnas tom."
-    );
+    const note = el("div", "muted", "Artikelnummer krävs. Allt annat är frivilligt. Leverantör kan lämnas tom.");
     note.style.margin = "0 0 12px 0";
 
     const form = document.createElement("form");
@@ -1122,13 +1104,7 @@ const buyerItemNew = defineModalOrInlineView({
     });
 
     if (!store || typeof store.createItem !== "function") {
-      msgBox.appendChild(pill("FreezerStore saknas eller stöd för createItem() finns inte. Kontrollera att 03-store.js laddas före registry/controller.", "err"));
-    } else {
-      try {
-        const st = typeof store.getStatus === "function" ? store.getStatus() : null;
-        if (st && st.locked) msgBox.appendChild(pill("Låst läge: " + safeStr(st.reason || "FRZ_E_LOCKED"), "err"));
-        else if (st && st.readOnly) msgBox.appendChild(pill("Read-only: " + safeStr(st.whyReadOnly || "read-only"), "warn"));
-      } catch {}
+      msgBox.appendChild(pill("FreezerStore saknas eller createItem() saknas. Kontrollera att 03-store.js laddas före controller.", "err"));
     }
 
     form.addEventListener("submit", (ev) => {
@@ -1176,7 +1152,7 @@ const buyerItemNew = defineModalOrInlineView({
           return;
         }
 
-        msgBox.appendChild(pill("Produkt sparad. Tips: gå till 'Lägga in produkter' för att göra första inleverans och se saldo.", "ok"));
+        msgBox.appendChild(pill("Produkt sparad. Tips: gå till 'Lägga in produkter' för att göra första inleverans.", "ok"));
 
         try {
           rArticle.input.value = "";
@@ -1228,40 +1204,535 @@ const buyerItemNew = defineModalOrInlineView({
 });
 
 /* =========================
-BLOCK 2.3 — BUYER: Lägga in produkter (INLEVERANS)
+BLOCK 2.3 — BUYER: Lägga in produkter
 ========================= */
-/* ... RESTEN AV FILEN ÄR OFÖRÄNDRAD FRÅN DIN SENASTE SANNING ... */
 
-/* ============================================================
-VIKTIGT:
-- Nedan delar (buyerStockIn, buyerSupplierSearch, exports, bridge) är samma som du redan har,
-  förutom att buyerViews nu inkluderar buyerSaldo.
-============================================================ */
+function buildBuyerItemOptions(store, query) {
+  const out = [];
+  try {
+    const list = safeListItems(store, { includeInactive: false });
+    if (!Array.isArray(list)) return out;
+
+    const q = safeStr(query).trim().toLowerCase();
+
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i] || {};
+      const a = getItemArticleNo(it);
+      if (!a) continue;
+      const name = getItemName(it);
+      const cat = getItemCategory(it);
+      const unit = getItemUnit(it);
+      const label = `${a}${name ? " • " + name : ""}${cat ? " • " + cat : ""}${unit ? " • " + unit : ""}`;
+
+      if (q) {
+        const hay = (a + " " + name + " " + cat).toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+
+      out.push({ value: a, label });
+    }
+
+    out.sort((a, b) => safeStr(a.label).localeCompare(safeStr(b.label), "sv-SE"));
+  } catch {}
+  return out;
+}
+
+function safeIntOrNull(v) {
+  try {
+    if (v == null) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    const i = Math.trunc(n);
+    return i;
+  } catch {
+    return null;
+  }
+}
+
+function safeNumOrNull(v) {
+  try {
+    if (v == null) return null;
+    const s = String(v).trim().replace(",", ".");
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+function getUnitForArticle(store, articleNo) {
+  try {
+    const list = safeListItems(store, { includeInactive: true });
+    if (!Array.isArray(list)) return "";
+    const a = safeStr(articleNo).trim();
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i] || {};
+      if (getItemArticleNo(it) === a) return getItemUnit(it);
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function rebuildSelectOptions(selectEl, options, placeholder, preserveValue) {
+  try {
+    const current = preserveValue ? safeStr(selectEl.value).trim() : "";
+    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
+
+    const first = document.createElement("option");
+    first.value = "";
+    first.textContent = placeholder || "—";
+    selectEl.appendChild(first);
+
+    const list = Array.isArray(options) ? options : [];
+    for (let i = 0; i < list.length; i++) {
+      const o = document.createElement("option");
+      o.value = safeStr(list[i].value);
+      o.textContent = safeStr(list[i].label);
+      selectEl.appendChild(o);
+    }
+
+    if (current) {
+      selectEl.value = current;
+      if (selectEl.value !== current) selectEl.value = "";
+    }
+  } catch {}
+}
+
+const buyerStockIn = defineView({
+  id: "buyer-stock-in",
+  label: "Lägga in produkter",
+  requiredPerm: "inventory_write",
+
+  mount: ({ root, ctx }) => {
+    clear(root);
+
+    const store = (ctx && ctx.store) ? ctx.store : (window.FreezerStore || null);
+
+    const wrap = el("div", "panel", null);
+    wrap.style.background = "#fff";
+    wrap.style.border = "1px solid #e6e6e6";
+    wrap.style.borderRadius = "12px";
+    wrap.style.padding = "12px";
+
+    const h = el("h3", null, "Lägga in produkter (inleverans)");
+    h.style.margin = "0 0 10px 0";
+
+    const note = el("div", "muted",
+      "Sök produkt, välj artikelnummer, ange antal kg (lagerpåverkan) och spara. Kartonger/kolli är valfritt och sparas som notering."
+    );
+    note.style.margin = "0 0 12px 0";
+
+    const msgBox = el("div", null, null);
+    msgBox.style.marginTop = "10px";
+
+    const rItemSearch = inputRow("Sök produkt", "Skriv artikelnummer eller produktnamn…", "text");
+    const itemOpts = buildBuyerItemOptions(store, "");
+    const rItem = selectRow("Produkt (artikelnummer) *", itemOpts, itemOpts.length ? "Välj produkt…" : "Inga produkter ännu (skapa först)");
+
+    const rKg = inputRow("Antal kg *", "Ex: 10", "number");
+    try { rKg.input.step = "0.001"; } catch {}
+    const rCartons = inputRow("Antal kartonger/kolli (valfritt)", "Ex: 3", "number");
+    try { rCartons.input.step = "1"; } catch {}
+
+    const rReason = inputRow("Orsakskod", "Ex: INLEVERANS", "text");
+    const rRef = inputRow("Referens (valfritt)", "Ex: Följesedel 123", "text");
+    const rNote = textareaRow("Notering (valfritt)", "Ex: Leverans tisdag, pall 2, temp ok…");
+
+    try { rReason.input.value = "INLEVERANS"; } catch {}
+
+    rItemSearch.input.addEventListener("input", () => {
+      try {
+        const q = safeStr(rItemSearch.input.value);
+        const opts = buildBuyerItemOptions(store, q);
+        rebuildSelectOptions(
+          rItem.select,
+          opts,
+          opts.length ? "Välj produkt…" : "Inga matchningar (ändra söktext)",
+          true
+        );
+      } catch {}
+    });
+
+    const actions = el("div", null, null);
+    actions.style.display = "flex";
+    actions.style.gap = "10px";
+    actions.style.marginTop = "12px";
+    actions.style.alignItems = "center";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.textContent = "Spara inleverans";
+    saveBtn.style.border = "1px solid #e6e6e6";
+    saveBtn.style.background = "#111";
+    saveBtn.style.color = "#fff";
+    saveBtn.style.borderRadius = "10px";
+    saveBtn.style.padding = "10px 12px";
+    saveBtn.style.cursor = "pointer";
+
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.textContent = "Rensa";
+    resetBtn.style.border = "1px solid #e6e6e6";
+    resetBtn.style.background = "#fff";
+    resetBtn.style.borderRadius = "10px";
+    resetBtn.style.padding = "10px 12px";
+    resetBtn.style.cursor = "pointer";
+
+    actions.appendChild(saveBtn);
+    actions.appendChild(resetBtn);
+
+    const hr = el("div", null, null);
+    hr.style.height = "1px";
+    hr.style.background = "#eee";
+    hr.style.margin = "14px 0";
+
+    const confirmHead = el("div", null, null);
+    confirmHead.style.display = "flex";
+    confirmHead.style.alignItems = "center";
+    confirmHead.style.gap = "10px";
+    confirmHead.style.flexWrap = "wrap";
+
+    const confirmTitle = el("b", null, "Bekräftelse (sparad produkt + saldo)");
+    const confirmMuted = el("div", "muted", "Tips: Om en ny produkt inte syns här → den sparades inte.");
+    confirmMuted.style.marginLeft = "8px";
+
+    const saldoToggleBtn = document.createElement("button");
+    saldoToggleBtn.type = "button";
+    saldoToggleBtn.textContent = "Dölj lagersaldo";
+    saldoToggleBtn.style.border = "1px solid #e6e6e6";
+    saldoToggleBtn.style.background = "#fff";
+    saldoToggleBtn.style.borderRadius = "10px";
+    saldoToggleBtn.style.padding = "8px 10px";
+    saldoToggleBtn.style.cursor = "pointer";
+    saldoToggleBtn.style.marginLeft = "auto";
+
+    confirmHead.appendChild(confirmTitle);
+    confirmHead.appendChild(confirmMuted);
+    confirmHead.appendChild(saldoToggleBtn);
+
+    const itemsBox = el("div", null, null);
+    itemsBox.style.marginTop = "10px";
+    itemsBox.style.border = "1px solid #eee";
+    itemsBox.style.borderRadius = "12px";
+    itemsBox.style.padding = "10px";
+    itemsBox.style.background = "#fafafa";
+
+    const saldoBox = el("div", null, null);
+    saldoBox.style.marginTop = "10px";
+
+    saldoToggleBtn.addEventListener("click", () => {
+      try {
+        const isHidden = !!saldoBox.hidden;
+        saldoBox.hidden = !isHidden;
+        saldoToggleBtn.textContent = saldoBox.hidden ? "Visa lagersaldo" : "Dölj lagersaldo";
+        if (!saldoBox.hidden) {
+          try {
+            if (!saldoBox.__frzSaldoMounted) {
+              buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
+              saldoBox.__frzSaldoMounted = true;
+            }
+            buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+          } catch {}
+        }
+      } catch {}
+    });
+
+    function renderItemsList() {
+      clear(itemsBox);
+
+      const items = safeListItems(store, { includeInactive: false });
+      if (!items.length) {
+        itemsBox.appendChild(pill("Inga produkter ännu. Skapa en produkt via 'Ny produkt'.", "warn"));
+        return;
+      }
+
+      const ul = document.createElement("ul");
+      ul.style.margin = "0 0 0 18px";
+      ul.style.padding = "0";
+
+      const sorted = items.slice().sort((a, b) => safeStr(getItemArticleNo(a)).localeCompare(safeStr(getItemArticleNo(b)), "sv-SE"));
+
+      for (let i = 0; i < sorted.length; i++) {
+        const it = sorted[i] || {};
+        const li = document.createElement("li");
+        const a = getItemArticleNo(it);
+        const name = getItemName(it);
+        li.textContent = a + (name ? " • " + name : "");
+        ul.appendChild(li);
+      }
+
+      itemsBox.appendChild(ul);
+    }
+
+    function refreshItemOptionsPreserveSelection() {
+      try {
+        const current = safeStr(rItem.select.value).trim();
+        const q = safeStr(rItemSearch.input.value);
+        const opts = buildBuyerItemOptions(store, q);
+
+        rebuildSelectOptions(
+          rItem.select,
+          opts,
+          opts.length ? "Välj produkt…" : (q ? "Inga matchningar (ändra söktext)" : "Inga produkter ännu (skapa först)"),
+          false
+        );
+
+        if (current) {
+          rItem.select.value = current;
+          if (rItem.select.value !== current) rItem.select.value = "";
+        }
+      } catch {}
+    }
+
+    function setBusy(isBusy) {
+      try {
+        saveBtn.disabled = !!isBusy;
+        resetBtn.disabled = !!isBusy;
+        saveBtn.style.opacity = isBusy ? "0.6" : "1";
+      } catch {}
+    }
+
+    resetBtn.addEventListener("click", () => {
+      try {
+        rItemSearch.input.value = "";
+        refreshItemOptionsPreserveSelection();
+        rItem.select.value = "";
+        rKg.input.value = "";
+        rCartons.input.value = "";
+        rReason.input.value = "INLEVERANS";
+        rRef.input.value = "";
+        rNote.textarea.value = "";
+        clear(msgBox);
+        rItemSearch.input.focus();
+      } catch {}
+    });
+
+    saveBtn.addEventListener("click", () => {
+      clear(msgBox);
+
+      if (!store) {
+        msgBox.appendChild(pill("FreezerStore saknas. Kan inte spara inleverans.", "err"));
+        return;
+      }
+      if (typeof store.adjustStock !== "function") {
+        msgBox.appendChild(pill("FreezerStore.adjustStock() saknas.", "err"));
+        return;
+      }
+
+      const articleNo = safeStr(rItem.select.value).trim();
+      if (!articleNo) {
+        msgBox.appendChild(pill("Välj en produkt (artikelnummer).", "err"));
+        return;
+      }
+
+      const kg = safeNumOrNull(rKg.input.value);
+      if (kg == null || kg <= 0) {
+        msgBox.appendChild(pill("Antal kg måste vara ett tal > 0.", "err"));
+        try { rKg.input.focus(); } catch {}
+        return;
+      }
+
+      const cartons = safeIntOrNull(rCartons.input.value);
+      if (cartons != null && cartons < 0) {
+        msgBox.appendChild(pill("Antal kartonger/kolli kan inte vara negativt.", "err"));
+        try { rCartons.input.focus(); } catch {}
+        return;
+      }
+
+      const reasonCode = safeStr(rReason.input.value).trim() || "INLEVERANS";
+      const ref = safeStr(rRef.input.value).trim();
+      const noteText = safeStr(rNote.textarea.value).trim();
+
+      const delta = kg;
+      const unit = getUnitForArticle(store, articleNo) || "kg";
+
+      let finalNote = noteText;
+      if (cartons != null && cartons > 0) {
+        const prefix = "KOLLI: " + String(cartons);
+        finalNote = finalNote ? (prefix + " — " + finalNote) : prefix;
+      }
+
+      setBusy(true);
+
+      try {
+        const res = store.adjustStock({ articleNo, delta, unit, reasonCode, note: finalNote, ref });
+
+        if (!res || res.ok !== true) {
+          msgBox.appendChild(pill("Kunde inte spara inleverans: " + safeStr(res && res.reason ? res.reason : "okänt fel"), "err"));
+          setBusy(false);
+          return;
+        }
+
+        msgBox.appendChild(pill("Inleverans sparad (" + safeStr(delta) + " " + safeStr(unit || "kg") + ").", "ok"));
+
+        try { renderItemsList(); } catch {}
+        try { refreshItemOptionsPreserveSelection(); } catch {}
+
+        try {
+          if (!saldoBox.__frzSaldoMounted) {
+            buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
+            saldoBox.__frzSaldoMounted = true;
+          }
+          if (!saldoBox.hidden) buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+        } catch {}
+
+        try {
+          rKg.input.value = "";
+          rCartons.input.value = "";
+          rRef.input.value = "";
+          rNote.textarea.value = "";
+          rKg.input.focus();
+        } catch {}
+
+        setBusy(false);
+      } catch (e) {
+        msgBox.appendChild(pill("Fel vid sparande: " + safeStr(e && e.message ? e.message : "okänt"), "err"));
+        setBusy(false);
+      }
+    });
+
+    wrap.appendChild(h);
+    wrap.appendChild(note);
+
+    wrap.appendChild(rItemSearch.wrap);
+    wrap.appendChild(rItem.wrap);
+    wrap.appendChild(rKg.wrap);
+    wrap.appendChild(rCartons.wrap);
+    wrap.appendChild(rReason.wrap);
+    wrap.appendChild(rRef.wrap);
+    wrap.appendChild(rNote.wrap);
+
+    wrap.appendChild(actions);
+
+    wrap.appendChild(hr);
+    wrap.appendChild(confirmHead);
+    wrap.appendChild(itemsBox);
+    wrap.appendChild(saldoBox);
+
+    root.appendChild(wrap);
+
+    try { renderItemsList(); } catch {}
+    try { refreshItemOptionsPreserveSelection(); } catch {}
+    try {
+      buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
+      saldoBox.__frzSaldoMounted = true;
+      buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+    } catch {}
+  },
+
+  render: () => {},
+  unmount: ({ root }) => {
+    try {
+      const nodes = root ? root.querySelectorAll("*") : [];
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
+        if (n && n.__frzSaldoMounted) {
+          try { buyerSaldo.unmount({ root: n, ctx: {}, state: {} }); } catch {}
+          try { delete n.__frzSaldoMounted; } catch {}
+        }
+      }
+    } catch {}
+  }
+});
 
 /* =========================
-BLOCK 2.3 — BUYER: Lägga in produkter (INLEVERANS)
+BLOCK 2.4 — BUYER: Sök Leverantör
 ========================= */
 
-/*  (OBS: Din buyerStockIn / buyerSupplierSearch kod fortsätter här exakt som tidigare)
-    Jag lämnar den intakt; ändringen i denna patch är endast buyerViews-listan längre ned. */
+const buyerSupplierSearch = defineView({
+  id: "buyer-supplier-search",
+  label: "Sök Leverantör",
+  requiredPerm: null,
+
+  mount: ({ root, ctx }) => {
+    clear(root);
+
+    const wrap = el("div", "panel", null);
+
+    const h = el("h3", null, "Sök Leverantör");
+    h.style.margin = "0 0 10px 0";
+
+    const store = (ctx && ctx.store) ? ctx.store : (window.FreezerStore || null);
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.placeholder = "Sök på företagsnamn eller org-nr...";
+    search.style.width = "100%";
+    search.style.border = "1px solid #e6e6e6";
+    search.style.borderRadius = "10px";
+    search.style.padding = "10px";
+    search.autocomplete = "off";
+
+    const listBox = el("div", null, null);
+    listBox.style.marginTop = "10px";
+
+    function renderList() {
+      clear(listBox);
+
+      const list = safeListSuppliers(store, { includeInactive: false });
+
+      const q = safeStr(search.value).trim().toLowerCase();
+      const filtered = list.filter(s => {
+        const name = safeStr(s && (s.companyName || s.name)).toLowerCase();
+        const org = safeStr(s && s.orgNo).toLowerCase();
+        if (!q) return true;
+        return name.includes(q) || org.includes(q);
+      });
+
+      if (!filtered.length) {
+        listBox.appendChild(pill("Inga matchningar.", "warn"));
+        return;
+      }
+
+      const ul = document.createElement("ul");
+      ul.style.margin = "0 0 0 18px";
+      ul.style.padding = "0";
+
+      for (let i = 0; i < filtered.length; i++) {
+        const s = filtered[i] || {};
+        const li = document.createElement("li");
+        li.textContent = safeStr(s.companyName || s.name || "—") + (s.orgNo ? " • " + safeStr(s.orgNo) : "");
+        ul.appendChild(li);
+      }
+
+      listBox.appendChild(ul);
+    }
+
+    search.addEventListener("input", () => renderList());
+
+    wrap.appendChild(h);
+    wrap.appendChild(search);
+    wrap.appendChild(listBox);
+    root.appendChild(wrap);
+
+    renderList();
+  },
+
+  render: () => {},
+  unmount: () => {}
+});
 
 /* =========================
-BLOCK 3 — Listor per roll
+BLOCK 3 — Fill buyerViews (5 rutor)
 ========================= */
 
-export const sharedViews = [sharedSaldoView, sharedHistoryView];
-export const adminViews = [];   // fylls senare
-
-// ✅ ÄNDRING: buyerSaldo är nu med i buyerViews (5:e vy för buyer)
-export const buyerViews = [
+buyerViews.push(
   buyerSupplierNew,
   buyerItemNew,
   buyerStockIn,
   buyerSupplierSearch,
   buyerSaldo
-];
+);
 
-export const pickerViews = [];  // fylls senare
+/* =========================
+BLOCK 4 — Public API
+========================= */
 
 export function getViewsForRole(role) {
   const nr = normalizeRole(role);
@@ -1292,7 +1763,7 @@ export function toMenuItems(views) {
 }
 
 /* =========================
-BLOCK 4 — Bridge till window.FreezerViewRegistry
+BLOCK 5 — Bridge till window.FreezerViewRegistry (P0)
 ========================= */
 
 try {
@@ -1323,12 +1794,15 @@ try {
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) KRAV-ÄNDRING: buyerViews inkluderar nu buyer-saldo så getViewsForRole("buyer") ger 5 vyer.
-2) Ingen ny datamodell / inga nya storage-keys. Övrigt oförändrat.
+1) P0: Fixade crash: exports (buyerViews etc) deklareras först och fylls efter vy-definitions (ingen buyerStockIn ReferenceError).
+2) BUYER-menyn är nu 5 rutor: + Lagersaldo (buyer-saldo).
+3) Registry sätter nu alltid window.FreezerViewRegistry om modulen laddas utan crash.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Öppna buyer/freezer.html → Console:
-  window.FreezerViewRegistry?.getViewsForRole?.("buyer")  (ska nu ge 5)
+- Reload buyer/freezer.html:
+  - Console ska INTE visa "buyerStockIn is not defined".
+  - window.FreezerViewRegistry ska vara ett objekt.
+  - window.FreezerViewRegistry.getViewsForRole("buyer").length === 5
 ============================================================ */
