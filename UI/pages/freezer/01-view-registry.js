@@ -13,8 +13,9 @@ BUYER (EXAKT 4 rutor i meny, enligt shell/krav):
   4) Sök Leverantör (inline)
 
 PATCH i denna version:
-- P0: Ta bort dubbel “Stäng” i modal (vyn renderar inte egen Stäng-knapp i modal-läge).
-- UX: Tydlig grön “sparad”-rad vid lyckad leverantörssparning (nära knapparna).
+- P0: Robust store-adapter för listItems/listSuppliers: funkar med listItems() eller listItems(opts) + stöder {items:[...]}.
+- P0: Undviker dubbel-anrop (store.listX(opts) || store.listX()) som kan kasta och bli tomt.
+- Oförändrat: ingen ny datamodell, inga nya storage-keys.
 
 POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell i UI
@@ -55,6 +56,72 @@ function clear(root) {
 
 function safeStr(v) {
   try { return String(v == null ? "" : v); } catch { return ""; }
+}
+
+/* =========================
+BLOCK 1.0 — Store adapters (P0)
+- listItems() eller listItems(opts)
+- listSuppliers() eller listSuppliers(opts)
+- stöd för return-shape: [] eller { items:[...] } / { suppliers:[...] } / { data:[...] }
+========================= */
+
+function normalizeListResult(x) {
+  if (Array.isArray(x)) return x;
+  if (x && typeof x === "object") {
+    if (Array.isArray(x.items)) return x.items;
+    if (Array.isArray(x.suppliers)) return x.suppliers;
+    if (Array.isArray(x.data)) return x.data;
+    if (x.result && Array.isArray(x.result.items)) return x.result.items;
+  }
+  return [];
+}
+
+function safeListItems(store, opts) {
+  try {
+    if (!store || typeof store.listItems !== "function") return [];
+    // prova opts först
+    try {
+      const a = store.listItems(opts);
+      const arr = normalizeListResult(a);
+      if (arr.length || a === [] || Array.isArray(a)) return arr;
+    } catch {}
+    // fallback: utan argument
+    try {
+      const b = store.listItems();
+      return normalizeListResult(b);
+    } catch {}
+  } catch {}
+  return [];
+}
+
+function safeListSuppliers(store, opts) {
+  try {
+    if (!store || typeof store.listSuppliers !== "function") return [];
+    try {
+      const a = store.listSuppliers(opts);
+      const arr = normalizeListResult(a);
+      if (arr.length || a === [] || Array.isArray(a)) return arr;
+    } catch {}
+    try {
+      const b = store.listSuppliers();
+      return normalizeListResult(b);
+    } catch {}
+  } catch {}
+  return [];
+}
+
+function getItemArticleNo(it) {
+  // stöd för olika fältnamn
+  return safeStr(it && (it.articleNo || it.articleNumber || it.sku || it.itemId || it.id)).trim();
+}
+function getItemName(it) {
+  return safeStr(it && (it.productName || it.name || it.title)).trim();
+}
+function getItemCategory(it) {
+  return safeStr(it && (it.category || it.cat)).trim();
+}
+function getItemUnit(it) {
+  return safeStr(it && (it.unit || it.uom)).trim();
 }
 
 function inputRow(label, placeholder, type) {
@@ -361,7 +428,7 @@ function extractStockRowsFromStoreOrState(store, state) {
 
   function pushRow(r) {
     if (!r) return;
-    const articleNo = safeStr(r.articleNo || r.sku || r.itemId).trim();
+    const articleNo = safeStr(r.articleNo || r.articleNumber || r.sku || r.itemId || r.id).trim();
     if (!articleNo) return;
     rows.push({
       articleNo,
@@ -376,7 +443,11 @@ function extractStockRowsFromStoreOrState(store, state) {
   // 1) listStock()
   try {
     if (store && typeof store.listStock === "function") {
-      const list = store.listStock({}) || store.listStock() || [];
+      let list = [];
+      try { list = store.listStock({}) } catch {}
+      if (!Array.isArray(list)) {
+        try { list = store.listStock() } catch {}
+      }
       if (Array.isArray(list)) {
         for (const it of list) pushRow(it);
         if (rows.length) return rows;
@@ -387,7 +458,11 @@ function extractStockRowsFromStoreOrState(store, state) {
   // 2) getStock()
   try {
     if (store && typeof store.getStock === "function") {
-      const list = store.getStock({}) || store.getStock() || [];
+      let list = [];
+      try { list = store.getStock({}) } catch {}
+      if (!Array.isArray(list)) {
+        try { list = store.getStock() } catch {}
+      }
       if (Array.isArray(list)) {
         for (const it of list) pushRow(it);
         if (rows.length) return rows;
@@ -424,17 +499,16 @@ function extractStockRowsFromStoreOrState(store, state) {
 function buildItemIndex(store) {
   const map = new Map();
   try {
-    if (!store || typeof store.listItems !== "function") return map;
-    const list = store.listItems({ includeInactive: true }) || store.listItems() || [];
+    const list = safeListItems(store, { includeInactive: true });
     if (!Array.isArray(list)) return map;
 
     for (const it of list) {
       if (!it) continue;
-      const a = safeStr(it.articleNo || it.sku || it.itemId).trim();
+      const a = getItemArticleNo(it);
       if (!a) continue;
       map.set(a, {
-        productName: safeStr(it.productName || it.name || it.title).trim(),
-        unit: safeStr(it.unit || it.uom).trim(),
+        productName: getItemName(it),
+        unit: getItemUnit(it),
         supplierId: safeStr(it.supplierId || it.supplier || it.supplier_id).trim()
       });
     }
@@ -445,8 +519,7 @@ function buildItemIndex(store) {
 function buildSupplierIndex(store) {
   const map = new Map();
   try {
-    if (!store || typeof store.listSuppliers !== "function") return map;
-    const list = store.listSuppliers({ includeInactive: true }) || store.listSuppliers() || [];
+    const list = safeListSuppliers(store, { includeInactive: true });
     if (!Array.isArray(list)) return map;
 
     for (const s of list) {
@@ -764,7 +837,7 @@ const buyerSupplierNew = defineModalOrInlineView({
     savedLine.style.marginLeft = "6px";
     savedLine.style.fontSize = "13px";
     savedLine.style.fontWeight = "700";
-    savedLine.style.color = "#1f7a2e";     // grön text
+    savedLine.style.color = "#1f7a2e";
     savedLine.style.whiteSpace = "nowrap";
 
     function clearSavedLine() {
@@ -864,10 +937,7 @@ const buyerSupplierNew = defineModalOrInlineView({
           return;
         }
 
-        // Tydlig grön bekräftelse nära knapparna
         setSavedLine("✓ Leverantör sparad");
-
-        // (behåll även msgBox för konsistens, men ok att du ser direkt i actions-raden)
         msgBox.appendChild(pill("Leverantör sparad.", "ok"));
 
         try {
@@ -964,13 +1034,11 @@ const buyerItemNew = defineModalOrInlineView({
     // --- Leverantörer dropdown (frivillig)
     let supplierOptions = [];
     try {
-      if (store && typeof store.listSuppliers === "function") {
-        const list = store.listSuppliers({ includeInactive: false }) || [];
-        supplierOptions = list.map(s => ({
-          value: safeStr(s && s.id),
-          label: safeStr(s && s.companyName) + (s && s.orgNo ? " • " + safeStr(s.orgNo) : "")
-        }));
-      }
+      const list = safeListSuppliers(store, { includeInactive: false });
+      supplierOptions = list.map(s => ({
+        value: safeStr(s && s.id),
+        label: safeStr(s && (s.companyName || s.name)) + (s && s.orgNo ? " • " + safeStr(s.orgNo) : "")
+      }));
     } catch { supplierOptions = []; }
 
     const rSupplier = selectRow("Leverantör (valfritt)", supplierOptions, supplierOptions.length ? "Välj leverantör…" : "Inga leverantörer ännu");
@@ -1165,28 +1233,23 @@ const buyerItemNew = defineModalOrInlineView({
 
 /* =========================
 BLOCK 2.3 — BUYER: Lägga in produkter (INLEVERANS)
-- Sökbar produktlista (artikelnummer/namn) för att slippa enorm dropdown.
-- Antal kg (lagerdelta) + antal kartonger/kolli (sparas i note, ingen datamodell).
-- Bekräftelse: produktlista + saldo-tabell (buyerSaldo som intern byggkloss).
-- Skriver lager-event via store.adjustStock() (ingen ny storage-key/datamodell).
 ========================= */
 
 function buildBuyerItemOptions(store, query) {
   const out = [];
   try {
-    if (!store || typeof store.listItems !== "function") return out;
-    const list = store.listItems({ includeInactive: false }) || [];
+    const list = safeListItems(store, { includeInactive: false });
     if (!Array.isArray(list)) return out;
 
     const q = safeStr(query).trim().toLowerCase();
 
     for (let i = 0; i < list.length; i++) {
       const it = list[i] || {};
-      const a = safeStr(it.articleNo).trim();
+      const a = getItemArticleNo(it);
       if (!a) continue;
-      const name = safeStr(it.productName).trim();
-      const cat = safeStr(it.category).trim();
-      const unit = safeStr(it.unit).trim();
+      const name = getItemName(it);
+      const cat = getItemCategory(it);
+      const unit = getItemUnit(it);
       const label = `${a}${name ? " • " + name : ""}${cat ? " • " + cat : ""}${unit ? " • " + unit : ""}`;
 
       if (q) {
@@ -1231,13 +1294,12 @@ function safeNumOrNull(v) {
 
 function getUnitForArticle(store, articleNo) {
   try {
-    if (!store || typeof store.listItems !== "function") return "";
-    const list = store.listItems({ includeInactive: true }) || [];
+    const list = safeListItems(store, { includeInactive: true });
     if (!Array.isArray(list)) return "";
     const a = safeStr(articleNo).trim();
     for (let i = 0; i < list.length; i++) {
       const it = list[i] || {};
-      if (safeStr(it.articleNo).trim() === a) return safeStr(it.unit).trim();
+      if (getItemArticleNo(it) === a) return getItemUnit(it);
     }
     return "";
   } catch {
@@ -1297,12 +1359,10 @@ const buyerStockIn = defineView({
     const msgBox = el("div", null, null);
     msgBox.style.marginTop = "10px";
 
-    // Sökbar produktväljare (ingen ny datamodell)
     const rItemSearch = inputRow("Sök produkt", "Skriv artikelnummer eller produktnamn…", "text");
     const itemOpts = buildBuyerItemOptions(store, "");
     const rItem = selectRow("Produkt (artikelnummer) *", itemOpts, itemOpts.length ? "Välj produkt…" : "Inga produkter ännu (skapa först)");
 
-    // Mängder
     const rKg = inputRow("Antal kg *", "Ex: 10", "number");
     try { rKg.input.step = "0.001"; } catch {}
     const rCartons = inputRow("Antal kartonger/kolli (valfritt)", "Ex: 3", "number");
@@ -1312,10 +1372,8 @@ const buyerStockIn = defineView({
     const rRef = inputRow("Referens (valfritt)", "Ex: Följesedel 123", "text");
     const rNote = textareaRow("Notering (valfritt)", "Ex: Leverans tisdag, pall 2, temp ok…");
 
-    // Defaults
     try { rReason.input.value = "INLEVERANS"; } catch {}
 
-    // Filter options live
     rItemSearch.input.addEventListener("input", () => {
       try {
         const q = safeStr(rItemSearch.input.value);
@@ -1357,7 +1415,6 @@ const buyerStockIn = defineView({
     actions.appendChild(saveBtn);
     actions.appendChild(resetBtn);
 
-    // --- “Bekräftelse”-panel: produktlista + saldo
     const hr = el("div", null, null);
     hr.style.height = "1px";
     hr.style.background = "#eee";
@@ -1403,7 +1460,6 @@ const buyerStockIn = defineView({
         saldoBox.hidden = !isHidden;
         saldoToggleBtn.textContent = saldoBox.hidden ? "Visa lagersaldo" : "Dölj lagersaldo";
         if (!saldoBox.hidden) {
-          // refresh saldo when showing again
           try {
             if (!saldoBox.__frzSaldoMounted) {
               buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
@@ -1418,14 +1474,8 @@ const buyerStockIn = defineView({
     function renderItemsList() {
       clear(itemsBox);
 
-      if (!store || typeof store.listItems !== "function") {
-        itemsBox.appendChild(pill("FreezerStore.listItems() saknas. Kontrollera 03-store.js.", "err"));
-        return;
-      }
-
-      let items = [];
-      try { items = store.listItems({ includeInactive: false }) || []; } catch { items = []; }
-      if (!Array.isArray(items) || !items.length) {
+      const items = safeListItems(store, { includeInactive: false });
+      if (!items.length) {
         itemsBox.appendChild(pill("Inga produkter ännu. Skapa en produkt via 'Ny produkt'.", "warn"));
         return;
       }
@@ -1434,13 +1484,13 @@ const buyerStockIn = defineView({
       ul.style.margin = "0 0 0 18px";
       ul.style.padding = "0";
 
-      items = items.slice().sort((a, b) => safeStr(a.articleNo).localeCompare(safeStr(b.articleNo), "sv-SE"));
+      const sorted = items.slice().sort((a, b) => safeStr(getItemArticleNo(a)).localeCompare(safeStr(getItemArticleNo(b)), "sv-SE"));
 
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i] || {};
+      for (let i = 0; i < sorted.length; i++) {
+        const it = sorted[i] || {};
         const li = document.createElement("li");
-        const a = safeStr(it.articleNo).trim();
-        const name = safeStr(it.productName).trim();
+        const a = getItemArticleNo(it);
+        const name = getItemName(it);
         li.textContent = a + (name ? " • " + name : "");
         ul.appendChild(li);
       }
@@ -1450,7 +1500,6 @@ const buyerStockIn = defineView({
 
     function refreshItemOptionsPreserveSelection() {
       try {
-        if (!store || typeof store.listItems !== "function") return;
         const current = safeStr(rItem.select.value).trim();
         const q = safeStr(rItemSearch.input.value);
         const opts = buildBuyerItemOptions(store, q);
@@ -1535,12 +1584,9 @@ const buyerStockIn = defineView({
       const ref = safeStr(rRef.input.value).trim();
       const noteText = safeStr(rNote.textarea.value).trim();
 
-      // delta = +kg (inleverans)
       const delta = kg;
-
       const unit = getUnitForArticle(store, articleNo) || "kg";
 
-      // POLICY: inga nya keys/datamodell → kartonger sparas som text i note
       let finalNote = noteText;
       if (cartons != null && cartons > 0) {
         const prefix = "KOLLI: " + String(cartons);
@@ -1565,7 +1611,6 @@ const buyerStockIn = defineView({
           return;
         }
 
-        // visa “nytt saldo” om möjligt
         let newOnHand = null;
         try {
           if (typeof store.getStock === "function") {
@@ -1581,11 +1626,9 @@ const buyerStockIn = defineView({
           )
         );
 
-        // refresh: items + saldo
         try { renderItemsList(); } catch {}
         try { refreshItemOptionsPreserveSelection(); } catch {}
 
-        // render saldo table inside saldoBox using buyerSaldo building block
         try {
           if (!saldoBox.__frzSaldoMounted) {
             buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
@@ -1594,7 +1637,6 @@ const buyerStockIn = defineView({
           if (!saldoBox.hidden) buyerSaldo.render({ root: saldoBox, ctx, state: {} });
         } catch {}
 
-        // clear kg/cartons/ref/note (behåll product + reason + söktext)
         try {
           rKg.input.value = "";
           rCartons.input.value = "";
@@ -1610,7 +1652,6 @@ const buyerStockIn = defineView({
       }
     });
 
-    // initial health hint
     if (!store) msgBox.appendChild(pill("FreezerStore saknas. Kontrollera script-order i buyer/freezer.html.", "err"));
     else {
       try {
@@ -1640,7 +1681,6 @@ const buyerStockIn = defineView({
 
     root.appendChild(wrap);
 
-    // initial render confirm
     try { renderItemsList(); } catch {}
     try { refreshItemOptionsPreserveSelection(); } catch {}
     try {
@@ -1699,17 +1739,11 @@ const buyerSupplierSearch = defineView({
     function renderList() {
       clear(listBox);
 
-      if (!store || typeof store.listSuppliers !== "function") {
-        listBox.appendChild(pill("FreezerStore.listSuppliers() saknas. Kontrollera 03-store.js.", "err"));
-        return;
-      }
+      const list = safeListSuppliers(store, { includeInactive: false });
 
       const q = safeStr(search.value).trim().toLowerCase();
-      let list = [];
-      try { list = store.listSuppliers({ includeInactive: false }) || []; } catch { list = []; }
-
       const filtered = list.filter(s => {
-        const name = safeStr(s && s.companyName).toLowerCase();
+        const name = safeStr(s && (s.companyName || s.name)).toLowerCase();
         const org = safeStr(s && s.orgNo).toLowerCase();
         if (!q) return true;
         return name.includes(q) || org.includes(q);
@@ -1727,7 +1761,7 @@ const buyerSupplierSearch = defineView({
       for (let i = 0; i < filtered.length; i++) {
         const s = filtered[i] || {};
         const li = document.createElement("li");
-        li.textContent = safeStr(s.companyName || "—") + (s.orgNo ? " • " + safeStr(s.orgNo) : "");
+        li.textContent = safeStr(s.companyName || s.name || "—") + (s.orgNo ? " • " + safeStr(s.orgNo) : "");
         ul.appendChild(li);
       }
 
@@ -1755,7 +1789,6 @@ BLOCK 3 — Listor per roll
 export const sharedViews = [sharedSaldoView, sharedHistoryView];
 export const adminViews = [];   // fylls senare
 
-// BUYER: EXAKT 4 vyer i menyn (KRAV från buyer/freezer.html)
 export const buyerViews = [
   buyerSupplierNew,
   buyerItemNew,
@@ -1825,16 +1858,16 @@ try {
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: defineModalOrInlineView skickar nu args.mode = "modal"/"inline" till renderBody och sparar __frzModalMode.
-2) P0: Ny Leverantör & Ny produkt visar inte egen “Stäng”-knapp när mode === "modal" → ingen dubbel “Stäng”.
-3) UX: Ny Leverantör visar tydlig grön “✓ Leverantör sparad” nära knapparna vid lyckad sparning.
-4) UX: Grön “sparad”-rad nollas vid input/rensa för att undvika falsk trygghet.
+1) P0: Added safeListItems/safeListSuppliers adapters (supports listX() or listX(opts) + {items:[...]}).
+2) P0: buildBuyerItemOptions använder safeListItems → sök/dropdown fungerar även om store inte tar options.
+3) P0: buildItemIndex/buildSupplierIndex/getUnitForArticle använder safe adapters och robusta fältnamn.
+4) P0: renderItemsList i buyerStockIn använder safeListItems och undviker dubbel-anrop.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Öppna “Ny Leverantör” i modal: ska bara finnas EN “Stäng” (modalens).
-- Spara leverantör: ska visa grön “✓ Leverantör sparad” direkt vid knapparna.
-- Börja skriva i fält efter sparning: den gröna texten ska försvinna.
-- Öppna “Ny produkt” i modal: ska bara finnas EN “Stäng” (modalens).
+- Skapa 1 produkt (Ny produkt).
+- Gå till “Lägga in produkter”: skriv artikelnummer (t.ex. 1006) i “Sök produkt” → dropdown ska visa match.
+- Skriv bokstäver i produktnamn → match ska fungera.
+- Om din store returnerar {items:[...]} ska dropdown fortfarande fungera.
 ============================================================ */
