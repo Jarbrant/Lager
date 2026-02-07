@@ -1107,17 +1107,20 @@ const buyerItemNew = defineModalOrInlineView({
 
 /* =========================
 BLOCK 2.3 — BUYER: Lägga in produkter (INLEVERANS)
-- Löser ditt P0: man kan nu lägga in produkter direkt efter att man skapat dem.
-- Bekräftelse: visar produktlista + saldo-tabell (buyerSaldo som intern byggkloss).
+- Sökbar produktlista (artikelnummer/namn) för att slippa enorm dropdown.
+- Antal kg (lagerdelta) + antal kartonger/kolli (sparas i note, ingen datamodell).
+- Bekräftelse: produktlista + saldo-tabell (buyerSaldo som intern byggkloss).
 - Skriver lager-event via store.adjustStock() (ingen ny storage-key/datamodell).
 ========================= */
 
-function buildBuyerItemOptions(store) {
+function buildBuyerItemOptions(store, query) {
   const out = [];
   try {
     if (!store || typeof store.listItems !== "function") return out;
     const list = store.listItems({ includeInactive: false }) || [];
     if (!Array.isArray(list)) return out;
+
+    const q = safeStr(query).trim().toLowerCase();
 
     for (let i = 0; i < list.length; i++) {
       const it = list[i] || {};
@@ -1127,6 +1130,12 @@ function buildBuyerItemOptions(store) {
       const cat = safeStr(it.category).trim();
       const unit = safeStr(it.unit).trim();
       const label = `${a}${name ? " • " + name : ""}${cat ? " • " + cat : ""}${unit ? " • " + unit : ""}`;
+
+      if (q) {
+        const hay = (a + " " + name + " " + cat).toLowerCase();
+        if (!hay.includes(q)) continue;
+      }
+
       out.push({ value: a, label });
     }
 
@@ -1149,6 +1158,19 @@ function safeIntOrNull(v) {
   }
 }
 
+function safeNumOrNull(v) {
+  try {
+    if (v == null) return null;
+    const s = String(v).trim().replace(",", ".");
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
 function getUnitForArticle(store, articleNo) {
   try {
     if (!store || typeof store.listItems !== "function") return "";
@@ -1163,6 +1185,31 @@ function getUnitForArticle(store, articleNo) {
   } catch {
     return "";
   }
+}
+
+function rebuildSelectOptions(selectEl, options, placeholder, preserveValue) {
+  try {
+    const current = preserveValue ? safeStr(selectEl.value).trim() : "";
+    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
+
+    const first = document.createElement("option");
+    first.value = "";
+    first.textContent = placeholder || "—";
+    selectEl.appendChild(first);
+
+    const list = Array.isArray(options) ? options : [];
+    for (let i = 0; i < list.length; i++) {
+      const o = document.createElement("option");
+      o.value = safeStr(list[i].value);
+      o.textContent = safeStr(list[i].label);
+      selectEl.appendChild(o);
+    }
+
+    if (current) {
+      selectEl.value = current;
+      if (selectEl.value !== current) selectEl.value = "";
+    }
+  } catch {}
 }
 
 const buyerStockIn = defineView({
@@ -1185,23 +1232,44 @@ const buyerStockIn = defineView({
     h.style.margin = "0 0 10px 0";
 
     const note = el("div", "muted",
-      "Välj produkt, ange antal (heltal) och spara. Detta skapar ett stock-event i history (event-sourcing) och syns i saldo."
+      "Sök produkt, välj artikelnummer, ange antal kg (lagerpåverkan) och spara. Kartonger/kolli är valfritt och sparas som notering."
     );
     note.style.margin = "0 0 12px 0";
 
     const msgBox = el("div", null, null);
     msgBox.style.marginTop = "10px";
 
-    // Produktval (byggs från items)
-    const itemOpts = buildBuyerItemOptions(store);
+    // Sökbar produktväljare (ingen ny datamodell)
+    const rItemSearch = inputRow("Sök produkt", "Skriv artikelnummer eller produktnamn…", "text");
+    const itemOpts = buildBuyerItemOptions(store, "");
     const rItem = selectRow("Produkt (artikelnummer) *", itemOpts, itemOpts.length ? "Välj produkt…" : "Inga produkter ännu (skapa först)");
-    const rQty = inputRow("Antal (heltal) *", "Ex: 10", "number");
+
+    // Mängder
+    const rKg = inputRow("Antal kg *", "Ex: 10", "number");
+    try { rKg.input.step = "0.001"; } catch {}
+    const rCartons = inputRow("Antal kartonger/kolli (valfritt)", "Ex: 3", "number");
+    try { rCartons.input.step = "1"; } catch {}
+
     const rReason = inputRow("Orsakskod", "Ex: INLEVERANS", "text");
     const rRef = inputRow("Referens (valfritt)", "Ex: Följesedel 123", "text");
     const rNote = textareaRow("Notering (valfritt)", "Ex: Leverans tisdag, pall 2, temp ok…");
 
     // Defaults
     try { rReason.input.value = "INLEVERANS"; } catch {}
+
+    // Filter options live
+    rItemSearch.input.addEventListener("input", () => {
+      try {
+        const q = safeStr(rItemSearch.input.value);
+        const opts = buildBuyerItemOptions(store, q);
+        rebuildSelectOptions(
+          rItem.select,
+          opts,
+          opts.length ? "Välj produkt…" : "Inga matchningar (ändra söktext)",
+          true
+        );
+      } catch {}
+    });
 
     const actions = el("div", null, null);
     actions.style.display = "flex";
@@ -1241,13 +1309,25 @@ const buyerStockIn = defineView({
     confirmHead.style.display = "flex";
     confirmHead.style.alignItems = "center";
     confirmHead.style.gap = "10px";
+    confirmHead.style.flexWrap = "wrap";
 
     const confirmTitle = el("b", null, "Bekräftelse (sparad produkt + saldo)");
     const confirmMuted = el("div", "muted", "Tips: Om en ny produkt inte syns här → den sparades inte.");
     confirmMuted.style.marginLeft = "8px";
 
+    const saldoToggleBtn = document.createElement("button");
+    saldoToggleBtn.type = "button";
+    saldoToggleBtn.textContent = "Dölj lagersaldo";
+    saldoToggleBtn.style.border = "1px solid #e6e6e6";
+    saldoToggleBtn.style.background = "#fff";
+    saldoToggleBtn.style.borderRadius = "10px";
+    saldoToggleBtn.style.padding = "8px 10px";
+    saldoToggleBtn.style.cursor = "pointer";
+    saldoToggleBtn.style.marginLeft = "auto";
+
     confirmHead.appendChild(confirmTitle);
     confirmHead.appendChild(confirmMuted);
+    confirmHead.appendChild(saldoToggleBtn);
 
     const itemsBox = el("div", null, null);
     itemsBox.style.marginTop = "10px";
@@ -1258,6 +1338,24 @@ const buyerStockIn = defineView({
 
     const saldoBox = el("div", null, null);
     saldoBox.style.marginTop = "10px";
+
+    saldoToggleBtn.addEventListener("click", () => {
+      try {
+        const isHidden = !!saldoBox.hidden;
+        saldoBox.hidden = !isHidden;
+        saldoToggleBtn.textContent = saldoBox.hidden ? "Visa lagersaldo" : "Dölj lagersaldo";
+        if (!saldoBox.hidden) {
+          // refresh saldo when showing again
+          try {
+            if (!saldoBox.__frzSaldoMounted) {
+              buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
+              saldoBox.__frzSaldoMounted = true;
+            }
+            buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+          } catch {}
+        }
+      } catch {}
+    });
 
     function renderItemsList() {
       clear(itemsBox);
@@ -1274,12 +1372,10 @@ const buyerStockIn = defineView({
         return;
       }
 
-      // Enkel lista (artikel + namn)
       const ul = document.createElement("ul");
       ul.style.margin = "0 0 0 18px";
       ul.style.padding = "0";
 
-      // sort stabilt på artikel
       items = items.slice().sort((a, b) => safeStr(a.articleNo).localeCompare(safeStr(b.articleNo), "sv-SE"));
 
       for (let i = 0; i < items.length; i++) {
@@ -1298,24 +1394,16 @@ const buyerStockIn = defineView({
       try {
         if (!store || typeof store.listItems !== "function") return;
         const current = safeStr(rItem.select.value).trim();
-        const opts = buildBuyerItemOptions(store);
+        const q = safeStr(rItemSearch.input.value);
+        const opts = buildBuyerItemOptions(store, q);
 
-        // rebuild select options (fail-soft)
-        while (rItem.select.firstChild) rItem.select.removeChild(rItem.select.firstChild);
+        rebuildSelectOptions(
+          rItem.select,
+          opts,
+          opts.length ? "Välj produkt…" : (q ? "Inga matchningar (ändra söktext)" : "Inga produkter ännu (skapa först)"),
+          false
+        );
 
-        const first = document.createElement("option");
-        first.value = "";
-        first.textContent = opts.length ? "Välj produkt…" : "Inga produkter ännu (skapa först)";
-        rItem.select.appendChild(first);
-
-        for (let i = 0; i < opts.length; i++) {
-          const o = document.createElement("option");
-          o.value = safeStr(opts[i].value);
-          o.textContent = safeStr(opts[i].label);
-          rItem.select.appendChild(o);
-        }
-
-        // restore selection if still exists
         if (current) {
           rItem.select.value = current;
           if (rItem.select.value !== current) rItem.select.value = "";
@@ -1333,13 +1421,16 @@ const buyerStockIn = defineView({
 
     resetBtn.addEventListener("click", () => {
       try {
+        rItemSearch.input.value = "";
+        refreshItemOptionsPreserveSelection();
         rItem.select.value = "";
-        rQty.input.value = "";
+        rKg.input.value = "";
+        rCartons.input.value = "";
         rReason.input.value = "INLEVERANS";
         rRef.input.value = "";
         rNote.textarea.value = "";
         clear(msgBox);
-        rItem.select.focus();
+        rItemSearch.input.focus();
       } catch {}
     });
 
@@ -1368,10 +1459,17 @@ const buyerStockIn = defineView({
         return;
       }
 
-      const qty = safeIntOrNull(rQty.input.value);
-      if (qty == null || qty <= 0) {
-        msgBox.appendChild(pill("Antal måste vara ett heltal > 0.", "err"));
-        try { rQty.input.focus(); } catch {}
+      const kg = safeNumOrNull(rKg.input.value);
+      if (kg == null || kg <= 0) {
+        msgBox.appendChild(pill("Antal kg måste vara ett tal > 0.", "err"));
+        try { rKg.input.focus(); } catch {}
+        return;
+      }
+
+      const cartons = safeIntOrNull(rCartons.input.value);
+      if (cartons != null && cartons < 0) {
+        msgBox.appendChild(pill("Antal kartonger/kolli kan inte vara negativt.", "err"));
+        try { rCartons.input.focus(); } catch {}
         return;
       }
 
@@ -1379,10 +1477,17 @@ const buyerStockIn = defineView({
       const ref = safeStr(rRef.input.value).trim();
       const noteText = safeStr(rNote.textarea.value).trim();
 
-      // delta = +qty (inleverans)
-      const delta = qty;
+      // delta = +kg (inleverans)
+      const delta = kg;
 
-      const unit = getUnitForArticle(store, articleNo);
+      const unit = getUnitForArticle(store, articleNo) || "kg";
+
+      // POLICY: inga nya keys/datamodell → kartonger sparas som text i note
+      let finalNote = noteText;
+      if (cartons != null && cartons > 0) {
+        const prefix = "KOLLI: " + String(cartons);
+        finalNote = finalNote ? (prefix + " — " + finalNote) : prefix;
+      }
 
       setBusy(true);
 
@@ -1392,7 +1497,7 @@ const buyerStockIn = defineView({
           delta,
           unit,
           reasonCode,
-          note: noteText,
+          note: finalNote,
           ref
         });
 
@@ -1411,7 +1516,12 @@ const buyerStockIn = defineView({
           }
         } catch {}
 
-        msgBox.appendChild(pill("Inleverans sparad." + (newOnHand != null ? " Nytt saldo: " + safeStr(newOnHand) : ""), "ok"));
+        msgBox.appendChild(
+          pill(
+            "Inleverans sparad (" + safeStr(delta) + " " + safeStr(unit || "kg") + ")." + (newOnHand != null ? " Nytt saldo: " + safeStr(newOnHand) : ""),
+            "ok"
+          )
+        );
 
         // refresh: items + saldo
         try { renderItemsList(); } catch {}
@@ -1419,20 +1529,20 @@ const buyerStockIn = defineView({
 
         // render saldo table inside saldoBox using buyerSaldo building block
         try {
-          // mount saldo view into saldoBox once
           if (!saldoBox.__frzSaldoMounted) {
             buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
             saldoBox.__frzSaldoMounted = true;
           }
-          buyerSaldo.render({ root: saldoBox, ctx, state: {} });
+          if (!saldoBox.hidden) buyerSaldo.render({ root: saldoBox, ctx, state: {} });
         } catch {}
 
-        // clear qty/ref/note (behåll product + reason)
+        // clear kg/cartons/ref/note (behåll product + reason + söktext)
         try {
-          rQty.input.value = "";
+          rKg.input.value = "";
+          rCartons.input.value = "";
           rRef.input.value = "";
           rNote.textarea.value = "";
-          rQty.input.focus();
+          rKg.input.focus();
         } catch {}
 
         setBusy(false);
@@ -1455,8 +1565,10 @@ const buyerStockIn = defineView({
     wrap.appendChild(h);
     wrap.appendChild(note);
 
+    wrap.appendChild(rItemSearch.wrap);
     wrap.appendChild(rItem.wrap);
-    wrap.appendChild(rQty.wrap);
+    wrap.appendChild(rKg.wrap);
+    wrap.appendChild(rCartons.wrap);
     wrap.appendChild(rReason.wrap);
     wrap.appendChild(rRef.wrap);
     wrap.appendChild(rNote.wrap);
@@ -1474,30 +1586,15 @@ const buyerStockIn = defineView({
     try { renderItemsList(); } catch {}
     try { refreshItemOptionsPreserveSelection(); } catch {}
     try {
-      // show saldo (even if empty) as confirmation
       buyerSaldo.mount({ root: saldoBox, ctx, state: {} });
       saldoBox.__frzSaldoMounted = true;
       buyerSaldo.render({ root: saldoBox, ctx, state: {} });
     } catch {}
   },
 
-  render: ({ root, ctx }) => {
-    // This view is mostly self-contained; we refresh saldo on rerender
-    try {
-      const store = (ctx && ctx.store) ? ctx.store : (window.FreezerStore || null);
-      if (!store) return;
-
-      // If we mounted saldo inside, rerender it
-      const panels = root ? root.querySelectorAll("div") : null;
-      // fail-soft: find saldoBox by marker
-      // (we stored __frzSaldoMounted on saldoBox element, but we don't keep direct ref here)
-      // => do nothing; mount path already renders on save.
-    } catch {}
-  },
-
+  render: () => {},
   unmount: ({ root }) => {
     try {
-      // unmount nested saldo if mounted
       const nodes = root ? root.querySelectorAll("*") : [];
       for (let i = 0; i < nodes.length; i++) {
         const n = nodes[i];
@@ -1670,16 +1767,17 @@ try {
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: “Lägga in produkter” är nu en riktig inleverans-vy (buyer-stock-in) kopplad till store.adjustStock().
-2) Bekräftelse inbyggd: listar produkter (så du ser att “Ny produkt” faktiskt sparas) + visar saldo-tabell.
-3) BUYER-menyn är nu EXAKT 4 rutor enligt krav (saldo är intern byggkloss, ej menyval).
-4) Fortsatt XSS-safe (createElement/textContent), inga nya storage-keys/datamodell.
+1) BUYER-stock-in: lade till sökfält för produkt (artikelnummer/namn) som filtrerar dropdown.
+2) BUYER-stock-in: bytte “Antal (heltal)” → “Antal kg” (decimal tillåten) som lagerdelta.
+3) BUYER-stock-in: lade till “Antal kartonger/kolli” (valfritt) sparas i note som text (ingen ny datamodell).
+4) BUYER-stock-in: lade till toggle “Visa/Dölj lagersaldo” så saldo kan visas stabilt och inte upplevs försvinna.
+5) Fortsatt policy: UI-only, XSS-safe, inga nya storage-keys/datamodell.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Skapa produkt (Ny produkt) med articleNo → gå till “Lägga in produkter” → produkten ska synas i listan + dropdown.
-- Välj produkt → antal 10 → Spara inleverans → ska visa “Inleverans sparad” och saldo ska uppdateras.
-- Reload sidan → produkten kvar (items LS) och saldo kvar (history LS).
-- Testa saknad store: om 03-store.js inte laddas → vy visar tydligt fel.
+- Sök produkt: skriv “100” eller namn → dropdown ska bli kortare.
+- Välj produkt → Antal kg 10,5 → Spara → saldo uppdateras.
+- Sätt Antal kartonger 3 → Spara → note ska innehålla “KOLLI: 3 …”.
+- Klicka “Dölj lagersaldo” / “Visa lagersaldo” → saldo ska togglas utan att krascha.
 ============================================================ */
