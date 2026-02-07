@@ -4,17 +4,14 @@ Projekt: Freezer (UI-only / localStorage-first)
 
 Syfte:
 - BUYER ska kunna göra INLEVERANS (öka lagersaldo) på befintliga produkter.
-- Stabil DOM: input-fält får INTE “försvinna” vid rerender/subscribe (P0).
-- Använder endast FreezerStore API (adjustStock/listItems/getStock/listStock).
+- P0: Stabil DOM — input får INTE “försvinna” vid rerender/subscribe.
+- Efter lyckad inleverans: visa GRÖN bekräftelseruta med:
+  - Text: “Din produkt är inlagd. Vill du lägga in en till? Annars kan du stänga den här rutan.”
+  - Knapp 1: “Lägg in en till” (rensar fält + fokus på kg)
+  - Knapp 2: “Stäng” (göm rutan)
+
+Policy:
 - UI-only • inga nya storage-keys/datamodell • XSS-safe.
-
-P0-regel:
-- Bygg DOM EN GÅNG i mount()
-- Vid store-uppdatering: uppdatera endast text/listor – aldrig clear(root) + rebuild.
-
-Export/registrering:
-- ESM: export default + export const view
-- Fail-soft: om FreezerViewRegistry har registerView/register -> registrera direkt.
 ============================================================ */
 
 function safeStr(v) {
@@ -35,7 +32,6 @@ function getStore(ctx) {
 }
 
 function formatItemLabel(it) {
-  // "1008 • Falukorv • Korv • kg"
   const a = norm(it && it.articleNo);
   const name = norm(it && it.productName);
   const cat = norm(it && it.category);
@@ -51,8 +47,7 @@ function formatItemLabel(it) {
 function parseIntStrict(v) {
   const s = norm(v);
   if (!s) return null;
-  // fail-closed: endast heltal
-  if (!/^-?\d+$/.test(s)) return null;
+  if (!/^-?\d+$/.test(s)) return null; // fail-closed: heltal
   const n = Number(s);
   if (!Number.isFinite(n)) return null;
   return Math.trunc(n);
@@ -67,32 +62,68 @@ function buildNoteWithCartons(note, cartons) {
   return `${n}\n${line}`;
 }
 
-/* =========================
-View implementation
-========================= */
-
 const view = {
   id: "buyer-stock-in",
   label: "Lägga in produkter",
   requiredPerm: "inventory_write",
 
-  mount({ root, ctx, state }) {
-    // Stable nodes stored on root to survive render() calls
+  mount({ root, ctx }) {
+    // Build once (P0)
     const box = el("div", null, null);
 
     const h = el("h2", null, "Lägga in produkter (inleverans)");
     h.style.margin = "0 0 6px 0";
 
-    const p = el("div", "muted", "Sök produkt, välj artikelnummer, ange antal kg (lagerpåverkan) och spara. Kartonger/kolli är valfritt och sparas som notering.");
+    const p = el(
+      "div",
+      "muted",
+      "Sök produkt, välj artikelnummer, ange antal kg (lagerpåverkan) och spara. Kartonger/kolli är valfritt och sparas som notering."
+    );
     p.style.marginBottom = "10px";
 
-    const msg = el("div", null, "");
+    // Message / confirm box (stable)
+    const msg = el("div", null, null);
     msg.style.margin = "10px 0";
-    msg.style.padding = "10px";
-    msg.style.borderRadius = "10px";
+    msg.style.padding = "12px";
+    msg.style.borderRadius = "12px";
     msg.style.border = "1px solid #e6e6e6";
     msg.style.background = "#fff";
     msg.hidden = true;
+
+    const msgTitle = el("div", null, "");
+    msgTitle.style.fontWeight = "700";
+    msgTitle.style.marginBottom = "4px";
+
+    const msgBody = el("div", "muted", "");
+    msgBody.style.whiteSpace = "pre-wrap";
+
+    const msgActions = el("div", null, null);
+    msgActions.style.display = "flex";
+    msgActions.style.gap = "10px";
+    msgActions.style.flexWrap = "wrap";
+    msgActions.style.marginTop = "10px";
+    msgActions.hidden = true;
+
+    const btnAddMore = document.createElement("button");
+    btnAddMore.type = "button";
+    btnAddMore.textContent = "Lägg in en till";
+    btnAddMore.className = "tabBtn";
+    btnAddMore.style.padding = "10px 14px";
+    btnAddMore.style.borderRadius = "12px";
+
+    const btnCloseMsg = document.createElement("button");
+    btnCloseMsg.type = "button";
+    btnCloseMsg.textContent = "Stäng";
+    btnCloseMsg.className = "tabBtn";
+    btnCloseMsg.style.padding = "10px 14px";
+    btnCloseMsg.style.borderRadius = "12px";
+
+    msgActions.appendChild(btnAddMore);
+    msgActions.appendChild(btnCloseMsg);
+
+    msg.appendChild(msgTitle);
+    msg.appendChild(msgBody);
+    msg.appendChild(msgActions);
 
     const grid = el("div", null, null);
     grid.style.display = "grid";
@@ -105,7 +136,7 @@ const view = {
 
     const inpSearch = document.createElement("input");
     inpSearch.type = "text";
-    inpSearch.placeholder = "Skriv t.ex. 1008 eller Falukorv…";
+    inpSearch.placeholder = "Skriv artikelnummer eller produktnamn…";
     inpSearch.autocomplete = "off";
     inpSearch.style.width = "100%";
     inpSearch.style.border = "1px solid rgb(230,230,230)";
@@ -134,7 +165,7 @@ const view = {
     inpKg.type = "number";
     inpKg.placeholder = "Ex: 10";
     inpKg.autocomplete = "off";
-    inpKg.step = "1"; // matchar store (heltal)
+    inpKg.step = "1";
     inpKg.style.width = "100%";
     inpKg.style.border = "1px solid rgb(230,230,230)";
     inpKg.style.borderRadius = "10px";
@@ -156,7 +187,7 @@ const view = {
     inpCart.style.borderRadius = "10px";
     inpCart.style.padding = "10px";
 
-    // Reason code (fixed for this view)
+    // Reason code (fixed)
     const lblReason = el("div", null, "Orsakskod");
     lblReason.style.fontWeight = "600";
     lblReason.style.fontSize = "13px";
@@ -234,7 +265,6 @@ const view = {
     btnRow.appendChild(btnClear);
     btnRow.appendChild(miniInfo);
 
-    // Compose grid
     grid.appendChild(lblSearch);
     grid.appendChild(inpSearch);
     grid.appendChild(lblPick);
@@ -256,13 +286,17 @@ const view = {
     box.appendChild(msg);
     box.appendChild(grid);
 
-    // Attach once
     root.appendChild(box);
 
-    // Stable state on root
     root.__frz_stockin = {
       box,
       msg,
+      msgTitle,
+      msgBody,
+      msgActions,
+      btnAddMore,
+      btnCloseMsg,
+
       inpSearch,
       sel,
       inpKg,
@@ -272,33 +306,37 @@ const view = {
       miniInfo,
       btnSave,
       btnClear,
+
       lastItemsSig: "",
       unsub: null
     };
 
-    // Events (no rerender)
     inpSearch.addEventListener("input", () => {
       try { this.__updateOptions(root, ctx); } catch {}
     });
 
     btnClear.addEventListener("click", () => {
-      const st = root.__frz_stockin;
-      if (!st) return;
-      st.inpKg.value = "";
-      st.inpCart.value = "";
-      st.inpRef.value = "";
-      st.taNote.value = "";
-      st.inpKg.focus();
-      this.__hideMsg(root attach = root);
+      this.__clearFields(root);
+      this.__hideMsg(root);
+      try { root.__frz_stockin.inpKg.focus(); } catch {}
     });
 
     btnSave.addEventListener("click", () => {
       try { this.__onSave(root, ctx); } catch (e) {
-        try { this.__showMsg(root, "Kunde inte spara: " + safeStr(e && e.message ? e.message : "okänt fel"), "danger"); } catch {}
+        this.__showMsg(root, "Fel", "Kunde inte spara: " + safeStr(e && e.message ? e.message : "okänt fel"), "danger", false);
       }
     });
 
-    // Subscribe store updates (update lists/info only)
+    btnAddMore.addEventListener("click", () => {
+      this.__clearFields(root);
+      this.__hideMsg(root);
+      try { root.__frz_stockin.inpKg.focus(); } catch {}
+    });
+
+    btnCloseMsg.addEventListener("click", () => {
+      this.__hideMsg(root);
+    });
+
     const store = getStore(ctx);
     if (store && typeof store.subscribe === "function") {
       root.__frz_stockin.unsub = store.subscribe(() => {
@@ -306,27 +344,30 @@ const view = {
       });
     }
 
-    // Initial paint
     this.__refresh(root, ctx);
   },
 
-  render({ root, ctx, state }) {
-    // IMPORTANT: do NOT rebuild DOM; just refresh dynamic parts
+  render({ root, ctx }) {
+    // P0: never rebuild
     this.__refresh(root, ctx);
   },
 
-  unmount({ root, ctx, state }) {
+  unmount({ root }) {
     try {
       const st = root.__frz_stockin;
       if (st && typeof st.unsub === "function") st.unsub();
     } catch {}
     try { delete root.__frz_stockin; } catch {}
-    // Buyer controller may clear root; we don't need to.
   },
 
-  /* =========================
-  Internal helpers
-  ========================= */
+  __clearFields(root) {
+    const st = root.__frz_stockin;
+    if (!st) return;
+    st.inpKg.value = "";
+    st.inpCart.value = "";
+    st.inpRef.value = "";
+    st.taNote.value = "";
+  },
 
   __refresh(root, ctx) {
     const st = root.__frz_stockin;
@@ -337,8 +378,8 @@ const view = {
     const locked = !!status.locked;
     const readOnly = !!status.readOnly;
 
-    // Disable interactions if locked/readonly or missing store
     const disable = (!store) || locked || readOnly;
+
     st.inpSearch.disabled = !!disable;
     st.sel.disabled = !!disable;
     st.inpKg.disabled = !!disable;
@@ -347,24 +388,26 @@ const view = {
     st.taNote.disabled = !!disable;
     st.btnSave.disabled = !!disable;
     st.btnClear.disabled = !!disable;
+    st.btnAddMore.disabled = !!disable;
+    st.btnCloseMsg.disabled = !!disable;
 
     if (!store) {
-      this.__showMsg(root, "FreezerStore saknas. Kan inte läsa produkter eller spara lagersaldo.", "danger");
+      this.__showMsg(root, "Systemfel", "FreezerStore saknas. Kan inte läsa produkter eller spara lagersaldo.", "danger", false);
       return;
     }
     if (locked) {
-      this.__showMsg(root, "Systemet är i låst läge: " + safeStr(status.reason || "FRZ_E_LOCKED"), "danger");
+      this.__showMsg(root, "Låst läge", "Systemet är i låst läge: " + safeStr(status.reason || "FRZ_E_LOCKED"), "danger", false);
       return;
     }
     if (readOnly) {
-      this.__showMsg(root, "Read-only: " + safeStr(status.whyReadOnly || "saknar skrivläge"), "danger");
+      this.__showMsg(root, "Read-only", "Read-only: " + safeStr(status.whyReadOnly || "saknar skrivläge"), "danger", false);
       return;
     }
 
-    // Update options (but do not reset user input unless needed)
+    // Update select options without killing inputs
     this.__updateOptions(root, ctx);
 
-    // Update mini info (selected product + current saldo)
+    // Mini info (saldo)
     const selArticle = norm(st.sel.value);
     if (selArticle) {
       let onHand = null;
@@ -376,17 +419,13 @@ const view = {
     } else {
       setText(st.miniInfo, "");
     }
-
-    // hide message if everything ok and message is old
-    // (we keep visible if it contains an error)
   },
 
   __itemsSignature(items) {
     try {
       if (!Array.isArray(items)) return "";
-      // lightweight signature so we avoid rebuilding select too often
       let s = "";
-      const n = Math.min(items.length, 200);
+      const n = Math.min(items.length, 250);
       for (let i = 0; i < n; i++) {
         const it = items[i];
         s += "|" + norm(it && it.articleNo) + ":" + norm(it && it.productName);
@@ -406,7 +445,6 @@ const view = {
     const items = store.listItems({ includeInactive: false }) || [];
     const sig = this.__itemsSignature(items) + "§" + q;
 
-    // Build filtered list
     let filtered = items;
     if (q) {
       filtered = items.filter(it => {
@@ -417,13 +455,11 @@ const view = {
       });
     }
 
-    // If nothing changed, do nothing
     if (st.lastItemsSig === sig) return;
     st.lastItemsSig = sig;
 
     const prev = norm(st.sel.value);
 
-    // Rebuild select options (safe because select is stable, only options replaced)
     while (st.sel.firstChild) st.sel.removeChild(st.sel.firstChild);
 
     const opt0 = document.createElement("option");
@@ -441,33 +477,43 @@ const view = {
       st.sel.appendChild(opt);
     }
 
-    // Restore selection if still present
     if (prev) {
       const exists = filtered.some(it => norm(it && it.articleNo) === prev);
       st.sel.value = exists ? prev : "";
     }
   },
 
-  __showMsg(root, text, tone) {
+  __showMsg(root, title, body, tone, showActions) {
     const st = root.__frz_stockin;
-    if (!st || !st.msg) return;
-    st.msg.hidden = false;
-    setText(st.msg, text);
+    if (!st) return;
 
-    // Tone styling (fail-soft)
+    st.msg.hidden = false;
+    setText(st.msgTitle, title || "");
+    setText(st.msgBody, body || "");
+    setHidden(st.msgActions, !showActions);
+
+    // tone styles
     try {
       st.msg.style.border = "1px solid #e6e6e6";
       st.msg.style.background = "#fff";
-      if (tone === "danger") { st.msg.style.border = "1px solid #f2b8b5"; st.msg.style.background = "#fff5f5"; }
-      if (tone === "ok") { st.msg.style.border = "1px solid #cfe9cf"; st.msg.style.background = "#f4fff4"; }
+      if (tone === "danger") {
+        st.msg.style.border = "1px solid #f2b8b5";
+        st.msg.style.background = "#fff5f5";
+      }
+      if (tone === "ok") {
+        st.msg.style.border = "1px solid #cfe9cf";
+        st.msg.style.background = "#f4fff4";
+      }
     } catch {}
   },
 
   __hideMsg(root) {
     const st = root.__frz_stockin;
-    if (!st || !st.msg) return;
+    if (!st) return;
     st.msg.hidden = true;
-    setText(st.msg, "");
+    setText(st.msgTitle, "");
+    setText(st.msgBody, "");
+    setHidden(st.msgActions, true);
   },
 
   __onSave(root, ctx) {
@@ -475,24 +521,27 @@ const view = {
     if (!st) return;
 
     const store = getStore(ctx);
-    if (!store) { this.__showMsg(root, "FreezerStore saknas.", "danger"); return; }
+    if (!store) {
+      this.__showMsg(root, "Systemfel", "FreezerStore saknas.", "danger", false);
+      return;
+    }
 
     const status = store.getStatus ? (store.getStatus() || {}) : {};
-    if (status.locked) { this.__showMsg(root, "Låst läge: " + safeStr(status.reason || "FRZ_E_LOCKED"), "danger"); return; }
-    if (status.readOnly) { this.__showMsg(root, "Read-only: " + safeStr(status.whyReadOnly || ""), "danger"); return; }
-    if (store.can && !store.can("inventory_write")) { this.__showMsg(root, "Saknar behörighet (inventory_write).", "danger"); return; }
+    if (status.locked) { this.__showMsg(root, "Låst läge", "Låst läge: " + safeStr(status.reason || "FRZ_E_LOCKED"), "danger", false); return; }
+    if (status.readOnly) { this.__showMsg(root, "Read-only", "Read-only: " + safeStr(status.whyReadOnly || ""), "danger", false); return; }
+    if (store.can && !store.can("inventory_write")) { this.__showMsg(root, "Behörighet saknas", "Saknar behörighet (inventory_write).", "danger", false); return; }
 
     const articleNo = norm(st.sel.value);
-    if (!articleNo) { this.__showMsg(root, "Välj en produkt (artikelnummer).", "danger"); return; }
+    if (!articleNo) { this.__showMsg(root, "Saknas", "Välj en produkt (artikelnummer).", "danger", false); return; }
 
     const kg = parseIntStrict(st.inpKg.value);
-    if (kg == null || kg <= 0) { this.__showMsg(root, "Antal kg måste vara ett heltal > 0.", "danger"); return; }
+    if (kg == null || kg <= 0) { this.__showMsg(root, "Ogiltigt värde", "Antal kg måste vara ett heltal > 0.", "danger", false); return; }
 
-    const cartons = norm(st.inpCart.value);
+    const cartonsRaw = norm(st.inpCart.value);
     let cartonsInt = null;
-    if (cartons) {
-      const ci = parseIntStrict(cartons);
-      if (ci == null || ci < 0) { this.__showMsg(root, "Kartonger/kolli måste vara ett heltal >= 0.", "danger"); return; }
+    if (cartonsRaw) {
+      const ci = parseIntStrict(cartonsRaw);
+      if (ci == null || ci < 0) { this.__showMsg(root, "Ogiltigt värde", "Kartonger/kolli måste vara ett heltal >= 0.", "danger", false); return; }
       cartonsInt = ci;
     }
 
@@ -500,7 +549,7 @@ const view = {
     const noteRaw = norm(st.taNote.value);
     const note = buildNoteWithCartons(noteRaw, cartonsInt);
 
-    // Unit from items (fail-soft)
+    // unit from item (fail-soft)
     let unit = "";
     try {
       const items = store.listItems ? (store.listItems({ includeInactive: false }) || []) : [];
@@ -508,17 +557,18 @@ const view = {
       unit = norm(it && it.unit) || "";
     } catch {}
 
-    // Before/after for user feedback (fail-soft)
     let before = null;
     try {
       const snap = store.getStock ? store.getStock(articleNo) : null;
       before = snap && typeof snap.onHand === "number" ? snap.onHand : null;
     } catch {}
 
-    const fn = store.adjustStock;
-    if (typeof fn !== "function") { this.__showMsg(root, "Store.adjustStock saknas.", "danger"); return; }
+    if (typeof store.adjustStock !== "function") {
+      this.__showMsg(root, "Systemfel", "Store.adjustStock saknas.", "danger", false);
+      return;
+    }
 
-    const res = fn.call(store, {
+    const res = store.adjustStock({
       articleNo,
       delta: kg,
       unit,
@@ -528,43 +578,36 @@ const view = {
     });
 
     if (res && res.ok === false) {
-      this.__showMsg(root, safeStr(res.reason || "Kunde inte spara inleverans."), "danger");
+      this.__showMsg(root, "Kunde inte spara", safeStr(res.reason || "Kunde inte spara inleverans."), "danger", false);
       return;
     }
 
-    // After
     let after = null;
     try {
       const snap2 = store.getStock ? store.getStock(articleNo) : null;
       after = snap2 && typeof snap2.onHand === "number" ? snap2.onHand : null;
     } catch {}
 
-    const msg = (before == null || after == null)
-      ? "Inleverans sparad."
-      : `Inleverans sparad. Saldo: ${before} → ${after}`;
+    const baseText = "Din produkt är inlagd. Vill du lägga in en till? Annars kan du stänga den här rutan.";
+    const saldoText = (before == null || after == null) ? "" : `\nSaldo: ${before} → ${after}`;
+    this.__showMsg(root, "Klart ✅", baseText + saldoText, "ok", true);
 
-    this.__showMsg(root, msg, "ok");
-
-    // Clear only fields that should reset
+    // Rensa fält direkt så “lägg in en till” är redo (men behåll vald produkt)
     st.inpKg.value = "";
     st.inpCart.value = "";
     st.inpRef.value = "";
     st.taNote.value = "";
-    st.inpKg.focus();
+    try { st.inpKg.focus(); } catch {}
   }
 };
 
 /* =========================
 Fail-soft registry registration
 ========================= */
-
 try {
   const reg = window.FreezerViewRegistry;
-  if (reg && typeof reg.registerView === "function") {
-    reg.registerView("buyer", view);
-  } else if (reg && typeof reg.register === "function") {
-    reg.register("buyer", view);
-  }
+  if (reg && typeof reg.registerView === "function") reg.registerView("buyer", view);
+  else if (reg && typeof reg.register === "function") reg.register("buyer", view);
 } catch {}
 
 /* =========================
@@ -575,10 +618,8 @@ export default view;
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) Ny BUYER-vy: buyer-stock-in (inleverans) med stabil DOM (P0).
-2) Bygger DOM en gång i mount(); render()/subscribe uppdaterar endast options/info.
-3) Spara → FreezerStore.adjustStock({ delta:+kg, reasonCode:"INLEVERANS", ref, note }).
-4) Kartonger/kolli sparas som del av note (ingen ny datamodell/ny storage-key).
-5) Fail-closed validering: produkt krävs, kg måste vara heltal > 0, cartons heltal >= 0.
+1) P0: Stabil DOM kvar — inga clear(root) vid render/subscribe.
+2) Efter lyckad inleverans visas GRÖN bekräftelseruta med “Lägg in en till” + “Stäng”.
+3) “Lägg in en till” rensar fält och fokuserar kg.
+4) “Stäng” gömmer bekräftelserutan.
 ============================================================ */
-
