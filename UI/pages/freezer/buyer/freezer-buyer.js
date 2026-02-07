@@ -12,6 +12,10 @@ POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell
 - XSS-safe: textContent + createElement
 - P0: får INTE init före ESM registry är redo -> väntar/pollar (defer + guard)
+
+AUTOPATCH (P0):
+- Store.init ska få role="BUYER" (store normaliserar ADMIN/BUYER/PICKER/SYSTEM_ADMIN).
+- Registry kan vara case-känslig -> prova buyer/BUYER fail-soft.
 ============================================================ */
 
 (function () {
@@ -113,9 +117,15 @@ POLICY (LÅST):
 
     // Om store redan verkar initad, gör inget.
     try {
+      if (typeof store.getStatus === "function") {
+        const st = store.getStatus() || {};
+        if (!st.locked) {
+          // Om store redan initats tidigare i sidan (buyer/freezer.html inline-init), hoppa.
+          return { ok: true, why: "already-inited" };
+        }
+      }
       if (typeof store.getState === "function") {
         const s = store.getState() || {};
-        // Heuristik: om store har “hydrated” flag eller items redan finns
         if (s && (s.hydrated === true || (Array.isArray(s.items) && s.items.length > 0))) {
           return { ok: true, why: "already-hydrated" };
         }
@@ -132,9 +142,8 @@ POLICY (LÅST):
     if (!initFn) return { ok: false, why: "no-init-fn" };
 
     try {
-      // Viktigt: inga nya keys/datamodell – bara init/hydrate.
-      // Om store ignorerar argument, är det ok.
-      const res = initFn.call(store, { role: "buyer" });
+      // Viktigt: store.normalizeRole accepterar ADMIN/BUYER/PICKER/SYSTEM_ADMIN (uppercase).
+      const res = initFn.call(store, { role: "BUYER" });
 
       // Om init returnerar objekt med ok:false, respektera fail-closed
       if (res && typeof res === "object" && res.ok === false) {
@@ -191,7 +200,7 @@ POLICY (LÅST):
     // ctx skickas till views (ESM view-interface spec)
     // Inga nya keys. Bara referenser.
     return {
-      role: "buyer",
+      role: "BUYER",
       store: getStore(),
       render: getRender()
     };
@@ -386,6 +395,23 @@ POLICY (LÅST):
     return items;
   }
 
+  function getBuyerViewsForRegistry(reg) {
+    // Fail-soft: registry kan vara case-känslig i role-nyckeln.
+    try {
+      const a = reg.getViewsForRole && reg.getViewsForRole("buyer");
+      if (Array.isArray(a) && a.length) return a;
+    } catch {}
+    try {
+      const b = reg.getViewsForRole && reg.getViewsForRole("BUYER");
+      if (Array.isArray(b) && b.length) return b;
+    } catch {}
+    try {
+      const c = reg.getViewsForRole && reg.getViewsForRole("Buyer");
+      if (Array.isArray(c) && c.length) return c;
+    } catch {}
+    return [];
+  }
+
   function initWhenReady() {
     const menuRoot = $("freezerViewMenu");
     const viewRoot = $("freezerViewRoot");
@@ -402,8 +428,6 @@ POLICY (LÅST):
     // P0 FIX: initiera store (hydrera LS) först när registry är redo
     const initRes = tryInitStoreOnce(true);
     if (!initRes.ok) {
-      // fail-soft: låt sidan fortsätta om store finns, men visa debug info
-      // (vyer kan ändå visa “FreezerStore saknas” tydligt)
       updateTopStatus("Store init: " + safeStr(initRes.why || "fail") + (initRes.reason ? " (" + initRes.reason + ")" : ""));
     } else {
       updateTopStatus(initRes.why ? ("Store init: " + initRes.why) : "");
@@ -416,7 +440,7 @@ POLICY (LÅST):
     wireResetDemo();
 
     // Views (buyer)
-    const views = reg.getViewsForRole("buyer") || [];
+    const views = getBuyerViewsForRegistry(reg);
 
     // Menyitems: EXAKT 4 enligt allowlist
     const menuItems = buildBuyerMenuItems(reg, views);
@@ -527,17 +551,22 @@ POLICY (LÅST):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0 FIX: initierar/hydrerar FreezerStore en gång (fail-soft) när registry är redo, så items/history överlever reload.
-2) Visar tydlig debugrad om init-funktion saknas eller om init returnerar fail.
-3) I övrigt oförändrat: BUYER-menyn låst till exakt 4 vyer + fail-closed routing.
+1) P0: Role-normalisering: store.init får role=\"BUYER\" (store accepterar uppercase).
+2) Fail-soft: hämtar buyer-views via getViewsForRole(\"buyer\") ELLER \"BUYER\" (case-känslighet).
+3) Undviker dubbel-init om store redan är initad via buyer/freezer.html inline-init (getStatus().locked===false).
+4) I övrigt oförändrat: BUYER-menyn låst till exakt 4 vyer + fail-closed routing.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Öppna buyer/freezer.html → öppna Console:
-  - kör: window.FreezerStore?.getState?.().items  (ska INTE vara [] om LS har items)
+- Öppna buyer/freezer.html → Console:
+  - window.FreezerStore?.getStatus?.()  (locked ska vara false)
+  - window.FreezerStore?.getState?.().items  (ska INTE vara [] om LS redan har items)
 - Reload sidan:
   - items ska vara kvar
-  - Ny produkt med samma artikel ska fortfarande blockeras (dedupe) – men du ska kunna se den gamla produkten efter reload.
-- Incognito utan extensions: “async listener”-felet ska normalt försvinna.
+- Klicka mellan 4 flikar:
+  - hash blir #view=...
+  - bara de 4 tillåtna vyerna kan väljas
+- Om 00/01-moduler saknas:
+  - efter ~4s ska fallback säga att registry inte är redo.
 ============================================================ */
