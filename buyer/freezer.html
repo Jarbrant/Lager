@@ -150,7 +150,7 @@ P0-FIX (denna patch):
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → (INIT BUYER ROLE) → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
+  Core → Contract → Store → (INIT BUYER ROLE) → (MINI BOOTSTRAP) → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
   =========================================================== -->
 
   <!-- Core -->
@@ -164,17 +164,54 @@ P0-FIX (denna patch):
   <script>
     (function () {
       "use strict";
+
+      function byId(id) { try { return document.getElementById(id); } catch { return null; } }
+      function setTxt(id, txt) { const el = byId(id); if (el) el.textContent = String(txt || ""); }
+      function show(id, on) { const el = byId(id); if (el) el.hidden = !on; }
+
+      function lock(reason) {
+        show("frzLockPanel", true);
+        setTxt("frzLockReason", "Orsak: " + String(reason || "FRZ_E_NOT_INIT"));
+        setTxt("frzStatusText", "Låst");
+        const pill = byId("frzStatusPill");
+        try {
+          if (pill) { pill.classList.remove("ok"); pill.classList.add("danger"); }
+        } catch {}
+      }
+
+      function okStatus(text) {
+        setTxt("frzStatusText", text || "OK");
+        const pill = byId("frzStatusPill");
+        try {
+          if (pill) { pill.classList.remove("danger"); pill.classList.add("ok"); }
+        } catch {}
+      }
+
       try {
         var S = window.FreezerStore;
         if (S && typeof S.init === "function") {
           // Fail-soft: initierar store med rätt roll så items/history hydreras.
           // Inga nya storage-keys/datamodell.
           window.__FRZ_BUYER_INIT__ = S.init({ role: "BUYER" });
+
+          // Minimal bootstrap (fail-closed) även om freezer-render saknas:
+          if (typeof S.getStatus === "function") {
+            var st = S.getStatus();
+            if (st && st.locked) lock(st.reason || "FRZ_E_NOT_INIT");
+            else {
+              okStatus("OK");
+              setTxt("frzModeText", (st && st.readOnly) ? "READ-ONLY" : "NORMAL");
+            }
+          } else {
+            okStatus("OK");
+            setTxt("frzModeText", "—");
+          }
         } else {
-          // Fail-soft: buyer-controller kommer ändå visa lås/fallback om store saknas.
+          lock("FreezerStore saknas eller init() saknas.");
           try { console.warn("FRZ: FreezerStore saknas eller init() saknas."); } catch {}
         }
       } catch (e) {
+        lock("FreezerStore.init error");
         try { console.warn("FRZ: FreezerStore.init error", e); } catch {}
       }
     })();
