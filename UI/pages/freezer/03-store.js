@@ -13,6 +13,11 @@ P0 SUPPLIERS:
   -> listSuppliers() bygger listan från history
 - När supplier skapas/uppdateras -> notify() -> UI kan rendera direkt.
 
+AUTOPATCH v1.3.1 — P0 HYDRATE-GUARD (buyer init-skip fix):
+- Store startar i LOCKED=FRZ_E_NOT_INIT tills init() körs.
+- Detta gör att buyer-controller INTE kan “tro” att store redan är initad.
+- Inga nya storage-keys, ingen ny top-level state-nyckel.
+
 AUTOPATCH v1.3 — LOKAL PERSISTENS + LAGERSALDO (utan ny state-nyckel):
 - history (leverantörer + lagersaldo-events): FRZ_DEMO_HISTORY_V1
 - items  (produkter/masterdata):             FRZ_DEMO_ITEMS_V1
@@ -223,8 +228,9 @@ POLICY (LÅST):
 
   const _state = {
     role: "ADMIN",
-    locked: false,
-    reason: "",
+    // P0 FAIL-CLOSED: starta låst tills init() körts
+    locked: true,
+    reason: "FRZ_E_NOT_INIT",
     readOnly: false,
     whyReadOnly: "",
     users: [],
@@ -472,7 +478,6 @@ POLICY (LÅST):
         cur.onHand = (Number(cur.onHand) || 0) + delta;
       }
 
-      // Enhet: om event har unit sätts den, annars behåll tidigare
       if (unit) cur.unit = unit;
 
       cur.updatedAt = at;
@@ -482,8 +487,6 @@ POLICY (LÅST):
     }
 
     const out = Object.values(byArticle);
-
-    // Stabil sort: articleNo
     out.sort((a, b) => String(a.articleNo || "").localeCompare(String(b.articleNo || "")));
     return out;
   }
@@ -496,7 +499,7 @@ POLICY (LÅST):
   }
 
   // ------------------------------------------------------------
-  // Demo baseline + hydrate från storage (P0-fix: radera inte LS vid init)
+  // Demo baseline + hydrate från storage
   // ------------------------------------------------------------
   function seedUsers() {
     _state.users = [
@@ -507,10 +510,8 @@ POLICY (LÅST):
   }
 
   function initDemoStateFromStorageOrEmpty() {
-    // 1) Always seed users
     seedUsers();
 
-    // 2) Attempt restore (do NOT overwrite LS before reading)
     const hist = loadHistoryFromStorage();
     const items = loadItemsFromStorage();
 
@@ -530,7 +531,6 @@ POLICY (LÅST):
       }
     }
 
-    // 3) Markera restore/baseline i history (och persist)
     if (hasHist || hasItems) {
       _state.history.unshift({
         id: uid("h"),
@@ -541,13 +541,11 @@ POLICY (LÅST):
       });
       if (_state.history.length > 500) _state.history.length = 500;
 
-      // Persist sanerad version
       persistHistoryToStorage();
       persistItemsToStorage();
       return true;
     }
 
-    // 4) Empty baseline (första gången)
     _state.history = [];
     _state.items = [];
 
@@ -609,6 +607,9 @@ POLICY (LÅST):
     },
 
     setRole(role) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
+
       const next = normalizeRole(role);
       _state.role = next;
 
@@ -634,11 +635,9 @@ POLICY (LÅST):
       if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
       if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
 
-      // Rensa lokal persistens
       removeLS(STORAGE_KEY_HISTORY);
       removeLS(STORAGE_KEY_ITEMS);
 
-      // Nollställ state (men håll roll)
       seedUsers();
       _state.items = [];
       _state.history = [];
@@ -663,6 +662,8 @@ POLICY (LÅST):
     // Suppliers API
     // -----------------------------
     listSuppliers(opts) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return []; // fail-closed
       const includeInactive = !!(opts && opts.includeInactive);
       const list = getSuppliersSnapshotFromHistory();
       const out = includeInactive ? list : list.filter(s => s && s.active !== false);
@@ -822,6 +823,8 @@ POLICY (LÅST):
     // Items API (produkter/masterdata) — persisteras i localStorage
     // -----------------------------
     listItems(opts) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return []; // fail-closed
       const includeInactive = !!(opts && opts.includeInactive);
       const items = Array.isArray(_state.items) ? _state.items : [];
       const out = includeInactive ? items : items.filter(x => x && x.isActive !== false);
@@ -849,14 +852,12 @@ POLICY (LÅST):
         if (!isSupplierActive(supplierId)) return { ok: false, reason: "Leverantören är inaktiv." };
       }
 
-      // Frivilliga fält (normalisering)
       const pricePerKg = normNumOrNull(p.pricePerKg);
       const minLevel = normNumOrNull(p.minLevel);
       const maxLevel = normNumOrNull(p.maxLevel);
       const targetLevel = normNumOrNull(p.targetLevel);
       const lastPrice = normNumOrNull(p.lastPrice);
 
-      // Fail-closed: om fält är ifyllt men inte nummer -> stopp
       if (p.pricePerKg != null && p.pricePerKg !== "" && pricePerKg == null) return { ok: false, reason: "kg/pris (pricePerKg) måste vara ett nummer." };
       if (p.minLevel != null && p.minLevel !== "" && minLevel == null) return { ok: false, reason: "Min-nivå (minLevel) måste vara ett nummer." };
       if (p.maxLevel != null && p.maxLevel !== "" && maxLevel == null) return { ok: false, reason: "Max-nivå (maxLevel) måste vara ett nummer." };
@@ -880,7 +881,6 @@ POLICY (LÅST):
         minLevel: minLevel,
         requiresExpiry: !!p.requiresExpiry,
 
-        // Extra frivilliga fält (styrning/ekonomi/spårbarhet)
         maxLevel: maxLevel,
         targetLevel: targetLevel,
         lastPrice: lastPrice,
@@ -892,8 +892,6 @@ POLICY (LÅST):
       };
 
       _state.items.push(it);
-
-      // PERSIST items
       persistItemsToStorage();
 
       addHistory("item", "Item skapad.", { articleNo, supplierId: supplierId || "" });
@@ -970,7 +968,6 @@ POLICY (LÅST):
       if ("lastSupplierRef" in p) it.lastSupplierRef = String(p.lastSupplierRef || "").trim();
       if ("lastInventoryAt" in p) it.lastInventoryAt = String(p.lastInventoryAt || "").trim();
 
-      // PERSIST items
       persistItemsToStorage();
 
       addHistory("item", "Item uppdaterad.", { articleNo: id, supplierId: String(it.supplierId || "") });
@@ -989,8 +986,6 @@ POLICY (LÅST):
       if (!it) return { ok: false, reason: "Item hittades inte." };
 
       it.isActive = false;
-
-      // PERSIST items
       persistItemsToStorage();
 
       addHistory("item", "Item arkiverad.", { articleNo: id });
@@ -1009,8 +1004,6 @@ POLICY (LÅST):
       if (idx < 0) return { ok: false, reason: "Item hittades inte." };
 
       _state.items.splice(idx, 1);
-
-      // PERSIST items
       persistItemsToStorage();
 
       addHistory("item", "Item raderad.", { articleNo: id });
@@ -1019,14 +1012,17 @@ POLICY (LÅST):
     },
 
     // -----------------------------
-    // Stock API (lagersaldo) — events i history (ingen ny state-nyckel, ingen ny storage-key)
+    // Stock API (lagersaldo) — events i history
     // -----------------------------
     listStock() {
-      // Returnerar snapshot för allt som har stock events
+      const st = FreezerStore.getStatus();
+      if (st.locked) return []; // fail-closed
       return safeClone(getStockSnapshotFromHistory());
     },
 
     getStock(articleNo) {
+      const st = FreezerStore.getStatus();
+      if (st.locked) return null; // fail-closed
       const id = normStr(articleNo);
       if (!id) return null;
       const snap = getStockSnapshotFromHistory();
@@ -1042,7 +1038,6 @@ POLICY (LÅST):
       const articleNo = normStr(p.articleNo);
       if (!articleNo) return { ok: false, reason: "articleNo krävs." };
 
-      // Fail-closed: artikel måste finnas i produktregistret
       const it = getItemByArticleNo(articleNo);
       if (!it) return { ok: false, reason: "Okänt artikelnummer (skapa produkt först)." };
 
@@ -1050,7 +1045,7 @@ POLICY (LÅST):
       if (delta == null || delta === 0) return { ok: false, reason: "delta måste vara ett heltal (≠ 0)." };
 
       const unit = normStr(p.unit) || normStr(it.unit) || "";
-      const reasonCode = normStr(p.reasonCode); // ex: INLEVERANS / UTTAG / INVENTERING / KORRIGERING
+      const reasonCode = normStr(p.reasonCode);
       const note = normStr(p.note);
       const ref = normStr(p.ref);
 
@@ -1098,7 +1093,6 @@ POLICY (LÅST):
         ref
       });
 
-      // (valfritt men nyttigt) uppdatera lastInventoryAt om man anger reasonCode INVENTERING
       try {
         if (reasonCode.toUpperCase() === "INVENTERING") {
           it.lastInventoryAt = nowIso();
@@ -1125,21 +1119,8 @@ POLICY (LÅST):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Fixade init så den inte skriver över localStorage innan restore (tidigare kunde history/items nollas).
-2) Behöll samma storage-keys: FRZ_DEMO_HISTORY_V1 + FRZ_DEMO_ITEMS_V1.
-3) Lagersaldo implementerat som history-events (type:"stock") → ingen ny state-nyckel.
-4) Nya API: listStock(), getStock(), adjustStock(), setStock().
-5) Fail-closed: stock kräver att artikel finns i items (skapa produkt först).
-6) Items utökade med frivilliga fält (max/target/lastPrice/lastInventoryAt) + sanering.
-7) Persist: history persisteras alltid via addHistory(); items persisteras vid create/update/archive/delete.
-8) ResetDemo rensar båda keys och skapar ny baseline.
-
-TESTNOTERINGAR (3–10)
-- Skapa leverantör → reload → leverantör kvar.
-- Skapa produkt (artikelnummer) → reload → produkt kvar.
-- adjustStock({articleNo, delta:+5, reasonCode:"INLEVERANS"}) → listStock() visar onHand=5.
-- adjustStock({articleNo, delta:-2, reasonCode:"UTTAG"}) → onHand=3.
-- setStock({articleNo, qty:10, reasonCode:"INVENTERING"}) → onHand=10 + item.lastInventoryAt sätts.
-- Försök adjustStock med okänt artikelNo → fail-closed fel.
-- SYSTEM_ADMIN-roll: adjustStock/setStock/createItem/createSupplier ska blockas (read-only).
+1) P0: Store startar nu i LOCKED=FRZ_E_NOT_INIT (fail-closed) tills init() körs.
+2) Detta fixar buyer-sidans “init-skip” där controller annars trodde att store redan var initad.
+3) Ingen ny state-nyckel lades till; endast defaultvärden för locked/reason ändrades.
+4) setRole() blockas om store är låst (fail-closed, förhindrar felaktig persist före init).
 ============================================================ */
