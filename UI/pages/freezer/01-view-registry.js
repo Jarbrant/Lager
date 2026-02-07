@@ -12,6 +12,10 @@ BUYER (EXAKT 4 rutor i meny, enligt shell/krav):
   3) Lägga in produkter (INLEVERANS via store.adjustStock + produktlista + saldo)
   4) Sök Leverantör (inline)
 
+PATCH i denna version:
+- P0: Ta bort dubbel “Stäng” i modal (vyn renderar inte egen Stäng-knapp i modal-läge).
+- UX: Tydlig grön “sparad”-rad vid lyckad leverantörssparning (nära knapparna).
+
 POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell i UI
 - XSS-safe: endast createElement + textContent
@@ -246,31 +250,34 @@ function defineModalOrInlineView(spec) {
       inlineBox.style.borderRadius = "12px";
       inlineBox.style.padding = "12px";
 
-      function renderInto(target) {
+      function renderInto(target, mode) {
         try {
           clear(target);
-          spec.renderBody(target, { root, ctx, state: {} });
+          spec.renderBody(target, { root, ctx, state: {}, mode: mode || "inline" });
         } catch {}
       }
 
       const res = tryOpenModalWithRender(title, (modalBody) => {
-        renderInto(modalBody);
+        renderInto(modalBody, "modal");
         try { root.__frzModalBody = modalBody; } catch {}
+        try { root.__frzModalMode = "modal"; } catch {}
       }, () => {});
 
       if (res && res.ok) {
         try { root.__frzModalCtrl = res.ctrl; } catch {}
+        try { root.__frzModalMode = "modal"; } catch {}
         clear(root);
         return;
       }
 
       clear(root);
       root.appendChild(inlineBox);
-      renderInto(inlineBox);
+      renderInto(inlineBox, "inline");
 
       try {
         root.__frzModalCtrl = null;
         root.__frzModalBody = inlineBox;
+        root.__frzModalMode = "inline";
       } catch {}
     },
 
@@ -282,15 +289,17 @@ function defineModalOrInlineView(spec) {
       try {
         delete root.__frzModalCtrl;
         delete root.__frzModalBody;
+        delete root.__frzModalMode;
       } catch {}
     },
 
     render: ({ root, state, ctx }) => {
       try {
         const body = root.__frzModalBody;
+        const mode = root.__frzModalMode || "inline";
         if (body && body instanceof HTMLElement) {
           clear(body);
-          spec.renderBody(body, { root, state: state || {}, ctx });
+          spec.renderBody(body, { root, state: state || {}, ctx, mode });
           return;
         }
       } catch {}
@@ -301,7 +310,7 @@ function defineModalOrInlineView(spec) {
       box.style.border = "1px solid #e6e6e6";
       box.style.borderRadius = "12px";
       box.style.padding = "12px";
-      try { spec.renderBody(box, { root, state: state || {}, ctx }); } catch {}
+      try { spec.renderBody(box, { root, state: state || {}, ctx, mode: "inline" }); } catch {}
       root.appendChild(box);
     }
   });
@@ -673,6 +682,7 @@ const buyerSupplierNew = defineModalOrInlineView({
 
   renderBody: (root, args) => {
     const ctx = (args && args.ctx) ? args.ctx : {};
+    const mode = (args && args.mode) ? String(args.mode) : "inline";
     const store = ctx && ctx.store ? ctx.store : (window.FreezerStore || null);
 
     const head = el("div", null, null);
@@ -685,22 +695,26 @@ const buyerSupplierNew = defineModalOrInlineView({
     h.style.margin = "0";
     h.style.flex = "1";
 
-    const closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.textContent = "Stäng";
-    closeBtn.style.border = "1px solid #e6e6e6";
-    closeBtn.style.background = "#fff";
-    closeBtn.style.borderRadius = "10px";
-    closeBtn.style.padding = "8px 10px";
-    closeBtn.style.cursor = "pointer";
-    closeBtn.addEventListener("click", () => {
-      try {
-        if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close();
-      } catch {}
-    });
-
-    head.appendChild(h);
-    head.appendChild(closeBtn);
+    // P0: Ingen dubbel "Stäng" i modal (modal-shellen har egen stäng-knapp)
+    if (mode !== "modal") {
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.textContent = "Stäng";
+      closeBtn.style.border = "1px solid #e6e6e6";
+      closeBtn.style.background = "#fff";
+      closeBtn.style.borderRadius = "10px";
+      closeBtn.style.padding = "8px 10px";
+      closeBtn.style.cursor = "pointer";
+      closeBtn.addEventListener("click", () => {
+        try {
+          if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close();
+        } catch {}
+      });
+      head.appendChild(h);
+      head.appendChild(closeBtn);
+    } else {
+      head.appendChild(h);
+    }
 
     const note = el("div", "muted", "Företagsnamn krävs. Övriga fält är valfria.");
     note.style.margin = "0 0 12px 0";
@@ -724,6 +738,7 @@ const buyerSupplierNew = defineModalOrInlineView({
     actions.style.gap = "10px";
     actions.style.marginTop = "12px";
     actions.style.alignItems = "center";
+    actions.style.flexWrap = "wrap";
 
     const saveBtn = document.createElement("button");
     saveBtn.type = "submit";
@@ -744,6 +759,36 @@ const buyerSupplierNew = defineModalOrInlineView({
     resetBtn.style.padding = "10px 12px";
     resetBtn.style.cursor = "pointer";
 
+    // UX: tydlig grön statusrad nära knapparna (inte bara i msgBox)
+    const savedLine = el("div", null, "");
+    savedLine.style.marginLeft = "6px";
+    savedLine.style.fontSize = "13px";
+    savedLine.style.fontWeight = "700";
+    savedLine.style.color = "#1f7a2e";     // grön text
+    savedLine.style.whiteSpace = "nowrap";
+
+    function clearSavedLine() {
+      try { savedLine.textContent = ""; } catch {}
+    }
+    function setSavedLine(text) {
+      try { savedLine.textContent = safeStr(text || ""); } catch {}
+    }
+
+    function attachClearOnInput(inputEl) {
+      try {
+        if (!inputEl || typeof inputEl.addEventListener !== "function") return;
+        inputEl.addEventListener("input", () => clearSavedLine());
+      } catch {}
+    }
+
+    attachClearOnInput(rCompany.input);
+    attachClearOnInput(rOrg.input);
+    attachClearOnInput(rContact.input);
+    attachClearOnInput(rPhone.input);
+    attachClearOnInput(rEmail.input);
+    attachClearOnInput(rAddr.input);
+    attachClearOnInput(rNotes.textarea);
+
     resetBtn.addEventListener("click", () => {
       try {
         rCompany.input.value = "";
@@ -754,12 +799,14 @@ const buyerSupplierNew = defineModalOrInlineView({
         rAddr.input.value = "";
         rNotes.textarea.value = "";
         clear(msgBox);
+        clearSavedLine();
         rCompany.input.focus();
       } catch {}
     });
 
     actions.appendChild(saveBtn);
     actions.appendChild(resetBtn);
+    actions.appendChild(savedLine);
 
     if (!store || typeof store.createSupplier !== "function") {
       msgBox.appendChild(pill("FreezerStore saknas eller stöd för createSupplier() finns inte. Kontrollera att 03-store.js laddas före registry/controller.", "err"));
@@ -782,6 +829,7 @@ const buyerSupplierNew = defineModalOrInlineView({
     form.addEventListener("submit", (ev) => {
       ev.preventDefault();
       clear(msgBox);
+      clearSavedLine();
 
       const companyName = safeStr(rCompany.input.value).trim();
       if (!companyName) {
@@ -816,6 +864,10 @@ const buyerSupplierNew = defineModalOrInlineView({
           return;
         }
 
+        // Tydlig grön bekräftelse nära knapparna
+        setSavedLine("✓ Leverantör sparad");
+
+        // (behåll även msgBox för konsistens, men ok att du ser direkt i actions-raden)
         msgBox.appendChild(pill("Leverantör sparad.", "ok"));
 
         try {
@@ -866,6 +918,7 @@ const buyerItemNew = defineModalOrInlineView({
 
   renderBody: (root, args) => {
     const ctx = (args && args.ctx) ? args.ctx : {};
+    const mode = (args && args.mode) ? String(args.mode) : "inline";
     const store = ctx && ctx.store ? ctx.store : (window.FreezerStore || null);
 
     const head = el("div", null, null);
@@ -878,22 +931,27 @@ const buyerItemNew = defineModalOrInlineView({
     h.style.margin = "0";
     h.style.flex = "1";
 
-    const closeBtn = document.createElement("button");
-    closeBtn.type = "button";
-    closeBtn.textContent = "Stäng";
-    closeBtn.style.border = "1px solid #e6e6e6";
-    closeBtn.style.background = "#fff";
-    closeBtn.style.borderRadius = "10px";
-    closeBtn.style.padding = "8px 10px";
-    closeBtn.style.cursor = "pointer";
-    closeBtn.addEventListener("click", () => {
-      try {
-        if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close();
-      } catch {}
-    });
+    // P0: Ingen dubbel "Stäng" i modal
+    if (mode !== "modal") {
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.textContent = "Stäng";
+      closeBtn.style.border = "1px solid #e6e6e6";
+      closeBtn.style.background = "#fff";
+      closeBtn.style.borderRadius = "10px";
+      closeBtn.style.padding = "8px 10px";
+      closeBtn.style.cursor = "pointer";
+      closeBtn.addEventListener("click", () => {
+        try {
+          if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close();
+        } catch {}
+      });
 
-    head.appendChild(h);
-    head.appendChild(closeBtn);
+      head.appendChild(h);
+      head.appendChild(closeBtn);
+    } else {
+      head.appendChild(h);
+    }
 
     const note = el("div", "muted",
       "Artikelnummer krävs. Allt annat är frivilligt. Leverantör kan lämnas tom."
@@ -1767,17 +1825,16 @@ try {
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) BUYER-stock-in: lade till sökfält för produkt (artikelnummer/namn) som filtrerar dropdown.
-2) BUYER-stock-in: bytte “Antal (heltal)” → “Antal kg” (decimal tillåten) som lagerdelta.
-3) BUYER-stock-in: lade till “Antal kartonger/kolli” (valfritt) sparas i note som text (ingen ny datamodell).
-4) BUYER-stock-in: lade till toggle “Visa/Dölj lagersaldo” så saldo kan visas stabilt och inte upplevs försvinna.
-5) Fortsatt policy: UI-only, XSS-safe, inga nya storage-keys/datamodell.
+1) P0: defineModalOrInlineView skickar nu args.mode = "modal"/"inline" till renderBody och sparar __frzModalMode.
+2) P0: Ny Leverantör & Ny produkt visar inte egen “Stäng”-knapp när mode === "modal" → ingen dubbel “Stäng”.
+3) UX: Ny Leverantör visar tydlig grön “✓ Leverantör sparad” nära knapparna vid lyckad sparning.
+4) UX: Grön “sparad”-rad nollas vid input/rensa för att undvika falsk trygghet.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
-- Sök produkt: skriv “100” eller namn → dropdown ska bli kortare.
-- Välj produkt → Antal kg 10,5 → Spara → saldo uppdateras.
-- Sätt Antal kartonger 3 → Spara → note ska innehålla “KOLLI: 3 …”.
-- Klicka “Dölj lagersaldo” / “Visa lagersaldo” → saldo ska togglas utan att krascha.
+- Öppna “Ny Leverantör” i modal: ska bara finnas EN “Stäng” (modalens).
+- Spara leverantör: ska visa grön “✓ Leverantör sparad” direkt vid knapparna.
+- Börja skriva i fält efter sparning: den gröna texten ska försvinna.
+- Öppna “Ny produkt” i modal: ska bara finnas EN “Stäng” (modalens).
 ============================================================ */
