@@ -13,25 +13,12 @@ P0 SUPPLIERS:
   -> listSuppliers() bygger listan från history
 - När supplier skapas/uppdateras -> notify() -> UI kan rendera direkt.
 
-AUTOPATCH v1.3.1 — P0 HYDRATE-GUARD (buyer init-skip fix):
-- Store startar i LOCKED=FRZ_E_NOT_INIT tills init() körs.
-- Detta gör att buyer-controller INTE kan “tro” att store redan är initad.
-- Inga nya storage-keys, ingen ny top-level state-nyckel.
-
-AUTOPATCH v1.3 — LOKAL PERSISTENS + LAGERSALDO (utan ny state-nyckel):
+AUTOPATCH v1.4 — P0 INIT-GUARD (utan nya storage keys/state keys):
+- P0: Store startar LOCKED (FRZ_E_NOT_INIT) tills init() körs.
+  Detta förhindrar att controller tror att store redan är initad.
 - history (leverantörer + lagersaldo-events): FRZ_DEMO_HISTORY_V1
 - items  (produkter/masterdata):             FRZ_DEMO_ITEMS_V1
 - Lagersaldo byggs från history (event-sourcing): INGA nya storage-keys.
-
-PRODUKTFÄLT (ALLA FRIVILLIGA UTOM articleNo):
-- productName, category, packSize, pricePerKg, unit, tempClass, minLevel,
-  requiresExpiry, ean, notes, location, supplierId, isActive,
-  (extra frivilliga): maxLevel, targetLevel, lastPrice, lastPriceAt, lastSupplierRef, lastInventoryAt
-
-LAGERSALDO (events i history, inga nya state-nycklar):
-- Stock-event: type:"stock" meta:{ action:"adjust"|"set", articleNo, delta?, qty?, unit?, reasonCode?, note?, ref?, at? }
-- listStock() bygger snapshot { articleNo, onHand, unit, updatedAt, lastReasonCode }
-- adjustStock()/setStock() skriver events och persisterar via history-nyckeln.
 
 POLICY (LÅST):
 - Fail-closed
@@ -163,7 +150,7 @@ POLICY (LÅST):
         };
 
         out.push(next);
-        if (out.length >= 2000) break; // rimlig cap i demo
+        if (out.length >= 2000) break;
       }
 
       return out;
@@ -202,9 +189,9 @@ POLICY (LÅST):
   }
 
   function normStr(v) { return String(v == null ? "" : v).trim(); }
-  function normEmail(v) { return normStr(v); }   // fail-soft
-  function normPhone(v) { return normStr(v); }   // fail-soft
-  function normOrg(v) { return normStr(v); }     // valfritt
+  function normEmail(v) { return normStr(v); }
+  function normPhone(v) { return normStr(v); }
+  function normOrg(v) { return normStr(v); }
 
   function normNumOrNull(v) {
     if (v == null || v === "") return null;
@@ -217,8 +204,7 @@ POLICY (LÅST):
     if (v == null || v === "") return null;
     const n = Number(v);
     if (!isFinite(n)) return null;
-    const i = Math.trunc(n);
-    return i;
+    return Math.trunc(n);
   }
 
   // ------------------------------------------------------------
@@ -228,9 +214,11 @@ POLICY (LÅST):
 
   const _state = {
     role: "ADMIN",
-    // P0 FAIL-CLOSED: starta låst tills init() körts
+
+    // P0: starta låst tills init() körs
     locked: true,
     reason: "FRZ_E_NOT_INIT",
+
     readOnly: false,
     whyReadOnly: "",
     users: [],
@@ -240,30 +228,10 @@ POLICY (LÅST):
 
   // Permissions per role (baseline)
   const ROLE_PERMS = {
-    ADMIN: {
-      users_manage: true,
-      inventory_write: true,
-      history_write: true,
-      dashboard_view: true
-    },
-    BUYER: {
-      users_manage: false,
-      inventory_write: true,
-      history_write: false,
-      dashboard_view: true
-    },
-    PICKER: {
-      users_manage: false,
-      inventory_write: false,
-      history_write: true,
-      dashboard_view: true
-    },
-    SYSTEM_ADMIN: {
-      users_manage: false,
-      inventory_write: false,
-      history_write: false,
-      dashboard_view: true
-    }
+    ADMIN: { users_manage: true, inventory_write: true, history_write: true, dashboard_view: true },
+    BUYER: { users_manage: false, inventory_write: true, history_write: false, dashboard_view: true },
+    PICKER:{ users_manage: false, inventory_write: false, history_write: true, dashboard_view: true },
+    SYSTEM_ADMIN:{ users_manage: false, inventory_write: false, history_write: false, dashboard_view: true }
   };
 
   function computeReadOnly(role) {
@@ -274,7 +242,7 @@ POLICY (LÅST):
   function notify() {
     const snap = safeClone(_state);
     for (const fn of _subs) {
-      try { fn(snap); } catch { /* ignore */ }
+      try { fn(snap); } catch {}
     }
   }
 
@@ -299,8 +267,6 @@ POLICY (LÅST):
       meta: meta ? safeClone(meta) : null
     });
     if (_state.history.length > 500) _state.history.length = 500;
-
-    // PERSIST history (fail-soft)
     persistHistoryToStorage();
   }
 
@@ -359,7 +325,6 @@ POLICY (LÅST):
     }
 
     const list = Object.values(byId);
-
     list.sort((a, b) => {
       const an = String(a.companyName || "").toLowerCase();
       const bn = String(b.companyName || "").toLowerCase();
@@ -395,7 +360,7 @@ POLICY (LÅST):
     const d = (data && typeof data === "object") ? data : {};
 
     const companyName = normStr(d.companyName);
-    const orgNo = normOrg(d.orgNo); // VALFRITT
+    const orgNo = normOrg(d.orgNo);
 
     if (!companyName) return { ok: false, reason: "Företagsnamn krävs." };
 
@@ -416,10 +381,7 @@ POLICY (LÅST):
       }
     }
 
-    return {
-      ok: true,
-      supplier: { companyName, orgNo, contactPerson, phone, email, address, notes }
-    };
+    return { ok: true, supplier: { companyName, orgNo, contactPerson, phone, email, address, notes } };
   }
 
   // ------------------------------------------------------------
@@ -452,7 +414,6 @@ POLICY (LÅST):
     const byArticle = Object.create(null);
     const hist = Array.isArray(_state.history) ? _state.history : [];
 
-    // process oldest -> newest
     for (let i = hist.length - 1; i >= 0; i--) {
       const ev = hist[i];
       if (!isStockEvent(ev)) continue;
@@ -470,7 +431,7 @@ POLICY (LÅST):
 
       if (action === "set") {
         const qty = normIntOrNull(m.qty);
-        if (qty == null) continue; // fail-closed: ignorera korrupt
+        if (qty == null) continue;
         cur.onHand = qty;
       } else if (action === "adjust") {
         const delta = normIntOrNull(m.delta);
@@ -479,7 +440,6 @@ POLICY (LÅST):
       }
 
       if (unit) cur.unit = unit;
-
       cur.updatedAt = at;
       cur.lastReasonCode = reasonCode || cur.lastReasonCode || "";
 
@@ -521,7 +481,6 @@ POLICY (LÅST):
     _state.history = hasHist ? hist.slice(0, 500) : [];
     _state.items = hasItems ? items.slice(0, 2000) : [];
 
-    // Fail-closed: om item.supplierId pekar på okänd leverantör -> blankas
     if (_state.items.length > 0) {
       for (let i = 0; i < _state.items.length; i++) {
         const it = _state.items[i];
@@ -607,9 +566,6 @@ POLICY (LÅST):
     },
 
     setRole(role) {
-      const st = FreezerStore.getStatus();
-      if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
-
       const next = normalizeRole(role);
       _state.role = next;
 
@@ -662,8 +618,6 @@ POLICY (LÅST):
     // Suppliers API
     // -----------------------------
     listSuppliers(opts) {
-      const st = FreezerStore.getStatus();
-      if (st.locked) return []; // fail-closed
       const includeInactive = !!(opts && opts.includeInactive);
       const list = getSuppliersSnapshotFromHistory();
       const out = includeInactive ? list : list.filter(s => s && s.active !== false);
@@ -820,11 +774,9 @@ POLICY (LÅST):
     },
 
     // -----------------------------
-    // Items API (produkter/masterdata) — persisteras i localStorage
+    // Items API (produkter/masterdata)
     // -----------------------------
     listItems(opts) {
-      const st = FreezerStore.getStatus();
-      if (st.locked) return []; // fail-closed
       const includeInactive = !!(opts && opts.includeInactive);
       const items = Array.isArray(_state.items) ? _state.items : [];
       const out = includeInactive ? items : items.filter(x => x && x.isActive !== false);
@@ -1012,17 +964,11 @@ POLICY (LÅST):
     },
 
     // -----------------------------
-    // Stock API (lagersaldo) — events i history
+    // Stock API (events i history)
     // -----------------------------
-    listStock() {
-      const st = FreezerStore.getStatus();
-      if (st.locked) return []; // fail-closed
-      return safeClone(getStockSnapshotFromHistory());
-    },
+    listStock() { return safeClone(getStockSnapshotFromHistory()); },
 
     getStock(articleNo) {
-      const st = FreezerStore.getStatus();
-      if (st.locked) return null; // fail-closed
       const id = normStr(articleNo);
       if (!id) return null;
       const snap = getStockSnapshotFromHistory();
@@ -1049,16 +995,7 @@ POLICY (LÅST):
       const note = normStr(p.note);
       const ref = normStr(p.ref);
 
-      addHistory("stock", "Lagersaldo ändrat.", {
-        action: "adjust",
-        articleNo,
-        delta,
-        unit,
-        reasonCode,
-        note,
-        ref
-      });
-
+      addHistory("stock", "Lagersaldo ändrat.", { action: "adjust", articleNo, delta, unit, reasonCode, note, ref });
       notify();
       return { ok: true };
     },
@@ -1083,15 +1020,7 @@ POLICY (LÅST):
       const note = normStr(p.note);
       const ref = normStr(p.ref);
 
-      addHistory("stock", "Lagersaldo satt.", {
-        action: "set",
-        articleNo,
-        qty,
-        unit,
-        reasonCode,
-        note,
-        ref
-      });
+      addHistory("stock", "Lagersaldo satt.", { action: "set", articleNo, qty, unit, reasonCode, note, ref });
 
       try {
         if (reasonCode.toUpperCase() === "INVENTERING") {
@@ -1115,12 +1044,18 @@ POLICY (LÅST):
   // Expose (P0)
   // ------------------------------------------------------------
   window.FreezerStore = FreezerStore;
+
 })();
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Store startar nu i LOCKED=FRZ_E_NOT_INIT (fail-closed) tills init() körs.
-2) Detta fixar buyer-sidans “init-skip” där controller annars trodde att store redan var initad.
-3) Ingen ny state-nyckel lades till; endast defaultvärden för locked/reason ändrades.
-4) setRole() blockas om store är låst (fail-closed, förhindrar felaktig persist före init).
+1) P0: Store startar LOCKED (FRZ_E_NOT_INIT) tills init() körs → controller kan inte felaktigt hoppa över init/hydrate.
+2) Inga nya storage keys, inga nya top-level state-nycklar.
+============================================================ */
+
+/* ============================================================
+TESTNOTERINGAR (3–10)
+- Öppna buyer/freezer.html → kör: window.FreezerStore.getStatus() före init (ska visa locked:true).
+- Efter att sidan laddat: window.FreezerStore.getStatus() (ska visa locked:false).
+- Skapa leverantör → reload → window.FreezerStore.listSuppliers() ska visa leverantören.
 ============================================================ */
