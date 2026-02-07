@@ -16,6 +16,10 @@ KRAV:
 - ModalShell laddas som vanlig <script> så window.FreezerModal finns.
 - ESM-moduler laddas som type="module" (view-interface/registry/vyer).
 - P0: buyer-controller måste INTE köra före registry -> använd defer.
+
+P0-FIX (denna patch):
+- BUYER-sidan måste initiera FreezerStore (role=BUYER) efter att 03-store.js laddats,
+  annars hydreras inte items/history från localStorage och state blir tom efter reload.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -146,13 +150,35 @@ KRAV:
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
+  Core → Contract → Store → (INIT BUYER ROLE) → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
   =========================================================== -->
 
   <!-- Core -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
+
+  <!-- Store (MÅSTE skapa window.FreezerStore) -->
   <script src="../UI/pages/freezer/03-store.js"></script>
+
+  <!-- P0: INIT STORE (BUYER) — behövs för hydrate från localStorage vid reload -->
+  <script>
+    (function () {
+      "use strict";
+      try {
+        var S = window.FreezerStore;
+        if (S && typeof S.init === "function") {
+          // Fail-soft: initierar store med rätt roll så items/history hydreras.
+          // Inga nya storage-keys/datamodell.
+          window.__FRZ_BUYER_INIT__ = S.init({ role: "BUYER" });
+        } else {
+          // Fail-soft: buyer-controller kommer ändå visa lås/fallback om store saknas.
+          try { console.warn("FRZ: FreezerStore saknas eller init() saknas."); } catch {}
+        }
+      } catch (e) {
+        try { console.warn("FRZ: FreezerStore.init error", e); } catch {}
+      }
+    })();
+  </script>
 
   <!-- Render + dash (status/mode/lock/debug) -->
   <script src="../UI/freezer-render.js"></script>
