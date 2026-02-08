@@ -275,6 +275,7 @@ function formatDateTime(ts) {
 
 /* =========================
 BLOCK 1.1 — Modal helper (fail-soft)
+(behålls för framtida wiring, men används INTE auto i mount)
 ========================= */
 
 function tryOpenModalWithRender(title, renderFn, onClose) {
@@ -309,10 +310,14 @@ function tryOpenModalWithRender(title, renderFn, onClose) {
   }
 }
 
+/*
+P0-FIX:
+defineModalOrInlineView() öppnade tidigare modal direkt i mount() => auto-pop vid page-load.
+Nu: mount/render kör alltid INLINE. (Ingen auto-open.)
+*/
 function defineModalOrInlineView(spec) {
   const id = String(spec.id || "").trim();
   const label = String(spec.label || id).trim();
-  const title = String(spec.title || label).trim();
 
   return defineView({
     id,
@@ -326,56 +331,29 @@ function defineModalOrInlineView(spec) {
       inlineBox.style.borderRadius = "12px";
       inlineBox.style.padding = "12px";
 
-      function renderInto(target, mode) {
-        try {
-          clear(target);
-          spec.renderBody(target, { root, ctx, state: {}, mode: mode || "inline" });
-        } catch {}
-      }
-
-      const res = tryOpenModalWithRender(title, (modalBody) => {
-        renderInto(modalBody, "modal");
-        try { root.__frzModalBody = modalBody; } catch {}
-        try { root.__frzModalMode = "modal"; } catch {}
-      }, () => {});
-
-      if (res && res.ok) {
-        try { root.__frzModalCtrl = res.ctrl; } catch {}
-        try { root.__frzModalMode = "modal"; } catch {}
-        clear(root);
-        return;
-      }
-
       clear(root);
       root.appendChild(inlineBox);
-      renderInto(inlineBox, "inline");
 
       try {
-        root.__frzModalCtrl = null;
-        root.__frzModalBody = inlineBox;
-        root.__frzModalMode = "inline";
+        root.__frzInlineBody = inlineBox;
+      } catch {}
+
+      try {
+        clear(inlineBox);
+        spec.renderBody(inlineBox, { root, ctx, state: {}, mode: "inline" });
       } catch {}
     },
 
     unmount: ({ root }) => {
-      try {
-        const ctrl = root.__frzModalCtrl;
-        if (ctrl && typeof ctrl.close === "function") ctrl.close();
-      } catch {}
-      try {
-        delete root.__frzModalCtrl;
-        delete root.__frzModalBody;
-        delete root.__frzModalMode;
-      } catch {}
+      try { delete root.__frzInlineBody; } catch {}
     },
 
     render: ({ root, state, ctx }) => {
       try {
-        const body = root.__frzModalBody;
-        const mode = root.__frzModalMode || "inline";
+        const body = root.__frzInlineBody;
         if (body && body instanceof HTMLElement) {
           clear(body);
-          spec.renderBody(body, { root, state: state || {}, ctx, mode });
+          spec.renderBody(body, { root, state: state || {}, ctx, mode: "inline" });
           return;
         }
       } catch {}
@@ -388,6 +366,8 @@ function defineModalOrInlineView(spec) {
       box.style.padding = "12px";
       try { spec.renderBody(box, { root, state: state || {}, ctx, mode: "inline" }); } catch {}
       root.appendChild(box);
+
+      try { root.__frzInlineBody = box; } catch {}
     }
   });
 }
@@ -768,23 +748,8 @@ const buyerSupplierNew = defineModalOrInlineView({
     h.style.margin = "0";
     h.style.flex = "1";
 
-    if (mode !== "modal") {
-      const closeBtn = document.createElement("button");
-      closeBtn.type = "button";
-      closeBtn.textContent = "Stäng";
-      closeBtn.style.border = "1px solid #e6e6e6";
-      closeBtn.style.background = "#fff";
-      closeBtn.style.borderRadius = "10px";
-      closeBtn.style.padding = "8px 10px";
-      closeBtn.style.cursor = "pointer";
-      closeBtn.addEventListener("click", () => {
-        try { if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close(); } catch {}
-      });
-      head.appendChild(h);
-      head.appendChild(closeBtn);
-    } else {
-      head.appendChild(h);
-    }
+    // NOTE: mode kan vara "inline" eller "modal" men vi kör inline som standard.
+    head.appendChild(h);
 
     const note = el("div", "muted", "Företagsnamn krävs. Övriga fält är valfria.");
     note.style.margin = "0 0 12px 0";
@@ -957,6 +922,8 @@ const buyerSupplierNew = defineModalOrInlineView({
     root.appendChild(note);
     root.appendChild(form);
     root.appendChild(msgBox);
+
+    void mode;
   }
 });
 
@@ -984,25 +951,7 @@ const buyerItemNew = defineModalOrInlineView({
     const h = el("h3", null, "Registrera ny produkt");
     h.style.margin = "0";
     h.style.flex = "1";
-
-    if (mode !== "modal") {
-      const closeBtn = document.createElement("button");
-      closeBtn.type = "button";
-      closeBtn.textContent = "Stäng";
-      closeBtn.style.border = "1px solid #e6e6e6";
-      closeBtn.style.background = "#fff";
-      closeBtn.style.borderRadius = "10px";
-      closeBtn.style.padding = "8px 10px";
-      closeBtn.style.cursor = "pointer";
-      closeBtn.addEventListener("click", () => {
-        try { if (window.FreezerModal && typeof window.FreezerModal.close === "function") window.FreezerModal.close(); } catch {}
-      });
-
-      head.appendChild(h);
-      head.appendChild(closeBtn);
-    } else {
-      head.appendChild(h);
-    }
+    head.appendChild(h);
 
     const note = el("div", "muted", "Artikelnummer krävs. Allt annat är frivilligt. Leverantör kan lämnas tom.");
     note.style.margin = "0 0 12px 0";
@@ -1200,6 +1149,8 @@ const buyerItemNew = defineModalOrInlineView({
 
     root.appendChild(form);
     root.appendChild(msgBox);
+
+    void mode;
   }
 });
 
@@ -1794,15 +1745,14 @@ try {
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Fixade crash: exports (buyerViews etc) deklareras först och fylls efter vy-definitions (ingen buyerStockIn ReferenceError).
-2) BUYER-menyn är nu 5 rutor: + Lagersaldo (buyer-saldo).
-3) Registry sätter nu alltid window.FreezerViewRegistry om modulen laddas utan crash.
+1) P0: defineModalOrInlineView öppnar inte längre modal automatiskt i mount() (stoppar auto-pop vid page-load).
+2) Behåller modal-helpers för framtida wiring utan att påverka runtime.
+3) Övrigt oförändrat: vyer, exports, registry-bridge, buyerViews=5.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (klicktest)
 - Reload buyer/freezer.html:
-  - Console ska INTE visa "buyerStockIn is not defined".
-  - window.FreezerViewRegistry ska vara ett objekt.
+  - INGEN modal ska poppa automatiskt vid load.
   - window.FreezerViewRegistry.getViewsForRole("buyer").length === 5
 ============================================================ */
