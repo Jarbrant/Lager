@@ -6,12 +6,10 @@ Syfte (AO-LOGIN-01):
 - Session-guard för admin-sidan:
   - Kräver FRZ_SESSION_V1 (sessionStorage-first, localStorage fallback)
   - Fail-closed: om saknas/utgången/ej ADMIN -> redirect till ../index.html
-- Synka UI så ADMIN-sida inte kan växlas till BUYER/PICKER via demo-select.
 
 OBS:
 - Detta är UI-only demo-login (inte riktig säkerhet).
 - Inga nya storage keys/datamodell i denna fil.
-
 ============================================================ */
 
 /* ============================================================
@@ -26,12 +24,10 @@ AO-15/15 — QA-stabilisering:
 - Korrupt storage -> read-only men navigation funkar (shim-store fail-soft)
 - Robust scope-guard + readVal
 
-P0 FIX (DENNA PATCH):
-- BUYER (INKÖPARE) ska ha egen sida: Lager/buyer/freezer.html
-- När man väljer roll=BUYER i admin-sidan -> redirect direkt till buyer-sidan.
-- Undvik dubbel-navigering: om legacy-tabs finns (Dashboard/Saldo/Historik),
-  så ska router-menyn INTE visa "shared-saldo" + "shared-history".
-- Förbättra label: "Inköp • Dashboard" -> "Inköp" (endast UI-text, ingen logik ändras).
+AO-LOGIN-02 (DENNA PATCH) — UI-CLEANUP (Admin topbar):
+- Tar bort all gammal rollväxlar-logik (select + BUYER-redirect etc).
+- Sätter topbar: #frzRoleText = "ADMIN" och #frzUserName från session.
+- Uppdaterar #frzViewHint så mittenytan inte är tom (Dashboard/Saldo/Historik + ev router-vy).
 
 Policy:
 - Inga nya storage-keys/datamodell
@@ -88,22 +84,22 @@ Policy:
 
   function redirectToLogin() {
     // admin/freezer.js ligger i Lager/admin/ -> login i Lager/index.html
-    // relativt: ../index.html
     try { window.location.replace("../index.html"); } catch {
       try { window.location.href = "../index.html"; } catch {}
     }
   }
 
   // P0: Guard direkt vid start (innan store/init/render)
+  let sessionView = { ok: false, role: "ADMIN", firstName: "" };
   (function guardNow() {
     const sess = readSession();
     const v = isSessionValidAndAdmin(sess);
     if (!v.ok) {
-      // fail-closed: rensa vid EXPIRED/BAD_SESSION (men inte nödvändigt vid NO_SESSION)
       if (v.reason === "EXPIRED" || v.reason === "BAD_SESSION") clearSession();
       redirectToLogin();
       return;
     }
+    sessionView = v;
   })();
 
   // ------------------------------------------------------------
@@ -115,12 +111,18 @@ Policy:
   }
   window.__FRZ_ADMIN_PAGE_INIT__ = true;
 
+  function byId(id) { return document.getElementById(id); }
+
   const tabDashboard = byId("tabDashboard");
   const tabSaldo = byId("tabSaldo");
   const tabHistorik = byId("tabHistorik");
 
-  const userSelect = byId("frzUserSelect");
   const resetBtn = byId("frzResetDemoBtn");
+
+  // AO-LOGIN-02: topbar locked labels
+  const roleText = byId("frzRoleText");
+  const userNameText = byId("frzUserName");
+  const viewHint = byId("frzViewHint");
 
   // Router shell (AO-11)
   const viewMenu = byId("freezerViewMenu");
@@ -147,68 +149,41 @@ Policy:
   const cbDashView = byId("perm_dashboard_view");
 
   // ------------------------------------------------------------
-  // AO-LOGIN-01: Lås roll på admin-sidan till ADMIN (sessionstyrd)
+  // AO-LOGIN-02: TOPBAR SYNC (roll + namn)
   // ------------------------------------------------------------
-  function enforceAdminRoleUI() {
-    try {
-      const sess = readSession();
-      const v = isSessionValidAndAdmin(sess);
-      if (!v.ok) {
-        redirectToLogin();
-        return false;
-      }
-      if (userSelect) {
-        // lås select till ADMIN i admin-sidan
-        userSelect.value = "ADMIN";
-        userSelect.disabled = true;
-        userSelect.setAttribute("aria-disabled", "true");
-        userSelect.title = "Roll styrs av inloggning (ADMIN).";
-      }
-      return true;
-    } catch {
+  function syncTopbarIdentity() {
+    const sess = readSession();
+    const v = isSessionValidAndAdmin(sess);
+    if (!v.ok) {
       redirectToLogin();
       return false;
     }
-  }
 
-  // kör direkt efter att userSelect finns
-  enforceAdminRoleUI();
+    // Låst roll i admin-vy
+    if (roleText) roleText.textContent = "ADMIN";
+
+    // Namn från session
+    if (userNameText) userNameText.textContent = String(v.firstName || "—");
+
+    return true;
+  }
+  syncTopbarIdentity();
 
   // ------------------------------------------------------------
-  // P0: ROLE -> PAGE ROUTING (Admin -> Buyer)
-  // MAPP: Lager/buyer/freezer.html
-  // Denna fil ligger i: Lager/admin/freezer.js
+  // AO-LOGIN-02: VIEW HINT (fyll “tom yta”)
   // ------------------------------------------------------------
-  const ROLE_PAGE = {
-    BUYER: "../buyer/freezer.html",     // från Lager/admin/ -> Lager/buyer/
-    ADMIN: "./freezer.html",            // här
-    PICKER: "./freezer.html",
-    SYSTEM_ADMIN: "./freezer.html"
-  };
-
-  function normalizeRoleKey(role) {
-    const r = String(role || "").toUpperCase().trim();
-    if (r === "ADMIN" || r === "BUYER" || r === "PICKER" || r === "SYSTEM_ADMIN") return r;
-    return "ADMIN";
+  function setViewHint(text) {
+    if (!viewHint) return;
+    viewHint.textContent = String(text || "—");
   }
 
-  function navToRolePageIfNeeded(role) {
-    // P0: från admin-sidan ska BUYER alltid till buyer-sidan.
-    const key = normalizeRoleKey(role);
-    const target = ROLE_PAGE[key] || "./freezer.html";
-
-    // Endast redirect om vi faktiskt ska lämna admin-sidan (BUYER)
-    if (key !== "BUYER") return;
-
-    try {
-      // Anti-loop: om vi redan är på buyer-sidan så gör inget.
-      const href = String(window.location.href || "");
-      if (href.includes("/buyer/freezer.html")) return;
-
-      window.location.assign(target);
-    } catch {
-      // fail-soft: gör inget
-    }
+  function setHintForTab(tabKey) {
+    const map = {
+      dashboard: "Vy: Dashboard",
+      saldo: "Vy: Saldo",
+      history: "Vy: Historik"
+    };
+    setViewHint(map[String(tabKey || "")] || "Vy: —");
   }
 
   // Page state
@@ -217,6 +192,7 @@ Policy:
   // AO-11: router state (in-memory)
   let routerActiveViewId = ""; // default: första view i listan
   let routerMountedView = null;
+  let routerActiveLabel = "";  // AO-LOGIN-02: för hint
 
   // AO-04: Items UI state (in-memory only)
   const itemsUI = {
@@ -317,7 +293,6 @@ Policy:
   // ------------------------------------------------------------
   // BOOT
   // ------------------------------------------------------------
-  // AO-LOGIN-01: roll är alltid ADMIN här
   const initialRole = "ADMIN";
 
   // Init store fail-soft
@@ -337,6 +312,9 @@ Policy:
     const s = getStore();
     if (s && typeof s.subscribe === "function") {
       s.subscribe((state) => {
+        // AO-LOGIN-02: håll topbar synkad (om session byts/expirerar)
+        syncTopbarIdentity();
+
         window.FreezerRender.renderAll(state || {}, itemsUI);
         window.FreezerRender.setActiveTabUI(activeTab);
 
@@ -346,6 +324,9 @@ Policy:
         if (usersPanel && !usersPanel.hidden) {
           refreshFormHeader();
         }
+
+        // AO-LOGIN-02: uppdatera hint (tab eller router label)
+        updateHint();
       });
     }
   } catch (e) {
@@ -357,6 +338,9 @@ Policy:
   window.FreezerRender.setActiveTabUI(activeTab);
   refreshFormHeader();
 
+  // Hint initial
+  setHintForTab(activeTab);
+
   // AO-11: init router menu (saldo/historik för alla)
   initRouterMenu();
 
@@ -364,24 +348,6 @@ Policy:
   bindTab(tabDashboard, "dashboard");
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
-
-  // Role select (legacy) — AO-LOGIN-01: låst, men fail-soft om någon tar bort disabled i DOM
-  if (userSelect) {
-    userSelect.addEventListener("change", () => {
-      // AO-LOGIN-01: stäng ned allt annat än ADMIN
-      enforceAdminRoleUI();
-
-      const s = getStore();
-      try {
-        if (!storeCorrupt && s && typeof s.setRole === "function") s.setRole("ADMIN");
-      } catch (e) {
-        markStoreCorrupt(e);
-      }
-
-      initRouterMenu();
-      rerender();
-    });
-  }
 
   // Reset demo
   if (resetBtn) {
@@ -451,7 +417,6 @@ Policy:
 
     const lowered = raw.toLowerCase();
     if (lowered.includes("inköp") && lowered.includes("dashboard")) return "Inköp";
-
     return raw;
   }
 
@@ -501,13 +466,14 @@ Policy:
       b.setAttribute("aria-selected", mi.id === routerActiveViewId ? "true" : "false");
       b.textContent = String(mi.label || mi.id);
       b.addEventListener("click", () => {
-        routerActivateView(mi.id);
+        routerActivateView(mi.id, String(mi.label || mi.id));
       });
       viewMenu.appendChild(b);
     }
 
     if (visible.length) {
-      routerActivateView(routerActiveViewId || visible[0].id || "");
+      const first = visible.find(v => v.id === routerActiveViewId) || visible[0];
+      routerActivateView(first.id || "", String(first.label || first.id || ""));
     } else {
       try {
         if (routerMountedView && typeof routerMountedView.unmount === "function") {
@@ -516,11 +482,13 @@ Policy:
       } catch {}
       routerMountedView = null;
       routerActiveViewId = "";
+      routerActiveLabel = "";
       try { while (viewRoot.firstChild) viewRoot.removeChild(viewRoot.firstChild); } catch {}
+      updateHint();
     }
   }
 
-  function routerActivateView(viewId) {
+  function routerActivateView(viewId, label) {
     const reg = getRegistry();
     if (!viewRoot || !reg || typeof reg.getViewsForRole !== "function") return;
 
@@ -549,6 +517,7 @@ Policy:
 
     routerMountedView = view;
     routerActiveViewId = id;
+    routerActiveLabel = String(label || id || "");
 
     try {
       const btns = viewMenu ? viewMenu.querySelectorAll("button[data-view-id]") : [];
@@ -567,6 +536,7 @@ Policy:
     }
 
     routerRerender();
+    updateHint();
   }
 
   function routerRerender() {
@@ -598,6 +568,25 @@ Policy:
     }
   }
 
+  function updateHint() {
+    // Primärt: tabs (Dashboard/Saldo/Historik). Sekundärt: router (om den används).
+    if (activeTab === "dashboard") setHintForTab("dashboard");
+    else if (activeTab === "saldo") setHintForTab("saldo");
+    else if (activeTab === "history") setHintForTab("history");
+    else setHintForTab(activeTab);
+
+    // Om router har en aktiv vy och vi inte är i dashboard-tab kan vi visa båda
+    if (routerActiveLabel) {
+      // kort, utan att störa: “Vy: Saldo • Router: X”
+      const base = viewHint ? String(viewHint.textContent || "") : "";
+      if (base && base !== "—") {
+        setViewHint(`${base} • Router: ${routerActiveLabel}`);
+      } else {
+        setViewHint(`Router: ${routerActiveLabel}`);
+      }
+    }
+  }
+
   // -----------------------------
   // USERS: FORM (legacy)
   // -----------------------------
@@ -605,6 +594,9 @@ Policy:
     if (saveBtn) {
       saveBtn.addEventListener("click", () => {
         clearUsersMsg();
+
+        // AO-LOGIN-01/02: extra fail-closed om session försvinner
+        if (!syncTopbarIdentity()) return;
 
         const s = getStore();
         const status = safeGetStatus();
@@ -707,6 +699,9 @@ Policy:
 
       const btn = t.closest("button[data-action]");
       if (!btn) return;
+
+      // AO-LOGIN-01/02: extra fail-closed om session försvinner
+      if (!syncTopbarIdentity()) return;
 
       const action = btn.getAttribute("data-action") || "";
       const userId = btn.getAttribute("data-user-id") || "";
@@ -1069,6 +1064,9 @@ Policy:
 
   function rerender() {
     try {
+      // AO-LOGIN-02: fail-closed om session tappas
+      if (!syncTopbarIdentity()) return;
+
       const state = safeGetState();
       window.FreezerRender.renderAll(state, itemsUI);
       window.FreezerRender.setActiveTabUI(activeTab);
@@ -1079,6 +1077,7 @@ Policy:
       window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
 
       routerRerender();
+      updateHint();
     } catch (e) {}
   }
 
@@ -1106,32 +1105,35 @@ Policy:
     if (!btn) return;
     btn.addEventListener("click", () => {
       activeTab = key;
+
       window.FreezerRender.setActiveTabUI(activeTab);
 
       const state = safeGetState();
-
       window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
       window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
       window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
       window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
-
       window.FreezerRender.renderAll(state, itemsUI);
+
+      updateHint();
     });
   }
-
-  function byId(id) { return document.getElementById(id); }
 
 })();
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) AO-LOGIN-01: Session-guard på admin-sidan (FRZ_SESSION_V1) -> ej ADMIN => redirect till ../index.html.
-2) AO-LOGIN-01: Låser frzUserSelect till ADMIN (roll styrs av login).
+1) AO-LOGIN-02: Tog bort all gammal rollväxlarlogik (ingen select, ingen BUYER/PICKER-redirect).
+2) AO-LOGIN-02: Synkar topbar med session: #frzRoleText="ADMIN", #frzUserName=session.firstName.
+3) AO-LOGIN-02: Uppdaterar #frzViewHint vid tab-click och router-aktiv vy.
+4) AO-LOGIN-01: Session-guard kvar (fail-closed) — vid tappad/utgången session redirect till ../index.html.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (3–10)
-- Öppna /admin/freezer.html direkt utan login -> ska redirecta till /index.html.
-- Logga in Admin/1111 -> /admin/freezer.html ska fungera som vanligt.
-- Försök manipulera DOM (enable select) och byta roll -> den ska studsa tillbaka till ADMIN.
+- Öppna /admin/freezer.html utan session -> redirect till /index.html.
+- Logga in Admin/1111 -> topbar visar Roll: ADMIN och Användare: <förnamn>.
+- Ingen roll-dropdown ska finnas eller fungera på admin-sidan.
+- Klicka Dashboard/Saldo/Historik -> frzViewHint uppdateras.
+- Router-meny: om den används, frzViewHint visar även “Router: <label>”.
 ============================================================ */
