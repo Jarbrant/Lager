@@ -4,12 +4,11 @@ Projekt: Fryslager (UI-only / localStorage-first)
 
 Syfte:
 - Inköpare ska ha en egen sida (ingen admin-UI).
-- Visar endast BUYER-rutor (4 st) via router-menyn:
-  Ny Leverantör / Ny produkt / Lägga in produkter / Sök Leverantör
+- Visar BUYER-rutor via router-menyn (byggs av freezer-buyer.js via FreezerViewRegistry).
 
 POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell
-- XSS-safe (render via freezer-render / vyer)
+- XSS-safe (render via vyer)
 - Fail-closed: om registry/router saknas -> visa minimal fallback
 
 KRAV:
@@ -18,8 +17,8 @@ KRAV:
 - P0: buyer-controller får INTE init före ESM registry är redo -> väntar/pollar (i freezer-buyer.js).
 
 P0-FIX (denna patch):
-- Flyttar bort init/hydrate från HTML (fick inte köras före registry).
-- FreezerStore init/hydrate sker nu endast i freezer-buyer.js efter att registry är redo (AO-05/15).
+- Lägger till favicon “data:” för att slippa 404 /favicon.ico i console.
+- Säkrar att BUYER-vyer laddas som ESM-moduler (type="module") så export inte kraschar.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -27,6 +26,9 @@ P0-FIX (denna patch):
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Freezer – Inköpare</title>
+
+  <!-- P0: Stoppa 404 /favicon.ico -->
+  <link rel="icon" href="data:,">
 
   <style>
     :root { color-scheme: light; }
@@ -129,7 +131,7 @@ P0-FIX (denna patch):
 
         <div class="hr"></div>
 
-        <!-- Router-meny (4 rutor för BUYER) -->
+        <!-- Router-meny (byggs av freezer-buyer.js från registry) -->
         <div id="freezerViewMenu" class="tabs" aria-label="Router-meny">
           <!-- fylls av freezer-buyer.js -->
         </div>
@@ -150,7 +152,7 @@ P0-FIX (denna patch):
 
   <!-- ==========================================================
   Script order (KRITISK):
-  Core → Contract → Store → Render/Dash → ModalShell → ESM views/registry → buyer controller (defer)
+  Core → Contract → Store → Render/Dash → ModalShell → ESM interface/registry → ESM BUYER views → buyer controller (defer)
   =========================================================== -->
 
   <!-- Core -->
@@ -160,32 +162,40 @@ P0-FIX (denna patch):
   <!-- Store (MÅSTE skapa window.FreezerStore) -->
   <script src="../UI/pages/freezer/03-store.js"></script>
 
-  <!-- Render + dash (valfritt men bra att ha, buyer-controller hanterar ändå status/lock/debug) -->
+  <!-- Render + dash (valfritt men bra att ha) -->
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
 
   <!-- Modal shell (window.FreezerModal) -->
   <script src="../UI/pages/freezer/05-modal-shell.js"></script>
 
-  <!-- ESM views + registry (MÅSTE vara type="module") -->
+  <!-- ESM interface + registry (MÅSTE vara type="module") -->
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
+
+  <!-- ESM BUYER views (MÅSTE vara type="module" så export inte kraschar) -->
+  <script type="module" src="../UI/pages/freezer/02-view-buyer-suppliers.js"></script>
+  <script type="module" src="../UI/pages/freezer/02-view-buyer-products.js"></script>
+  <script type="module" src="../UI/pages/freezer/02-view-buyer-stockin.js"></script>
 
   <!-- Buyer controller (P0: defer + väntar/pollar på registry innan init/hydrate) -->
   <script defer src="../UI/pages/freezer/buyer/freezer-buyer.js"></script>
 
   <!-- ==========================================================
   ÄNDRINGSLOGG (≤8)
-  1) P0: Tog bort HTML-inline init av FreezerStore (fick inte köras före ESM registry).
-  2) Init/hydrate sker nu endast via freezer-buyer.js efter registry-ready (AO-05/15 policy).
+  1) P0: Lagt till <link rel="icon" href="data:,"> för att slippa 404 /favicon.ico.
+  2) P0: Laddar BUYER-vyer som type="module" (suppliers/products/stockin) för att undvika export-krasch.
+  3) I övrigt oförändrat: Store init/hydrate sker i freezer-buyer.js efter registry-ready.
   =========================================================== -->
 
   <!-- ==========================================================
-  TESTNOTERINGAR (klicktest)
+  TESTNOTERINGAR
   - Öppna buyer/freezer.html → Console:
-    - window.FreezerViewRegistry?.getViewsForRole?.("buyer")  (ska ge 4)
-  - Skapa produkt → reload → produkten ska ligga kvar (hydration sker i freezer-buyer.js).
-  - Ingen extra “Lagersaldo”-knapp ska visas (men saldo visas inne i “Lägga in produkter”).
+    - window.FreezerViewRegistry?.getViewsForRole?.("buyer") (ska ge vyer som registrerats)
+  - Klicka runt flikarna:
+    - Inputs i “Lägga in produkter” ska inte försvinna (P0 fix sitter i freezer-buyer.js).
+  - Console:
+    - Ingen “Failed to load resource /favicon.ico”.
   =========================================================== -->
 </body>
 </html>
