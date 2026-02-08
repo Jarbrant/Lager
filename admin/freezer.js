@@ -34,6 +34,10 @@ AO-LOGIN-03 (DENNA PATCH) — USER MODAL (P0 FIX):
   - Stäng-knapp, Avbryt, klick på overlay, Escape
   - Vid lyckad Spara -> stäng modal + reset form
 - Fail-closed: öppna knapp disabled vid locked/readOnly/utan users_manage.
+- P0: “Redigera” i användarlistan öppnar modalen (skapaflöde ligger i modal).
+- P0: Fel/info visas där användaren är:
+  - Modal öppen -> visar i #frzUsersMsg
+  - Modal stängd -> visar i #frzUsersInlineMsg (dashboard-panel)
 
 Policy:
 - Inga nya storage-keys/datamodell
@@ -138,9 +142,15 @@ Policy:
   const usersPanel = byId("frzUsersPanel");
   const usersList = byId("frzUsersList");
 
+  // Modal msg (inne i modal)
   const msgBox = byId("frzUsersMsg");
   const msgTitle = byId("frzUsersMsgTitle");
   const msgText = byId("frzUsersMsgText");
+
+  // Inline msg (dashboard-panel, när modal är stängd)
+  const inlineMsgBox = byId("frzUsersInlineMsg");
+  const inlineMsgTitle = byId("frzUsersInlineMsgTitle");
+  const inlineMsgText = byId("frzUsersInlineMsgText");
 
   const formTitle = byId("frzUserFormTitle");
   const formMode = byId("frzUserFormMode");
@@ -322,9 +332,6 @@ Policy:
     } catch {}
     lastFocusEl = null;
 
-    // (valfritt) om man vill nollställa felruta vid stängning:
-    // clearUsersMsg();
-
     // reason används inte i UI just nu (ingen ny data / inga nya keys)
     void reason;
   }
@@ -347,9 +354,37 @@ Policy:
 
     // säkerställ “Skapa”-läge
     resetUserForm();
-    clearUsersMsg();
+    clearUsersMsg(); // stänger både modal/inline
 
     // fokus på första fält
+    try { if (firstNameInput && typeof firstNameInput.focus === "function") firstNameInput.focus(); } catch {}
+  }
+
+  function openUserModalForEdit(user) {
+    // fail-closed om session tappas
+    if (!syncTopbarIdentity()) return;
+
+    const status = safeGetStatus();
+    if (status.locked || status.readOnly) return;
+
+    if (!safeCan("users_manage")) return;
+
+    if (!userModalOverlay) return;
+
+    lastFocusEl = document.activeElement;
+
+    userModalOverlay.hidden = false;
+    userModalOverlay.setAttribute("aria-hidden", "false");
+
+    clearUsersMsg();
+
+    // sätt editläge
+    if (editingIdInput) editingIdInput.value = String((user && user.id) ? user.id : "");
+    if (firstNameInput) firstNameInput.value = String((user && user.firstName) ? user.firstName : "");
+    setPermsToUI((user && user.perms) ? user.perms : {});
+    refreshFormHeader();
+
+    // fokus
     try { if (firstNameInput && typeof firstNameInput.focus === "function") firstNameInput.focus(); } catch {}
   }
 
@@ -374,6 +409,11 @@ Policy:
   }
 
   function wireUserModal() {
+    // Init aria-hidden så den matchar hidden (fail-closed)
+    try {
+      if (userModalOverlay) userModalOverlay.setAttribute("aria-hidden", userModalOverlay.hidden ? "true" : "false");
+    } catch {}
+
     // Öppna
     if (openCreateUserBtn) {
       openCreateUserBtn.addEventListener("click", () => {
@@ -861,13 +901,8 @@ Policy:
         const u = findUserById(userId);
         if (!u) return showUsersMsg("Fel", "User hittades inte.");
 
-        if (editingIdInput) editingIdInput.value = u.id || "";
-        if (firstNameInput) firstNameInput.value = String(u.firstName || "");
-        setPermsToUI(u.perms || {});
-        refreshFormHeader();
-        if (firstNameInput) firstNameInput.focus();
-
-        // Om modal används: håll den öppen (edit i modal)
+        // AO-LOGIN-03: skapaflöde ligger i modal -> öppna modal i editläge
+        openUserModalForEdit(u);
         return;
       }
 
@@ -1230,20 +1265,46 @@ Policy:
   }
 
   // -----------------------------
-  // MESSAGES (Users)
+  // MESSAGES (Users) — visar där användaren är (modal/inline)
   // -----------------------------
   function showUsersMsg(title, text) {
-    if (!msgBox || !msgTitle || !msgText) return;
-    msgTitle.textContent = title || "Info";
-    msgText.textContent = text || "—";
-    msgBox.hidden = false;
+    const t = title || "Info";
+    const m = text || "—";
+
+    if (isUserModalOpen()) {
+      if (!msgBox || !msgTitle || !msgText) return;
+      msgTitle.textContent = t;
+      msgText.textContent = m;
+      msgBox.hidden = false;
+      return;
+    }
+
+    if (inlineMsgBox && inlineMsgTitle && inlineMsgText) {
+      inlineMsgTitle.textContent = t;
+      inlineMsgText.textContent = m;
+      inlineMsgBox.hidden = false;
+      return;
+    }
+
+    // fallback: om inline saknas, försök modal-boxen även om modal är stängd
+    if (msgBox && msgTitle && msgText) {
+      msgTitle.textContent = t;
+      msgText.textContent = m;
+      msgBox.hidden = false;
+    }
   }
 
   function clearUsersMsg() {
-    if (!msgBox || !msgTitle || !msgText) return;
-    msgBox.hidden = true;
-    msgTitle.textContent = "Info";
-    msgText.textContent = "—";
+    if (msgBox && msgTitle && msgText) {
+      msgBox.hidden = true;
+      msgTitle.textContent = "Info";
+      msgText.textContent = "—";
+    }
+    if (inlineMsgBox && inlineMsgTitle && inlineMsgText) {
+      inlineMsgBox.hidden = true;
+      inlineMsgTitle.textContent = "Info";
+      inlineMsgText.textContent = "—";
+    }
   }
 
   // -----------------------------
@@ -1272,19 +1333,22 @@ Policy:
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) AO-LOGIN-03: P0 fix – modal “Skapa användare” kan nu stängas via Stäng/Avbryt/overlay-klick/Esc.
+1) AO-LOGIN-03: P0 fix – modal “Skapa användare” kan stängas via Stäng/Avbryt/overlay-klick/Esc.
 2) AO-LOGIN-03: Vid lyckad Spara (create/update) stängs modalen automatiskt och formulär resetas.
-3) AO-LOGIN-03: Topbar-knapp “Skapa användare” blir disabled vid locked/readOnly/utan users_manage (fail-closed).
-4) Inga nya storage-keys/datamodell. UI-only.
+3) AO-LOGIN-03: Topbar-knapp “Skapa användare” är disabled vid locked/readOnly/utan users_manage (fail-closed).
+4) AO-LOGIN-03: “Redigera” i användarlistan öppnar modalen i editläge (skapaflödet ligger i modal).
+5) AO-LOGIN-03: showUsersMsg/clearUsersMsg visar fel/info i modal om öppen, annars i inline-panel.
+6) Inga nya storage-keys/datamodell. UI-only. XSS-safe.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (3–10)
 - Klick “Skapa användare” i topbar -> modal öppnas, fokus i Förnamn.
-- Klick “Stäng” -> modal stängs.
+- Klick “Stäng” -> modal stängs, fokus åter till knappen.
 - Klick utanför dialog (overlay) -> modal stängs.
 - Tryck Escape -> modal stängs.
 - Klick “Avbryt” -> modal stängs + form reset.
+- Klick “Redigera” i user-listan -> modal öppnas i editläge (fält + perms ifyllda).
 - Spara ny user -> modal stängs + form reset + user syns i listan.
 - Sätt read-only eller låst -> “Skapa användare” är disabled och öppnar inget.
 ============================================================ */
