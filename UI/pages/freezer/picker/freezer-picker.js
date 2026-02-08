@@ -1,515 +1,541 @@
 /* ============================================================
-AO-05/15 — PICKER Controller (PROD) | FIL-ID: UI/pages/freezer/picker/freezer-picker.js
+AO-05/15 — PICKER Controller (router + fail-closed) | FIL-ID: UI/pages/freezer/picker/freezer-picker.js
 Projekt: Fryslager (UI-only / localStorage-first)
 
 Syfte:
-- Robust controller för picker/freezer.html:
-  - Väntar/pollar tills ESM-registry (window.FreezerViewRegistry) är redo.
-  - Fail-closed: om registry/store saknas -> visa tydlig fallback, inga actions.
-  - Router: bygger meny, mount/render/unmount vyer säkert.
-  - (Valfritt) försöker lazy-importa picker-vyer om de finns (utan att krascha om 404).
+- Init för Plockare-sidan (picker/freezer.html)
+- Väntar/pollar tills ESM registry är redo (P0)
+- Renderar router-meny + mount/render/unmount av vyer
+- Fail-closed: om registry/store saknas -> lås-panel + minimal fallback
 
 POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell
-- XSS-safe: ingen innerHTML (endast textContent/createElement)
-- Inga sid-effekter före registry-ready
+- XSS-safe: ingen innerHTML (textContent + createElement)
+- Inga sid-effekter utanför denna sida
 ============================================================ */
 
-(() => {
+(function () {
   "use strict";
 
   /* =========================
-  BLOCK 0 — DOM hooks
+  BLOCK 0 — Dom refs
   ========================= */
   const $ = (id) => document.getElementById(id);
 
   const elStatusText = $("frzStatusText");
   const elModeText = $("frzModeText");
+
   const elLockPanel = $("frzLockPanel");
   const elLockReason = $("frzLockReason");
+
   const elDebugPanel = $("frzDebugPanel");
   const elDebugText = $("frzDebugText");
+
   const elMenu = $("freezerViewMenu");
   const elRoot = $("freezerViewRoot");
   const elFallback = $("frzPickerFallback");
+
   const btnResetDemo = $("frzResetDemoBtn");
 
   /* =========================
-  BLOCK 1 — Minimal UI helpers (XSS-safe)
+  BLOCK 1 — Safe helpers
   ========================= */
-  function setText(node, text) {
-    try {
-      if (!node) return;
-      node.textContent = String(text == null ? "" : text);
-    } catch {}
-  }
-
-  function show(node, on) {
-    try {
-      if (!node) return;
-      node.hidden = !on;
-    } catch {}
+  function safeStr(v) {
+    try { return String(v == null ? "" : v); } catch { return ""; }
   }
 
   function clear(node) {
-    try {
-      if (!node) return;
-      while (node.firstChild) node.removeChild(node.firstChild);
-    } catch {}
+    try { while (node && node.firstChild) node.removeChild(node.firstChild); } catch {}
   }
 
-  function pillMsg(text, kind) {
-    const d = document.createElement("div");
-    d.style.padding = "10px";
-    d.style.borderRadius = "10px";
-    d.style.border = "1px solid #e6e6e6";
-    d.style.background = "#fff";
-    d.style.fontSize = "14px";
-    d.style.marginTop = "8px";
-    d.textContent = String(text || "");
-
-    if (kind === "ok") {
-      d.style.borderColor = "#cfe9cf";
-      d.style.background = "#f4fff4";
-    } else if (kind === "warn") {
-      d.style.borderColor = "#ffe0a6";
-      d.style.background = "#fffaf0";
-    } else if (kind === "err") {
-      d.style.borderColor = "#f2b8b5";
-      d.style.background = "#fff5f5";
-    }
-    return d;
+  function setHidden(node, hidden) {
+    try { if (node) node.hidden = !!hidden; } catch {}
   }
 
-  function debug(msg) {
-    try {
-      if (!elDebugPanel || !elDebugText) return;
-      show(elDebugPanel, true);
-      setText(elDebugText, msg || "—");
-    } catch {}
+  function setText(node, text) {
+    try { if (node) node.textContent = safeStr(text); } catch {}
   }
 
-  function lock(reason) {
-    try {
-      show(elLockPanel, true);
-      setText(elLockReason, reason || "Orsak: okänd");
-    } catch {}
+  function showLock(reason) {
+    setHidden(elLockPanel, false);
+    setText(elLockReason, reason || "Orsak: okänd");
   }
 
-  function unlock() {
-    try {
-      show(elLockPanel, false);
-      setText(elLockReason, "");
-    } catch {}
+  function hideLock() {
+    setHidden(elLockPanel, true);
+    setText(elLockReason, "");
+  }
+
+  function showDebug(text) {
+    if (!elDebugPanel || !elDebugText) return;
+    setHidden(elDebugPanel, false);
+    setText(elDebugText, text || "—");
+  }
+
+  function hideDebug() {
+    if (!elDebugPanel || !elDebugText) return;
+    setHidden(elDebugPanel, true);
+    setText(elDebugText, "—");
   }
 
   function setStatus(text) {
     setText(elStatusText, text || "—");
   }
 
-  function setMode(readOnly) {
-    setText(elModeText, readOnly ? "read-only" : "write");
+  function detectReadOnly() {
+    // Fail-soft: default false. Om contract/core exponerar flagga -> respektera.
+    try {
+      if (window.FreezerContract) {
+        const c = window.FreezerContract;
+        if (typeof c.isReadOnly === "function") return !!c.isReadOnly();
+        if (typeof c.getRuntime === "function") {
+          const rt = c.getRuntime();
+          if (rt && typeof rt === "object") {
+            if (rt.readOnly != null) return !!rt.readOnly;
+            if (rt.isReadOnly != null) return !!rt.isReadOnly;
+          }
+        }
+        if (c.readOnly != null) return !!c.readOnly;
+      }
+    } catch {}
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("readonly") === "1") return true;
+      if (url.searchParams.get("ro") === "1") return true;
+    } catch {}
+    return false;
+  }
+
+  function getStore() {
+    try { return window.FreezerStore || null; } catch { return null; }
+  }
+
+  function getRegistry() {
+    try { return window.FreezerViewRegistry || null; } catch { return null; }
   }
 
   /* =========================
-  BLOCK 2 — Registry/store readiness (poll)
+  BLOCK 2 — Registry ready poll (P0)
   ========================= */
-  const READY_TIMEOUT_MS = 6000;
-  const POLL_MS = 60;
+  function waitForRegistryReady(opts) {
+    const maxMs = (opts && opts.maxMs) ? opts.maxMs : 5000;
+    const tickMs = (opts && opts.tickMs) ? opts.tickMs : 50;
 
-  function isRegistryReady() {
-    try {
-      const r = window.FreezerViewRegistry;
-      return !!(
-        r &&
-        typeof r.getViewsForRole === "function" &&
-        typeof r.findView === "function" &&
-        typeof r.toMenuItems === "function"
-      );
-    } catch {
-      return false;
-    }
-  }
+    const started = Date.now();
 
-  function isStoreReady() {
-    try {
-      return !!window.FreezerStore;
-    } catch {
-      return false;
-    }
-  }
+    return new Promise((resolve, reject) => {
+      (function poll() {
+        const reg = getRegistry();
+        const ok =
+          !!reg &&
+          typeof reg.getViewsForRole === "function" &&
+          typeof reg.defineView === "function" &&
+          Array.isArray(reg.pickerViews);
 
-  function waitForReady() {
-    return new Promise((resolve) => {
-      const t0 = Date.now();
+        if (ok) return resolve(reg);
 
-      const tick = () => {
-        const okReg = isRegistryReady();
-        const okStore = isStoreReady();
-        if (okReg && okStore) return resolve({ ok: true, why: "" });
-
-        if (Date.now() - t0 > READY_TIMEOUT_MS) {
-          const why = !okReg
-            ? "FreezerViewRegistry saknas/är inte redo (ESM registry)."
-            : "FreezerStore saknas (03-store.js).";
-          return resolve({ ok: false, why });
+        if (Date.now() - started > maxMs) {
+          return reject(new Error("Registry inte redo inom tidsgräns"));
         }
-
-        setTimeout(tick, POLL_MS);
-      };
-
-      tick();
+        setTimeout(poll, tickMs);
+      })();
     });
   }
 
   /* =========================
-  BLOCK 3 — Optional lazy imports of picker views (fail-soft)
-  (Om filerna inte finns -> ignoreras)
+  BLOCK 3 — Default picker views (placeholders)
+  - Vi definierar dem här för att vara produktionsklar även om externa filer saknas.
+  - Om externa picker-vyer registreras senare: vi dubblar inte.
   ========================= */
-  async function tryImportPickerViews() {
-    // OBS: dessa imports kraschar inte appen om de saknas
-    // (det blir catch + debug-notis).
-    const paths = [
-      // din placeholder-vy:
-      "../UI/pages/freezer/picker/picker-out.js",
-      // valfritt om den finns:
-      "../UI/pages/freezer/picker/picker-dashboard.js"
-    ];
+  function ensureDefaultPickerViews(reg) {
+    try {
+      if (!reg || typeof reg.defineView !== "function" || !Array.isArray(reg.pickerViews)) return;
 
-    for (let i = 0; i < paths.length; i++) {
-      const p = paths[i];
-      try {
-        // @vite-ignore / bundler-agnostic
-        await import(p);
-      } catch (e) {
-        // fail-soft: inga 404 ska krascha sidan
-        // Visa inte debug om allt fungerar i övrigt.
-        // Men om du vill se det: slå på debug.
-        // debug("Valfri vy saknas: " + p);
-        void e;
+      function exists(id) {
+        const list = reg.pickerViews || [];
+        for (let i = 0; i < list.length; i++) {
+          if (list[i] && String(list[i].id || "") === id) return true;
+        }
+        return false;
       }
+
+      if (!exists("picker-out")) {
+        const vOut = reg.defineView({
+          id: "picker-out",
+          label: "Uttag",
+          requiredPerm: null,
+          mount: ({ root, ctx }) => {
+            try {
+              if (!root || !(root instanceof HTMLElement)) return;
+              clear(root);
+
+              const wrap = document.createElement("section");
+              wrap.setAttribute("data-view", "picker-out");
+
+              const h = document.createElement("h2");
+              h.textContent = "Plock – Uttag";
+
+              const p = document.createElement("p");
+              p.textContent = "Kommer snart.";
+
+              const hint = document.createElement("div");
+              hint.style.opacity = "0.75";
+              hint.style.fontSize = "13px";
+              hint.textContent = "Placeholder-vy (AO-05/15).";
+
+              const status = document.createElement("div");
+              status.style.marginTop = "10px";
+              status.style.opacity = "0.75";
+              status.style.fontSize = "13px";
+              status.textContent = formatCtxLine(ctx);
+
+              const box = document.createElement("div");
+              box.style.marginTop = "12px";
+              box.style.border = "1px dashed #ddd";
+              box.style.borderRadius = "10px";
+              box.style.padding = "10px";
+              box.style.background = "#fafafa";
+
+              const boxTitle = document.createElement("b");
+              boxTitle.textContent = "Här kommer uttags-flödet att monteras";
+
+              const boxText = document.createElement("div");
+              boxText.style.opacity = "0.75";
+              boxText.style.fontSize = "13px";
+              boxText.style.marginTop = "6px";
+              boxText.textContent = "Exempel: välj produkt, ange antal, uppdatera saldo, logga historik.";
+
+              box.appendChild(boxTitle);
+              box.appendChild(boxText);
+
+              wrap.appendChild(h);
+              wrap.appendChild(p);
+              wrap.appendChild(hint);
+              wrap.appendChild(status);
+              wrap.appendChild(box);
+
+              root.appendChild(wrap);
+
+              try { root.__frzPickerOutStatusEl = status; } catch {}
+            } catch {}
+          },
+          render: ({ root, ctx }) => {
+            try {
+              const s = root && root.__frzPickerOutStatusEl;
+              if (s && s instanceof HTMLElement) s.textContent = formatCtxLine(ctx);
+            } catch {}
+          },
+          unmount: ({ root }) => {
+            try { delete root.__frzPickerOutStatusEl; } catch {}
+          }
+        });
+
+        reg.pickerViews.push(vOut);
+      }
+
+      if (!exists("picker-dashboard")) {
+        const vDash = reg.defineView({
+          id: "picker-dashboard",
+          label: "Översikt",
+          requiredPerm: null,
+          mount: ({ root, ctx }) => {
+            try {
+              if (!root || !(root instanceof HTMLElement)) return;
+              clear(root);
+
+              const wrap = document.createElement("section");
+              wrap.setAttribute("data-view", "picker-dashboard");
+
+              const h = document.createElement("h2");
+              h.textContent = "Plock – Översikt";
+
+              const p = document.createElement("p");
+              p.textContent = "Kommer snart.";
+
+              const hint = document.createElement("div");
+              hint.style.opacity = "0.75";
+              hint.style.fontSize = "13px";
+              hint.textContent = "Placeholder-vy (AO-05/15).";
+
+              const status = document.createElement("div");
+              status.style.marginTop = "10px";
+              status.style.opacity = "0.75";
+              status.style.fontSize = "13px";
+              status.textContent = formatCtxLine(ctx);
+
+              const box = document.createElement("div");
+              box.style.marginTop = "12px";
+              box.style.border = "1px dashed #ddd";
+              box.style.borderRadius = "10px";
+              box.style.padding = "10px";
+              box.style.background = "#fafafa";
+
+              const boxTitle = document.createElement("b");
+              boxTitle.textContent = "Här kommer översikten att monteras";
+
+              const boxText = document.createElement("div");
+              boxText.style.opacity = "0.75";
+              boxText.style.fontSize = "13px";
+              boxText.style.marginTop = "6px";
+              boxText.textContent = "Exempel: dagens plock, varningar, min-nivåer, snabbgenvägar.";
+
+              box.appendChild(boxTitle);
+              box.appendChild(boxText);
+
+              wrap.appendChild(h);
+              wrap.appendChild(p);
+              wrap.appendChild(hint);
+              wrap.appendChild(status);
+              wrap.appendChild(box);
+
+              root.appendChild(wrap);
+
+              try { root.__frzPickerDashStatusEl = status; } catch {}
+            } catch {}
+          },
+          render: ({ root, ctx }) => {
+            try {
+              const s = root && root.__frzPickerDashStatusEl;
+              if (s && s instanceof HTMLElement) s.textContent = formatCtxLine(ctx);
+            } catch {}
+          },
+          unmount: ({ root }) => {
+            try { delete root.__frzPickerDashStatusEl; } catch {}
+          }
+        });
+
+        reg.pickerViews.unshift(vDash); // Översikt först
+      }
+    } catch {}
+  }
+
+  function formatCtxLine(ctx) {
+    try {
+      const role = ctx && ctx.role ? safeStr(ctx.role) : "—";
+      const ro = !!(ctx && (ctx.readOnly || ctx.isReadOnly));
+      const mode = ro ? "read-only" : "write";
+      return `Ctx: role=${role} • mode=${mode}`;
+    } catch {
+      return "Ctx: —";
     }
   }
 
   /* =========================
-  BLOCK 4 — Controller state
+  BLOCK 4 — Router (mount/render/unmount)
   ========================= */
-  const STATE = {
-    role: "picker",
-    readOnly: true,
-    store: null,
-    registry: null,
+  const Router = {
     views: [],
-    menuItems: [],
-    activeViewId: "",
-    activeView: null
+    activeId: "",
+    activeView: null,
+    activeRoot: null,
+    ctx: { role: "picker", readOnly: true, store: null },
+
+    init(views, ctx) {
+      this.views = Array.isArray(views) ? views : [];
+      this.ctx = ctx || this.ctx;
+    },
+
+    setActive(id) {
+      const vid = safeStr(id).trim();
+      const v = findViewById(this.views, vid);
+
+      if (!v) return;
+
+      // unmount previous
+      try {
+        if (this.activeView && typeof this.activeView.unmount === "function") {
+          this.activeView.unmount({ root: this.activeRoot, ctx: this.ctx, state: {} });
+        }
+      } catch {}
+
+      this.activeId = vid;
+      this.activeView = v;
+      this.activeRoot = elRoot;
+
+      // mount new
+      try {
+        if (this.activeView && typeof this.activeView.mount === "function") {
+          this.activeView.mount({ root: elRoot, ctx: this.ctx, state: {} });
+        }
+      } catch (e) {
+        showDebug("Mount-fel: " + safeStr(e && e.message ? e.message : "okänt"));
+      }
+
+      // render menu selected
+      renderMenu(this.views, this.activeId);
+
+      // render pass
+      this.render();
+    },
+
+    render() {
+      try {
+        if (!this.activeView || typeof this.activeView.render !== "function") return;
+        this.activeView.render({ root: this.activeRoot, ctx: this.ctx, state: {} });
+      } catch {}
+    }
   };
 
-  function computeReadOnly() {
-    // Fail-closed default = read-only om vi är osäkra
-    try {
-      const c = window.FreezerContract;
-      if (c && typeof c.isReadOnly === "function") return !!c.isReadOnly();
-      if (window.__FREEZER_READ_ONLY === true) return true;
-      // Om inget kontrakt: anta write för demo, men bara om store finns.
-      return false;
-    } catch {
-      return true;
+  function findViewById(views, id) {
+    const list = Array.isArray(views) ? views : [];
+    const target = safeStr(id).trim();
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (v && safeStr(v.id) === target) return v;
     }
+    return null;
   }
 
-  function buildCtx() {
-    return {
-      role: STATE.role,
-      store: STATE.store,
-      readOnly: STATE.readOnly,
-      isReadOnly: STATE.readOnly
-    };
-  }
-
-  /* =========================
-  BLOCK 5 — Router: safe call adapters (mount/render/unmount)
-  Stödjer både:
-    view.mount(root, ctx)
-    view.mount({root, ctx, state})
-  ========================= */
-  function safeMount(view, root, ctx) {
-    try {
-      if (!view || typeof view.mount !== "function") return;
-      // försöker båda signaturer
-      try {
-        view.mount({ root, ctx, state: {} });
-        return;
-      } catch {}
-      try {
-        view.mount(root, ctx);
-      } catch {}
-    } catch {}
-  }
-
-  function safeRender(view, root, ctx) {
-    try {
-      if (!view || typeof view.render !== "function") return;
-      try {
-        view.render({ root, ctx, state: {} });
-        return;
-      } catch {}
-      try {
-        view.render(root, ctx);
-      } catch {}
-    } catch {}
-  }
-
-  function safeUnmount(view, root, ctx) {
-    try {
-      if (!view || typeof view.unmount !== "function") return;
-      try {
-        view.unmount({ root, ctx, state: {} });
-        return;
-      } catch {}
-      try {
-        view.unmount(root, ctx);
-      } catch {}
-    } catch {}
-  }
-
-  /* =========================
-  BLOCK 6 — Menu + navigation (no storage)
-  ========================= */
-  function getRouteViewId() {
-    try {
-      const h = String(location.hash || "");
-      // stöd: #picker-out eller #view=picker-out
-      if (h.startsWith("#view=")) return decodeURIComponent(h.slice(6));
-      if (h.startsWith("#")) return decodeURIComponent(h.slice(1));
-      return "";
-    } catch {
-      return "";
-    }
-  }
-
-  function setRouteViewId(id) {
-    try {
-      const vid = String(id || "");
-      if (!vid) return;
-      // enkel hash: #picker-out
-      location.hash = "#" + encodeURIComponent(vid);
-    } catch {}
-  }
-
-  function renderMenu() {
+  function renderMenu(views, activeId) {
+    if (!elMenu) return;
     clear(elMenu);
 
-    const items = Array.isArray(STATE.menuItems) ? STATE.menuItems : [];
-    if (!items.length) {
-      if (elMenu) elMenu.appendChild(pillMsg("Inga vyer registrerade för Plockare ännu.", "warn"));
+    const list = Array.isArray(views) ? views : [];
+    if (!list.length) {
+      const span = document.createElement("div");
+      span.className = "muted";
+      span.textContent = "Inga vyer ännu.";
+      elMenu.appendChild(span);
       return;
     }
 
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (!v) continue;
+
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "tabBtn";
-      btn.setAttribute("data-view-id", String(it.id || ""));
-      btn.setAttribute("aria-selected", "false");
-      btn.textContent = String(it.label || it.id || "—");
+      btn.textContent = safeStr(v.label || v.id || "—");
+      btn.setAttribute("aria-selected", String(safeStr(v.id) === safeStr(activeId)));
 
       btn.addEventListener("click", () => {
-        const vid = String(it.id || "");
-        if (!vid) return;
-        navigateTo(vid);
+        try { Router.setActive(v.id); } catch {}
       });
 
-      elMenu && elMenu.appendChild(btn);
+      elMenu.appendChild(btn);
     }
-
-    syncMenuSelected();
-  }
-
-  function syncMenuSelected() {
-    try {
-      const vid = String(STATE.activeViewId || "");
-      const buttons = elMenu ? elMenu.querySelectorAll("button[data-view-id]") : [];
-      for (let i = 0; i < buttons.length; i++) {
-        const b = buttons[i];
-        const id = b.getAttribute("data-view-id") || "";
-        b.setAttribute("aria-selected", id === vid ? "true" : "false");
-      }
-    } catch {}
-  }
-
-  function showFallback(text, kind) {
-    try {
-      // använd befintlig fallback-div om den finns
-      if (elFallback) {
-        elFallback.hidden = false;
-        setText(elFallback, text || "—");
-        return;
-      }
-    } catch {}
-
-    try {
-      // annars rendera i root
-      clear(elRoot);
-      elRoot && elRoot.appendChild(pillMsg(text || "—", kind || "warn"));
-    } catch {}
-  }
-
-  function hideFallback() {
-    try {
-      if (elFallback) elFallback.hidden = true;
-    } catch {}
-  }
-
-  function navigateTo(viewId) {
-    const vid = String(viewId || "").trim();
-    if (!vid) return;
-
-    const ctx = buildCtx();
-
-    // hitta vy
-    const v = STATE.registry.findView(STATE.views, vid);
-    if (!v) {
-      STATE.activeViewId = vid;
-      syncMenuSelected();
-      setRouteViewId(vid);
-      showFallback("Vyn finns inte (id=" + vid + ").", "err");
-      return;
-    }
-
-    // unmount föregående
-    try {
-      if (STATE.activeView && STATE.activeViewId && elRoot) {
-        safeUnmount(STATE.activeView, elRoot, ctx);
-      }
-    } catch {}
-
-    // mount ny
-    STATE.activeViewId = vid;
-    STATE.activeView = v;
-    syncMenuSelected();
-    setRouteViewId(vid);
-
-    try {
-      hideFallback();
-      // försök rensa root innan mount
-      clear(elRoot);
-      safeMount(v, elRoot, ctx);
-      safeRender(v, elRoot, ctx);
-      setStatus("Redo");
-    } catch {
-      showFallback("Kunde inte montera vyn (id=" + vid + ").", "err");
-    }
-  }
-
-  function handleHashChange() {
-    const vid = getRouteViewId();
-    if (!vid) return;
-    if (vid === STATE.activeViewId) return;
-    navigateTo(vid);
   }
 
   /* =========================
-  BLOCK 7 — Reset demo (fail-closed)
+  BLOCK 5 — Reset demo (fail-soft)
   ========================= */
-  function wireResetDemo() {
+  function wireResetDemo(ctx) {
     if (!btnResetDemo) return;
+
+    const ro = !!(ctx && (ctx.readOnly || ctx.isReadOnly));
+    btnResetDemo.disabled = ro;
 
     btnResetDemo.addEventListener("click", () => {
       try {
-        if (STATE.readOnly) {
-          debug("Read-only: Demo-reset är avstängt.");
+        hideDebug();
+
+        if (ro) {
+          showDebug("Read-only: demo kan inte återställas.");
           return;
         }
-        const s = STATE.store;
-        if (!s || typeof s.resetDemo !== "function") {
-          debug("FreezerStore.resetDemo() saknas.");
+
+        const store = getStore();
+        if (!store) {
+          showDebug("FreezerStore saknas.");
           return;
         }
-        const res = s.resetDemo();
+
+        const fn =
+          (typeof store.resetDemo === "function" && store.resetDemo) ||
+          (typeof store.resetDemoData === "function" && store.resetDemoData) ||
+          (typeof store.reset === "function" && store.reset) ||
+          null;
+
+        if (!fn) {
+          showDebug("Reset-funktion saknas i FreezerStore.");
+          return;
+        }
+
+        const res = fn.call(store);
+
         if (res && res.ok === false) {
-          debug("Demo-reset misslyckades: " + String(res.reason || "okänt"));
+          showDebug("Reset misslyckades: " + safeStr(res.reason || "okänt"));
           return;
         }
+
         setStatus("Demo återställd");
-        // re-render aktiv vy
-        if (STATE.activeView && elRoot) safeRender(STATE.activeView, elRoot, buildCtx());
-      } catch {
-        debug("Demo-reset: fel (catch).");
+        Router.render();
+      } catch (e) {
+        showDebug("Reset-fel: " + safeStr(e && e.message ? e.message : "okänt"));
       }
     });
   }
 
   /* =========================
-  BLOCK 8 — Boot
+  BLOCK 6 — Bootstrap
   ========================= */
-  async function boot() {
-    setStatus("Laddar…");
-    setMode(true);
-    unlock();
-    show(elDebugPanel, false);
+  function bootstrap(reg) {
+    try {
+      hideLock();
+      hideDebug();
 
-    // baseline: visa fallback text
-    showFallback("Laddar vyer…", "warn");
+      const store = getStore();
+      if (!store) {
+        showLock("FreezerStore saknas. Kontrollera script-ordning: 03-store.js före controller.");
+        setStatus("Stoppad");
+        return;
+      }
 
-    // vänta tills registry + store är redo
-    const ready = await waitForReady();
-    if (!ready.ok) {
-      lock(ready.why);
-      setStatus("Stoppad");
-      setMode(true);
-      showFallback("Kan inte starta: " + ready.why, "err");
-      return;
-    }
+      // ctx
+      const readOnly = detectReadOnly();
+      const ctx = {
+        role: "picker",
+        readOnly,
+        isReadOnly: readOnly,
+        store
+      };
 
-    // optional lazy-import av picker-vyer (om de finns)
-    await tryImportPickerViews();
+      setText(elModeText, readOnly ? "read-only" : "write");
 
-    // state init
-    STATE.store = window.FreezerStore || null;
-    STATE.registry = window.FreezerViewRegistry;
-    STATE.readOnly = computeReadOnly();
+      // säkerställ minimum-vyer
+      ensureDefaultPickerViews(reg);
 
-    setMode(STATE.readOnly);
-    setStatus("Init…");
-    unlock();
-    wireResetDemo();
+      const views = reg.getViewsForRole ? reg.getViewsForRole("picker") : [];
+      if (!views || !views.length) {
+        showLock("Inga vyer registrerade för Plockare.");
+        setStatus("Stoppad");
+        return;
+      }
 
-    // views
-    const views = STATE.registry.getViewsForRole(STATE.role);
-    STATE.views = Array.isArray(views) ? views : [];
-    STATE.menuItems = STATE.registry.toMenuItems(STATE.views);
+      // router init
+      Router.init(views, ctx);
+      renderMenu(views, "");
 
-    renderMenu();
+      // välj default
+      const first = views[0];
+      Router.setActive(first && first.id ? first.id : "");
 
-    if (!STATE.menuItems.length) {
+      // reset demo
+      wireResetDemo(ctx);
+
       setStatus("Redo");
-      showFallback("Inga plock-vyer är registrerade ännu. (Lägg till pickerViews/picker-out senare.)", "warn");
-      return;
+    } catch (e) {
+      showLock("Init-fel: " + safeStr(e && e.message ? e.message : "okänt"));
+      setStatus("Stoppad");
     }
-
-    // route/default
-    const fromHash = getRouteViewId();
-    const first = STATE.menuItems[0] ? String(STATE.menuItems[0].id || "") : "";
-    const target = fromHash || first;
-
-    // lyssna hash
-    window.addEventListener("hashchange", handleHashChange);
-
-    // navigera
-    navigateTo(target);
   }
 
   // Start
-  try {
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", boot);
-    } else {
-      boot();
-    }
-  } catch {
-    // fail-soft
-  }
-})();
+  setStatus("Init…");
+  waitForRegistryReady({ maxMs: 7000, tickMs: 60 })
+    .then((reg) => {
+      bootstrap(reg);
+    })
+    .catch((e) => {
+      // fail-closed: registry saknas -> lås
+      showLock("Registry saknas/inte redo. Kontrollera att 01-view-registry.js laddas som type=\"module\".");
+      showDebug("Registry-timeout: " + safeStr(e && e.message ? e.message : "okänt"));
+      setStatus("Stoppad");
+    });
 
+  // Best-effort: re-render vid fokus tillbaka
+  window.addEventListener("focus", () => {
+    try { Router.render(); } catch {}
+  });
+})();
