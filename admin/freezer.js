@@ -40,6 +40,10 @@ AO-LOGIN-03 (P0 UI-FIX, DENNA PATCH) — RÄTT MSG-BOX:
 - Visar fel/info i DASHBOARD inline när modal är stängd (frzUsersInlineMsg).
 - Rensar båda vid modal open/close för att undvika “Fel”-ruta på första sidan.
 
+AO-LOGIN-03 (P0 UI-FIX v2, DENNA PATCH) — MODAL FÅR INTE ÖPPNA VID LOGIN:
+- Forcerar att user-modal är STÄNGD vid boot (även om något annat script råkat öppna den).
+- Rensar samtidigt msg-boxar så inget hänger kvar på startsidan.
+
 Policy:
 - Inga nya storage-keys/datamodell
 - XSS-safe (render sköter textContent)
@@ -340,7 +344,7 @@ Policy:
   }
 
   function clearMsgBox(target) {
-    if (!target) return;
+    if (!target || !target.box || !target.title || !target.text) return;
     try {
       target.box.hidden = true;
       target.title.textContent = "Info";
@@ -349,7 +353,7 @@ Policy:
   }
 
   function showMsgBox(target, title, text) {
-    if (!target) return;
+    if (!target || !target.box || !target.title || !target.text) return;
     try {
       target.title.textContent = title || "Info";
       target.text.textContent = text || "—";
@@ -371,6 +375,7 @@ Policy:
 
   function closeUserModal(reason) {
     if (!userModalOverlay) return;
+
     userModalOverlay.hidden = true;
     userModalOverlay.setAttribute("aria-hidden", "true");
 
@@ -383,8 +388,27 @@ Policy:
     } catch {}
     lastFocusEl = null;
 
-    // reason används inte i UI just nu (ingen ny data / inga nya keys)
     void reason;
+  }
+
+  // AO-LOGIN-03 v2: P0 — modal får ALDRIG vara öppen vid login/boot
+  function forceCloseUserModalOnBoot() {
+    try {
+      // 1) Stäng overlay oavsett tidigare state
+      if (userModalOverlay) {
+        userModalOverlay.hidden = true;
+        userModalOverlay.setAttribute("aria-hidden", "true");
+      }
+
+      // 2) Nollställ form så den inte råkar vara i edit-läge vid load
+      resetUserForm();
+
+      // 3) Rensa msg-boxar (både modal + dashboard)
+      clearUsersMsg();
+
+      // 4) Reset fokusspårning
+      lastFocusEl = null;
+    } catch {}
   }
 
   function openUserModal() {
@@ -478,6 +502,9 @@ Policy:
   // BOOT
   // ------------------------------------------------------------
   const initialRole = "ADMIN";
+
+  // P0: STÄNG MODAL DIREKT VID LOAD (oavsett vad som hänt innan)
+  forceCloseUserModalOnBoot();
 
   // Init store fail-soft
   if (!store || typeof store.init !== "function") {
@@ -774,7 +801,6 @@ Policy:
 
     // Om router har en aktiv vy och vi inte är i dashboard-tab kan vi visa båda
     if (routerActiveLabel) {
-      // kort, utan att störa: “Vy: Saldo • Router: X”
       const base = viewHint ? String(viewHint.textContent || "") : "";
       if (base && base !== "—") {
         setViewHint(`${base} • Router: ${routerActiveLabel}`);
@@ -1293,10 +1319,6 @@ Policy:
       syncCreateUserTopbarBtn();
     } catch (e) {}
   }
-
-  // -----------------------------
-  // MESSAGES (Users) - (funktioner ligger ovan för routing)
-  // -----------------------------
 
   // -----------------------------
   // TABS (legacy)
