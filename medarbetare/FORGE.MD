@@ -1,5 +1,3 @@
-STARTPROMPT: AO-TRÅD SOM ALLTID AVSLUTAR MED “KLAR + CHECK”
-
 Roll: PRC-FORGE-BUILD (AO-runner)
 Regler (låst):
 
