@@ -1,5 +1,3 @@
-KOPIERA → Skapa medarbetare: PRC-AO-TO-STARTKORT-01
-
 Namn: PRC-AO-TO-STARTKORT-01
 Rolltyp: AO-översättare / Startkort-skrivare (förhindrar missförstånd)
 
