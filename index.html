@@ -1,43 +1,365 @@
 <!-- ============================================================
-FIX-404-ROOT-01 | FIL: index.html (repo-root)
-Syfte: Göra /Lager/ körbart på GitHub Pages genom att ha en startsida.
-Beteende: Redirectar till /admin/freezer.html + visar fallback-länk.
+AO-LOGIN-01 | FIL: index.html (repo-root)
+Projekt: Lager/Freezer (UI-only / localStorage-first)
+
+Syfte:
+- Login-sida (förnamn + lösen/PIN)
+- Skapar session (FRZ_SESSION_V1) och routar till rätt roll-sida:
+  ADMIN  -> ./admin/freezer.html
+  BUYER  -> ./buyer/freezer.html
+  PICKER -> ./picker/freezer.html
+
+Policy:
+- UI-only (inte "riktig" säkerhet)
+- Fail-closed: om login misslyckas -> stanna här
+- XSS-safe: render med textContent
+
+NY STORAGE-KEY (tillåten i denna AO):
+- FRZ_SESSION_V1  (sessionStorage-first, localStorage fallback)
+
+Demo-konton (tills AO-LOGIN-02 gör admin-skapade users persistenta):
+- Admin / 1111  -> ADMIN
+- Inköp / 2222  -> BUYER
+- Plock / 3333  -> PICKER
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Lager – Start</title>
+  <title>Lager – Logga in</title>
 
-  <!-- Snabb redirect (fungerar på GitHub Pages) -->
-  <meta http-equiv="refresh" content="0; url=./admin/freezer.html" />
+  <link rel="icon" href="data:,">
 
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
-    a { color: inherit; }
-    .muted { opacity: .75; }
-    .card { border:1px solid #e6e6e6; border-radius: 12px; padding: 14px; max-width: 720px; }
+    :root { color-scheme: light; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f6f7f8; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 18px 14px; }
+    .top { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .brand { font-weight:800; letter-spacing:.2px; }
+    .muted { opacity:.75; }
+    .spacer { flex:1; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fff; font-size: 13px; }
+    .panel { border:1px solid #e6e6e6; border-radius: 14px; padding: 14px; background:#fff; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 900px){ .grid { grid-template-columns: 1fr 1fr; } }
+    label { display:block; font-size: 13px; margin-bottom: 6px; }
+    input { width:100%; box-sizing:border-box; padding:10px 12px; border-radius: 12px; border:1px solid #e6e6e6; background:#fff; font-size: 15px; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 12px; padding:10px 12px; cursor:pointer; }
+    .btn.primary { font-weight:800; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    .msg { border:1px solid #f2b8b5; background:#fff5f5; border-radius: 12px; padding: 10px 12px; }
+    .ok { border-color:#cfe9cf; background:#f4fff4; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+    .small { font-size: 12px; }
+    footer { padding: 14px 0; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1 style="margin:0 0 8px 0;">Lager</h1>
-    <p class="muted" style="margin:0 0 12px 0;">
-      Startar demo…
-    </p>
-    <p style="margin:0;">
-      Om du inte skickas vidare automatiskt, klicka här:
-      <a href="./admin/freezer.html"><b>Öppna fryslager</b></a>
-    </p>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">📦 Lager</div>
+      <div class="muted">• Login</div>
+      <div class="spacer"></div>
+      <div class="pill" id="sessPill"><span class="muted">Session:</span> <b id="sessText">—</b></div>
+      <button class="btn" id="logoutBtn" type="button" hidden>Logga ut</button>
+    </div>
+
+    <div style="height:12px;"></div>
+
+    <section class="panel">
+      <div class="grid">
+        <div>
+          <h1 style="margin:0 0 6px 0;">Logga in</h1>
+          <div class="muted" style="margin-bottom:12px;">
+            UI-only demo. Detta ger rollstyrd navigation, inte “riktig” säkerhet.
+          </div>
+
+          <div id="msgBox" class="msg" hidden>
+            <b id="msgTitle">Fel</b>
+            <div class="muted" id="msgText">—</div>
+          </div>
+
+          <div style="height:12px;"></div>
+
+          <div class="grid" style="grid-template-columns: 1fr; gap:10px;">
+            <div>
+              <label for="firstName">Förnamn</label>
+              <input id="firstName" type="text" autocomplete="username" placeholder="t.ex. Admin" maxlength="32">
+            </div>
+            <div>
+              <label for="pin">Lösen/PIN</label>
+              <input id="pin" type="password" autocomplete="current-password" placeholder="t.ex. 1111" maxlength="32">
+            </div>
+          </div>
+
+          <div style="height:12px;"></div>
+
+          <div class="row">
+            <button class="btn primary" id="loginBtn" type="button">Logga in</button>
+            <button class="btn" id="openAdminBtn" type="button" title="Öppna admin (kräver session)">Öppna Admin</button>
+          </div>
+
+          <div style="height:12px;"></div>
+
+          <div class="muted small">
+            Demo-konton (tills AO-LOGIN-02):
+            <div><code>Admin / 1111</code> → ADMIN</div>
+            <div><code>Inköp / 2222</code> → BUYER</div>
+            <div><code>Plock / 3333</code> → PICKER</div>
+          </div>
+        </div>
+
+        <div>
+          <h2 style="margin:0 0 6px 0;">Var hamnar jag?</h2>
+          <div class="muted" style="margin-bottom:10px;">
+            När du loggar in skickas du direkt till din roll-sida.
+          </div>
+
+          <div class="panel" style="background:#fafafa;">
+            <div class="row" style="align-items:flex-start;">
+              <div style="min-width:120px;"><b>ADMIN</b></div>
+              <div class="muted"><code>./admin/freezer.html</code></div>
+            </div>
+            <div class="row" style="align-items:flex-start; margin-top:8px;">
+              <div style="min-width:120px;"><b>INKÖP</b></div>
+              <div class="muted"><code>./buyer/freezer.html</code></div>
+            </div>
+            <div class="row" style="align-items:flex-start; margin-top:8px;">
+              <div style="min-width:120px;"><b>PLOCK</b></div>
+              <div class="muted"><code>./picker/freezer.html</code></div>
+            </div>
+          </div>
+
+          <div style="height:10px;"></div>
+
+          <div class="muted small">
+            Fail-closed: om session saknas eller är trasig → du stannar här.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="muted small">
+      AO-LOGIN-01 • FRZ_SESSION_V1 • UI-only
+    </footer>
   </div>
 
   <script>
-    // JS-redirect som backup (om meta refresh blockas)
     (function(){
-      try { window.location.replace("./admin/freezer.html"); } catch {}
+      "use strict";
+
+      const KEY = "FRZ_SESSION_V1";
+
+      const $ = (id) => document.getElementById(id);
+
+      const firstNameEl = $("firstName");
+      const pinEl = $("pin");
+      const loginBtn = $("loginBtn");
+      const logoutBtn = $("logoutBtn");
+      const openAdminBtn = $("openAdminBtn");
+
+      const sessText = $("sessText");
+      const sessPill = $("sessPill");
+
+      const msgBox = $("msgBox");
+      const msgTitle = $("msgTitle");
+      const msgText = $("msgText");
+
+      const ROLE_TO_PATH = {
+        ADMIN: "./admin/freezer.html",
+        BUYER: "./buyer/freezer.html",
+        PICKER: "./picker/freezer.html"
+      };
+
+      // Demo users (AO-LOGIN-02 ersätter med admin-skapade users)
+      const DEMO = [
+        { firstName: "Admin", pin: "1111", role: "ADMIN" },
+        { firstName: "Inköp", pin: "2222", role: "BUYER" },
+        { firstName: "Plock", pin: "3333", role: "PICKER" }
+      ];
+
+      function safeJsonParse(raw){
+        try { return JSON.parse(raw); } catch { return null; }
+      }
+
+      function readSession(){
+        try {
+          const sRaw = (window.sessionStorage && window.sessionStorage.getItem(KEY)) || null;
+          if (sRaw) return safeJsonParse(sRaw);
+        } catch {}
+        try {
+          const lRaw = (window.localStorage && window.localStorage.getItem(KEY)) || null;
+          if (lRaw) return safeJsonParse(lRaw);
+        } catch {}
+        return null;
+      }
+
+      function writeSession(obj){
+        const payload = JSON.stringify(obj);
+        try {
+          if (window.sessionStorage) { window.sessionStorage.setItem(KEY, payload); return true; }
+        } catch {}
+        try {
+          if (window.localStorage) { window.localStorage.setItem(KEY, payload); return true; }
+        } catch {}
+        return false;
+      }
+
+      function clearSession(){
+        try { window.sessionStorage && window.sessionStorage.removeItem(KEY); } catch {}
+        try { window.localStorage && window.localStorage.removeItem(KEY); } catch {}
+      }
+
+      function showMsg(title, text){
+        if (!msgBox) return;
+        msgTitle.textContent = title || "Info";
+        msgText.textContent = text || "—";
+        msgBox.hidden = false;
+      }
+
+      function clearMsg(){
+        if (!msgBox) return;
+        msgBox.hidden = true;
+        msgTitle.textContent = "Info";
+        msgText.textContent = "—";
+      }
+
+      function normalizeName(s){
+        return String(s || "").trim();
+      }
+
+      function findDemoUser(firstName, pin){
+        const n = normalizeName(firstName);
+        const p = String(pin || "").trim();
+        if (!n || !p) return null;
+
+        const lower = n.toLowerCase();
+        for (const u of DEMO) {
+          if (!u) continue;
+          if (String(u.firstName || "").toLowerCase() === lower && String(u.pin || "") === p) return u;
+        }
+        return null;
+      }
+
+      function getTargetPath(role){
+        const r = String(role || "").toUpperCase().trim();
+        return ROLE_TO_PATH[r] || "";
+      }
+
+      function gotoRole(role){
+        const target = getTargetPath(role);
+        if (!target) return;
+        try { window.location.assign(target); } catch {}
+      }
+
+      function renderSessionPill(){
+        const s = readSession();
+        if (!s || typeof s !== "object") {
+          sessText.textContent = "Ingen";
+          sessPill.classList.remove("ok");
+          logoutBtn.hidden = true;
+          return;
+        }
+        const role = String(s.role || "").toUpperCase();
+        const name = String(s.firstName || "");
+        sessText.textContent = (name && role) ? (name + " • " + role) : "OK";
+        sessPill.classList.add("ok");
+        logoutBtn.hidden = false;
+      }
+
+      function onLogin(){
+        clearMsg();
+
+        const firstName = normalizeName(firstNameEl.value);
+        const pin = String(pinEl.value || "").trim();
+
+        if (!firstName) return showMsg("Fel", "Förnamn krävs.");
+        if (!pin) return showMsg("Fel", "Lösen/PIN krävs.");
+
+        const u = findDemoUser(firstName, pin);
+        if (!u) return showMsg("Fel", "Fel förnamn eller lösen/PIN.");
+
+        const now = Date.now();
+        const session = {
+          v: 1,
+          firstName: u.firstName,
+          role: u.role,
+          at: now,
+          // Demo: 12h session
+          exp: now + (12 * 60 * 60 * 1000)
+        };
+
+        const ok = writeSession(session);
+        if (!ok) return showMsg("Fel", "Kunde inte spara session (storage blockad).");
+
+        renderSessionPill();
+        gotoRole(u.role);
+      }
+
+      function onLogout(){
+        clearSession();
+        renderSessionPill();
+        clearMsg();
+        try {
+          firstNameEl.value = "";
+          pinEl.value = "";
+          firstNameEl.focus();
+        } catch {}
+      }
+
+      function enforceExpiry(){
+        const s = readSession();
+        if (!s || typeof s !== "object") return;
+        const exp = Number(s.exp || 0);
+        if (exp && Date.now() > exp) {
+          clearSession();
+        }
+      }
+
+      // Wire
+      loginBtn.addEventListener("click", onLogin);
+      logoutBtn.addEventListener("click", onLogout);
+
+      openAdminBtn.addEventListener("click", () => {
+        clearMsg();
+        enforceExpiry();
+        const s = readSession();
+        if (!s || typeof s !== "object") return showMsg("Spärrad", "Ingen session. Logga in först.");
+        if (String(s.role || "").toUpperCase() !== "ADMIN") return showMsg("Spärrad", "Endast ADMIN kan öppna Admin-sidan.");
+        gotoRole("ADMIN");
+      });
+
+      // Enter = login
+      document.addEventListener("keydown", (e) => {
+        if (!e) return;
+        if (e.key === "Enter") {
+          onLogin();
+        }
+      });
+
+      // Boot
+      enforceExpiry();
+      renderSessionPill();
+      try { firstNameEl.focus(); } catch {}
+
     })();
   </script>
+
+  <!-- ==========================================================
+  ÄNDRINGSLOGG (≤8)
+  1) Root index.html är nu login-sida (förnamn + PIN).
+  2) Skapar session FRZ_SESSION_V1 (sessionStorage-first, localStorage fallback).
+  3) Rutar till ADMIN/BUYER/PICKER-sidor efter login.
+  =========================================================== -->
+
+  <!-- ==========================================================
+  TESTNOTERINGAR (klicktest)
+  - Öppna / (repo-root) -> logga in Admin/1111 -> ska hamna i /admin/freezer.html
+  - Logga ut -> session pill ska visa "Ingen"
+  - Logga in Inköp/2222 -> ska hamna i /buyer/freezer.html
+  - Logga in Plock/3333 -> ska hamna i /picker/freezer.html
+  =========================================================== -->
 </body>
 </html>
-
