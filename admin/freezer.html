@@ -1,385 +1,184 @@
-<!-- ============================================================
-AO-LOGIN-03 | USERS: Topbar “Skapa användare” + Modal | FIL-ID: admin/freezer.html
-Projekt: Freezer (UI-only / localStorage-first)
 
-Syfte:
-- Flytta “Skapa användare” till topbaren som knapp.
-- Skapa användare sker i ett modalfönster (UI-only).
-- Städning: Dashboard visar listan “Användare & behörigheter”, men själva skapaflödet ligger i modal.
+/* ============================================================
+AO-16/15 (EXTRA) — Modal Shell (JS, window-bridge) | FIL-ID: UI/pages/freezer/05-modal-shell.js
+Projekt: Fryslager (UI-only / localStorage-first)
+Syfte: Gemensam modal som kan användas av vy-moduler (varje ruta kan ha egen fil).
+POLICY: Ingen storage • XSS-safe (bygger DOM) • Fail-soft • Ingen UX/redesign utanför modal
 
-POLICY (LÅST):
-- UI-only • inga nya storage-keys/datamodell
-- XSS-safe (ingen osäker innerHTML)
-- Fail-closed oförändrat
+P0 TRACE/WRAP FIX (DENNA PATCH):
+- Stäng/overlay/ESC ska anropa window.FreezerModal.close() dynamiskt
+  så att en senare wrapper (close-tracer) alltid fångar anropet.
+============================================================ */
 
-============================================================ -->
-<!doctype html>
-<html lang="sv">
-<head>
-  <!-- ==========================================================
-  BLOCK 1/5 — HEAD + STYLES
-  =========================================================== -->
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Freezer – Admin</title>
+(function () {
+  "use strict";
 
-  <!-- Städ: slipp favicon-404 -->
-  <link rel="icon" href="data:,">
+  if (window.FreezerModal) return;
 
-  <style>
-    :root { color-scheme: light; }
-    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    header { border-bottom:1px solid #e6e6e6; background:#fff; }
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
-    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-    .brand { font-weight:700; }
-    nav a { text-decoration:none; color:inherit; opacity:.8; }
-    nav a:hover { opacity:1; }
-    .spacer { flex: 1; }
-    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fafafa; font-size: 13px; }
-    .pill b { font-weight:600; }
-    .muted { opacity:.75; }
-    .panel { border:1px solid #e6e6e6; border-radius: 12px; padding: 12px; background:#fff; }
-    main { background:#f6f7f8; min-height: calc(100vh - 64px); }
-    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
-    .tabBtn { border:1px solid #e6e6e6; background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; font-size: 14px; }
-    .tabBtn[aria-selected="true"] { font-weight:700; }
-    .grid2 { display:grid; grid-template-columns: 1fr; gap: 12px; }
-    @media (min-width: 900px){ .grid2 { grid-template-columns: 1fr 1fr; } }
-    .danger { border-color:#f2b8b5; background:#fff5f5; }
-    .ok { border-color:#cfe9cf; background:#f4fff4; }
-    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
-    .btn[disabled] { opacity:.55; cursor:not-allowed; }
-    select, input[type="text"] { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
-    footer { padding: 16px 0; }
+  const STATE = {
+    root: null,
+    overlay: null,
+    dialog: null,
+    title: null,
+    body: null,
+    closeBtn: null,
+    isOpen: false,
+    onClose: null
+  };
 
-    /* AO-03: Users UI small helpers */
-    .hr { height:1px; background:#eee; margin:10px 0; }
-    .badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid #e6e6e6; font-size:12px; background:#fafafa; }
-    .badge.off { opacity:.7; }
-    .list { display:flex; flex-direction:column; gap:8px; }
-    .userRow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px; border:1px solid #e6e6e6; border-radius:10px; background:#fff; }
-    .userRow .name { font-weight:700; }
-    .userRow .meta { font-size:12px; }
-    .chkRow { display:flex; gap:10px; flex-wrap:wrap; }
-    .chk { display:flex; gap:6px; align-items:center; font-size:13px; }
-    .warn { border-color:#f2b8b5; background:#fff5f5; }
+  function el(tag) { return document.createElement(tag); }
+  function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
 
-    /* ==========================================================
-       AO-LOGIN-03: Modal (self-contained, fail-closed)
-    =========================================================== */
-    .modalOverlay {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,.35);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 18px;
-      z-index: 9999;
+  function safeClose() {
+    try {
+      if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
+        window.FreezerModal.close();
+      }
+    } catch {}
+  }
+
+  function ensureRoot() {
+    try {
+      if (STATE.root && document.body.contains(STATE.root)) return STATE.root;
+
+      const overlay = el("div");
+      overlay.setAttribute("data-frz-modal", "overlay");
+      overlay.style.position = "fixed";
+      overlay.style.inset = "0";
+      overlay.style.background = "rgba(0,0,0,0.35)";
+      overlay.style.display = "none";
+      overlay.style.alignItems = "center";
+      overlay.style.justifyContent = "center";
+      overlay.style.zIndex = "9999";
+      overlay.style.padding = "16px";
+
+      const dialog = el("div");
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.style.width = "min(900px, 96vw)";
+      dialog.style.maxHeight = "90vh";
+      dialog.style.overflow = "auto";
+      dialog.style.background = "#fff";
+      dialog.style.borderRadius = "14px";
+      dialog.style.border = "1px solid #e6e6e6";
+      dialog.style.boxShadow = "0 12px 40px rgba(0,0,0,0.25)";
+
+      const head = el("div");
+      head.style.display = "flex";
+      head.style.gap = "10px";
+      head.style.alignItems = "center";
+      head.style.padding = "12px 12px";
+      head.style.borderBottom = "1px solid #eee";
+
+      const title = el("b");
+      title.textContent = "—";
+
+      const spacer = el("div");
+      spacer.style.flex = "1";
+
+      const closeBtn = el("button");
+      closeBtn.type = "button";
+      closeBtn.textContent = "Stäng";
+      closeBtn.style.border = "1px solid #e6e6e6";
+      closeBtn.style.background = "#fff";
+      closeBtn.style.borderRadius = "10px";
+      closeBtn.style.padding = "8px 10px";
+      closeBtn.style.cursor = "pointer";
+
+      const body = el("div");
+      body.style.padding = "12px 12px";
+
+      head.appendChild(title);
+      head.appendChild(spacer);
+      head.appendChild(closeBtn);
+
+      dialog.appendChild(head);
+      dialog.appendChild(body);
+      overlay.appendChild(dialog);
+
+      overlay.addEventListener("click", (ev) => {
+        // klick utanför dialog stänger
+        try {
+          if (ev.target === overlay) safeClose();
+        } catch {}
+      });
+
+      closeBtn.addEventListener("click", () => safeClose());
+
+      document.addEventListener("keydown", (ev) => {
+        try {
+          if (!STATE.isOpen) return;
+          if (ev.key === "Escape") safeClose();
+        } catch {}
+      });
+
+      document.body.appendChild(overlay);
+
+      STATE.root = overlay;
+      STATE.overlay = overlay;
+      STATE.dialog = dialog;
+      STATE.title = title;
+      STATE.body = body;
+      STATE.closeBtn = closeBtn;
+
+      return overlay;
+    } catch {
+      return null;
     }
-    .modalCard {
-      width: min(720px, 100%);
-      border-radius: 14px;
-      border: 1px solid #e6e6e6;
-      background: #fff;
-      box-shadow: 0 20px 60px rgba(0,0,0,.18);
-    }
-    .modalHead {
-      display:flex; align-items:center; gap:10px;
-      padding: 12px 14px;
-      border-bottom:1px solid #eee;
-    }
-    .modalBody { padding: 14px; }
-    .modalFoot {
-      display:flex; align-items:center; gap:10px;
-      padding: 12px 14px;
-      border-top:1px solid #eee;
-      justify-content:flex-end;
-    }
-    .modalTitle { font-weight:800; margin:0; }
-    .iconBtn {
-      border:1px solid #e6e6e6; background:#fff;
-      border-radius: 10px; padding:8px 10px; cursor:pointer;
-    }
-    .srOnly {
-      position:absolute; width:1px; height:1px; padding:0; margin:-1px;
-      overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
-    }
+  }
 
-    /* ==========================================================
-       AO-LOGIN-03: P0 FIX (UI) — Ta bort dashboard-rutan från startsidan
-       - Denna inline-msg ska inte visas (modalen ska bära fel/feedback).
-       - Vi behåller DOM-noden för bakåtkompabilitet, men låser den visuellt.
-    =========================================================== */
-    #frzUsersInlineMsg { display:none !important; }
-  </style>
-</head>
+  const api = {
+    ensureRoot,
 
-<body>
-  <!-- ==========================================================
-  BLOCK 2/5 — TOPBAR
-  =========================================================== -->
-  <header>
-    <div class="wrap">
-      <div class="row">
-        <div class="brand">🧊 Freezer</div>
+    open: function (opts) {
+      try {
+        ensureRoot();
+        if (!STATE.overlay || !STATE.title || !STATE.body) return;
 
-        <nav class="row" aria-label="Admin navigation">
-          <a href="./index.html" class="muted">Admin Hem</a>
-          <span class="muted">/</span>
-          <a href="./freezer.html"><b>Fryslager</b></a>
-        </nav>
+        const title = opts && opts.title ? String(opts.title) : "—";
+        STATE.title.textContent = title;
 
-        <div class="spacer"></div>
+        clear(STATE.body);
 
-        <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
-          <span class="muted">Status:</span>
-          <b id="frzStatusText">Laddar…</b>
-        </div>
+        // allow caller to render DOM safely
+        if (opts && typeof opts.render === "function") {
+          opts.render(STATE.body);
+        } else if (opts && typeof opts.text === "string") {
+          const p = el("div");
+          p.textContent = opts.text;
+          STATE.body.appendChild(p);
+        }
 
-        <div class="pill" title="Roll styrs av inloggning (ingen växling i admin-vyn)">
-          <span class="muted">Roll:</span>
-          <b id="frzRoleText">ADMIN</b>
-        </div>
+        STATE.onClose = (opts && typeof opts.onClose === "function") ? opts.onClose : null;
 
-        <div class="pill" title="Inloggad användare">
-          <span class="muted">Användare:</span>
-          <b id="frzUserName">—</b>
-        </div>
+        STATE.overlay.style.display = "flex";
+        STATE.isOpen = true;
 
-        <!-- AO-LOGIN-03: Topbar action -->
-        <button id="frzOpenCreateUserBtn" class="btn" type="button" title="Skapa ny användare (öppnar modal)" disabled>
-          Skapa användare
-        </button>
+        // focus close for accessibility
+        try { STATE.closeBtn && STATE.closeBtn.focus(); } catch {}
+      } catch {
+        /* fail-soft */
+      }
+    },
 
-        <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data (endast om ej read-only)">
-          Återställ demo
-        </button>
-      </div>
-    </div>
-  </header>
+    close: function () {
+      try {
+        if (!STATE.overlay) return;
+        STATE.overlay.style.display = "none";
+        STATE.isOpen = false;
 
-  <!-- ==========================================================
-  BLOCK 3/5 — MAIN + PANELS
-  =========================================================== -->
-  <main>
-    <div class="wrap">
-      <!-- Fail-closed -->
-      <section id="frzLockPanel" class="panel danger" hidden>
-        <div class="row">
-          <div>
-            <b>Import stoppad / Låst läge</b>
-            <div class="muted" id="frzLockReason">Orsak: okänd</div>
-          </div>
-        </div>
-      </section>
+        try {
+          if (typeof STATE.onClose === "function") STATE.onClose();
+        } catch {}
 
-      <!-- AO-02 optional debug -->
-      <section id="frzDebugPanel" class="panel" hidden>
-        <div class="row">
-          <b>Debug</b>
-          <div class="spacer"></div>
-          <div class="muted" id="frzDebugText">—</div>
-        </div>
-      </section>
+        STATE.onClose = null;
+      } catch {
+        /* fail-soft */
+      }
+    },
 
-      <section class="panel">
-        <div class="row">
-          <div class="tabs" role="tablist" aria-label="Vy">
-            <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
-            <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
-            <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
-          </div>
+    isOpen: function () { return !!STATE.isOpen; }
+  };
 
-          <div id="frzViewHint" class="muted" style="font-size:13px;">—</div>
-
-          <div class="spacer"></div>
-
-          <div class="pill" title="Visar om sidan är read-only">
-            <span class="muted">Läge:</span>
-            <b id="frzModeText">—</b>
-          </div>
-        </div>
-
-        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;">
-          <!-- Router fyller detta -->
-        </div>
-
-        <div id="freezerViewRoot" style="margin-top:10px;">
-          <!-- Aktiv vy mountas här -->
-        </div>
-      </section>
-
-      <!-- Dashboard -->
-      <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
-        <div class="grid2">
-          <div>
-            <h2 style="margin:0 0 8px 0;">Översikt</h2>
-            <div class="muted" style="margin-bottom:12px;">
-              Snabb vy för inköp/admin. (Baslinje: beräkningar kan vara stub.)
-            </div>
-            <div id="frzDashCards" class="grid2"></div>
-          </div>
-
-          <div>
-            <h2 style="margin:0 0 8px 0;">Noteringar</h2>
-            <div class="muted" id="frzDashNotes">—</div>
-          </div>
-        </div>
-
-        <div class="hr"></div>
-
-        <!-- AO-03: Users panel (lista + åtgärder via modal i topbar) -->
-        <section id="frzUsersPanel" class="panel" style="background:#fff;" hidden>
-          <div class="row">
-            <div>
-              <h2 style="margin:0;">Användare & behörigheter</h2>
-              <div class="muted" style="margin-top:4px;">
-                Skapa/ändra användare görs via <b>Skapa användare</b> i topbaren.
-              </div>
-            </div>
-            <div class="spacer"></div>
-            <div class="pill" title="Antal användare (inkl inaktiva)">
-              <span class="muted">Users:</span>
-              <b id="frzUsersCount">0</b>
-            </div>
-          </div>
-
-          <div class="hr"></div>
-
-          <!-- Inline message (för list-actions, även om modal är stängd) -->
-          <div id="frzUsersInlineMsg" class="panel warn" hidden>
-            <b id="frzUsersInlineMsgTitle">Info</b>
-            <div class="muted" id="frzUsersInlineMsgText">—</div>
-          </div>
-
-          <div class="list" id="frzUsersList" aria-label="Users list">
-            <!-- Rendered by freezer-render.js (XSS-safe) -->
-          </div>
-        </section>
-      </section>
-
-      <!-- Saldo -->
-      <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
-        <div class="row" style="margin-bottom:10px;">
-          <h2 style="margin:0;">Lagersaldo</h2>
-          <div class="spacer"></div>
-          <div class="pill">
-            <span class="muted">Artiklar:</span>
-            <b id="frzSaldoCount">0</b>
-          </div>
-        </div>
-        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;">
-          <!-- Renderas XSS-safe -->
-        </div>
-      </section>
-
-      <!-- Historik -->
-      <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
-        <div class="row" style="margin-bottom:10px;">
-          <h2 style="margin:0;">Historik</h2>
-          <div class="spacer"></div>
-          <div class="pill">
-            <span class="muted">Händelser:</span>
-            <b id="frzHistoryCount">0</b>
-          </div>
-        </div>
-        <div id="frzHistoryList" class="panel" style="background:#fafafa;">
-          <!-- Renderas XSS-safe -->
-        </div>
-      </section>
-
-      <footer class="muted">
-        Baseline AO-01/15 • UI-only • localStorage-first • fail-closed
-      </footer>
-    </div>
-  </main>
-
-  <!-- ==========================================================
-  BLOCK 4/5 — CREATE USER MODAL
-  =========================================================== -->
-  <div id="frzUserModalOverlay" class="modalOverlay" hidden>
-    <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="frzUserModalTitle">
-      <div class="modalHead">
-        <h3 id="frzUserModalTitle" class="modalTitle">Skapa användare</h3>
-        <div class="spacer"></div>
-        <button id="frzUserModalCloseBtn" class="iconBtn" type="button" title="Stäng (Esc)">
-          Stäng
-        </button>
-      </div>
-
-      <div class="modalBody">
-        <div id="frzUsersMsg" class="panel warn" hidden>
-          <b id="frzUsersMsgTitle">Fel</b>
-          <div class="muted" id="frzUsersMsgText">—</div>
-        </div>
-
-        <div class="panel" style="background:#fafafa;">
-          <div class="row" style="margin-bottom:10px;">
-            <b id="frzUserFormTitle">Skapa användare</b>
-            <div class="spacer"></div>
-            <span class="muted" id="frzUserFormMode">—</span>
-          </div>
-
-          <div class="row" style="margin-bottom:10px;">
-            <label class="pill" for="frzUserFirstName">
-              <span class="muted">Förnamn:</span>
-              <input id="frzUserFirstName" type="text" placeholder="t.ex. Anna" maxlength="32" />
-            </label>
-          </div>
-
-          <div class="chkRow" aria-label="Behörigheter">
-            <label class="chk"><input id="perm_users_manage" type="checkbox" /> users_manage</label>
-            <label class="chk"><input id="perm_inventory_write" type="checkbox" /> inventory_write</label>
-            <label class="chk"><input id="perm_history_write" type="checkbox" /> history_write</label>
-            <label class="chk"><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
-          </div>
-
-          <input id="frzUserEditingId" type="hidden" value="" />
-          <div class="srOnly" aria-live="polite" id="frzUserModalLive">—</div>
-        </div>
-      </div>
-
-      <div class="modalFoot">
-        <button id="frzUserCancelBtn" class="btn" type="button">Avbryt</button>
-        <button id="frzUserSaveBtn" class="btn" type="button">Spara</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==========================================================
-  BLOCK 5/5 — SCRIPTS (KRITISK ORDNING)
-  Core → Contract → Store → Render → Dashboard → ModalShell → view-interface → registry → vyfiler → router/page
-  =========================================================== -->
-  <script src="../UI/pages/freezer/02-core.js"></script>
-  <script src="../UI/pages/freezer/04-contract.js"></script>
-  <script src="../UI/pages/freezer/03-store.js"></script>
-
-  <script src="../UI/freezer-render.js"></script>
-  <script src="../UI/freezer-dashboard.js"></script>
-
-  <!-- P0: modal-shell (window.FreezerModal) -->
-  <script src="../UI/pages/freezer/05-modal-shell.js"></script>
-
-  <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
-  <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
-
-  <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
-  <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
-
-  <script src="./freezer.js"></script>
-
-  <!-- ==========================================================
-  ÄNDRINGSLOGG (≤8)
-  1) AO-LOGIN-03: P0 fix – låser bort dashboardens inline msg-box visuellt (#frzUsersInlineMsg) så rutan inte syns på startsidan.
-  2) BLOCK-märkning (BLOCK 1–5) för tydligare struktur.
-  =========================================================== -->
-
-  <!-- ==========================================================
-  TESTNOTERINGAR (klicktest)
-  - Ladda sidan → ingen inline-felruta syns i dashboard under/ bakom modalen.
-  - Klick “Skapa användare” → modal öppnas.
-  - Klick “Spara” utan förnamn → fel ska visas i modalen.
-  =========================================================== -->
-</body>
-</html>
+  window.FreezerModal = api;
+})();
