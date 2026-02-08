@@ -1,3 +1,5 @@
+
+
 /* ============================================================
 AO-16/15 (EXTRA) — Modal Shell (JS, window-bridge) | FIL-ID: UI/pages/freezer/05-modal-shell.js
 Projekt: Fryslager (UI-only / localStorage-first)
