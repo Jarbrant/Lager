@@ -11,19 +11,14 @@ POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell
 - XSS-safe (ingen osäker innerHTML)
 - Fail-closed oförändrat
-
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
-  <!-- ==========================================================
-  BLOCK 1/5 — HEAD + STYLES
-  =========================================================== -->
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Freezer – Admin</title>
 
-  <!-- Städ: slipp favicon-404 -->
   <link rel="icon" href="data:,">
 
   <style>
@@ -53,7 +48,6 @@ POLICY (LÅST):
     select, input[type="text"] { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
     footer { padding: 16px 0; }
 
-    /* AO-03: Users UI small helpers */
     .hr { height:1px; background:#eee; margin:10px 0; }
     .badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid #e6e6e6; font-size:12px; background:#fafafa; }
     .badge.off { opacity:.7; }
@@ -65,9 +59,6 @@ POLICY (LÅST):
     .chk { display:flex; gap:6px; align-items:center; font-size:13px; }
     .warn { border-color:#f2b8b5; background:#fff5f5; }
 
-    /* ==========================================================
-       AO-LOGIN-03: Modal (self-contained, fail-closed)
-    =========================================================== */
     .modalOverlay {
       position: fixed; inset: 0;
       background: rgba(0,0,0,.35);
@@ -105,20 +96,10 @@ POLICY (LÅST):
       position:absolute; width:1px; height:1px; padding:0; margin:-1px;
       overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
     }
-
-    /* ==========================================================
-       AO-LOGIN-03: P0 FIX (UI) — Ta bort dashboard-rutan från startsidan
-       - Denna inline-msg ska inte visas (modalen ska bära fel/feedback).
-       - Vi behåller DOM-noden för bakåtkompabilitet, men låser den visuellt.
-    =========================================================== */
-    #frzUsersInlineMsg { display:none !important; }
   </style>
 </head>
 
 <body>
-  <!-- ==========================================================
-  BLOCK 2/5 — TOPBAR
-  =========================================================== -->
   <header>
     <div class="wrap">
       <div class="row">
@@ -147,7 +128,6 @@ POLICY (LÅST):
           <b id="frzUserName">—</b>
         </div>
 
-        <!-- AO-LOGIN-03: Topbar action -->
         <button id="frzOpenCreateUserBtn" class="btn" type="button" title="Skapa ny användare (öppnar modal)" disabled>
           Skapa användare
         </button>
@@ -159,12 +139,8 @@ POLICY (LÅST):
     </div>
   </header>
 
-  <!-- ==========================================================
-  BLOCK 3/5 — MAIN + PANELS
-  =========================================================== -->
   <main>
     <div class="wrap">
-      <!-- Fail-closed -->
       <section id="frzLockPanel" class="panel danger" hidden>
         <div class="row">
           <div>
@@ -174,7 +150,6 @@ POLICY (LÅST):
         </div>
       </section>
 
-      <!-- AO-02 optional debug -->
       <section id="frzDebugPanel" class="panel" hidden>
         <div class="row">
           <b>Debug</b>
@@ -201,16 +176,10 @@ POLICY (LÅST):
           </div>
         </div>
 
-        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;">
-          <!-- Router fyller detta -->
-        </div>
-
-        <div id="freezerViewRoot" style="margin-top:10px;">
-          <!-- Aktiv vy mountas här -->
-        </div>
+        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;"></div>
+        <div id="freezerViewRoot" style="margin-top:10px;"></div>
       </section>
 
-      <!-- Dashboard -->
       <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
         <div class="grid2">
           <div>
@@ -229,7 +198,6 @@ POLICY (LÅST):
 
         <div class="hr"></div>
 
-        <!-- AO-03: Users panel (lista + åtgärder via modal i topbar) -->
         <section id="frzUsersPanel" class="panel" style="background:#fff;" hidden>
           <div class="row">
             <div>
@@ -247,19 +215,15 @@ POLICY (LÅST):
 
           <div class="hr"></div>
 
-          <!-- Inline message (för list-actions, även om modal är stängd) -->
           <div id="frzUsersInlineMsg" class="panel warn" hidden>
             <b id="frzUsersInlineMsgTitle">Info</b>
             <div class="muted" id="frzUsersInlineMsgText">—</div>
           </div>
 
-          <div class="list" id="frzUsersList" aria-label="Users list">
-            <!-- Rendered by freezer-render.js (XSS-safe) -->
-          </div>
+          <div class="list" id="frzUsersList" aria-label="Users list"></div>
         </section>
       </section>
 
-      <!-- Saldo -->
       <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
         <div class="row" style="margin-bottom:10px;">
           <h2 style="margin:0;">Lagersaldo</h2>
@@ -269,12 +233,9 @@ POLICY (LÅST):
             <b id="frzSaldoCount">0</b>
           </div>
         </div>
-        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;">
-          <!-- Renderas XSS-safe -->
-        </div>
+        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;"></div>
       </section>
 
-      <!-- Historik -->
       <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
         <div class="row" style="margin-bottom:10px;">
           <h2 style="margin:0;">Historik</h2>
@@ -284,9 +245,7 @@ POLICY (LÅST):
             <b id="frzHistoryCount">0</b>
           </div>
         </div>
-        <div id="frzHistoryList" class="panel" style="background:#fafafa;">
-          <!-- Renderas XSS-safe -->
-        </div>
+        <div id="frzHistoryList" class="panel" style="background:#fafafa;"></div>
       </section>
 
       <footer class="muted">
@@ -295,17 +254,12 @@ POLICY (LÅST):
     </div>
   </main>
 
-  <!-- ==========================================================
-  BLOCK 4/5 — CREATE USER MODAL
-  =========================================================== -->
   <div id="frzUserModalOverlay" class="modalOverlay" hidden>
     <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="frzUserModalTitle">
       <div class="modalHead">
         <h3 id="frzUserModalTitle" class="modalTitle">Skapa användare</h3>
         <div class="spacer"></div>
-        <button id="frzUserModalCloseBtn" class="iconBtn" type="button" title="Stäng (Esc)">
-          Stäng
-        </button>
+        <button id="frzUserModalCloseBtn" class="iconBtn" type="button" title="Stäng (Esc)">Stäng</button>
       </div>
 
       <div class="modalBody">
@@ -347,10 +301,6 @@ POLICY (LÅST):
     </div>
   </div>
 
-  <!-- ==========================================================
-  BLOCK 5/5 — SCRIPTS (KRITISK ORDNING)
-  Core → Contract → Store → Render → Dashboard → ModalShell → view-interface → registry → vyfiler → router/page
-  =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
   <script src="../UI/pages/freezer/03-store.js"></script>
@@ -358,7 +308,6 @@ POLICY (LÅST):
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
 
-  <!-- P0: modal-shell (window.FreezerModal) -->
   <script src="../UI/pages/freezer/05-modal-shell.js"></script>
 
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
@@ -369,17 +318,11 @@ POLICY (LÅST):
 
   <script src="./freezer.js"></script>
 
-  <!-- ==========================================================
-  ÄNDRINGSLOGG (≤8)
-  1) AO-LOGIN-03: P0 fix – låser bort dashboardens inline msg-box visuellt (#frzUsersInlineMsg) så rutan inte syns på startsidan.
-  2) BLOCK-märkning (BLOCK 1–5) för tydligare struktur.
-  =========================================================== -->
-
-  <!-- ==========================================================
-  TESTNOTERINGAR (klicktest)
-  - Ladda sidan → ingen inline-felruta syns i dashboard under/ bakom modalen.
-  - Klick “Skapa användare” → modal öppnas.
-  - Klick “Spara” utan förnamn → fel ska visas i modalen.
-  =========================================================== -->
+  <!-- ÄNDRINGSLOGG (≤8)
+  1) AO-LOGIN-03: Topbar-knapp “Skapa användare”.
+  2) AO-LOGIN-03: Modal för skapaflöde (legacy-IDs).
+  3) Städ: Users-panel visar lista + hint.
+  4) Inline msg i listpanelen när modal är stängd.
+  -->
 </body>
 </html>
