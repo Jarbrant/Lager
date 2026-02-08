@@ -4,9 +4,9 @@ AUTOPATCH | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
 P0 FIX (DENNA PATCH):
-- Router-meny + router-root ska INTE vara hidden / display:none (orsak till “inga rutor”).
-- Behåller modal-shell (window.FreezerModal) via vanlig <script> (ej module).
-- Behåller ESM-moduler (view-interface/registry/vyer) som type="module".
+- Lägger till tydlig navigering till PICKER-sidan: ../picker/freezer.html
+- Städ: <link rel="icon" href="data:,"> för att slippa favicon-404
+- I övrigt: oförändrad funktion (ingen ny storage/datamodell)
 
 OBS:
 - admin-dashboard.js + admin-items.js måste finnas på disk (annars 404).
@@ -17,6 +17,9 @@ OBS:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Freezer – Admin</title>
+
+  <!-- Städ: slipp favicon-404 -->
+  <link rel="icon" href="data:,">
 
   <style>
     :root { color-scheme: light; }
@@ -69,6 +72,13 @@ OBS:
           <a href="./index.html" class="muted">Admin Hem</a>
           <span class="muted">/</span>
           <a href="./freezer.html"><b>Fryslager</b></a>
+
+          <!-- P0: snabb navigation till andra roller/sidor -->
+          <span class="muted">|</span>
+          <a href="../picker/freezer.html" title="Öppna Plockare-sidan (picker/freezer.html)">Plockare</a>
+          <!-- (Valfritt) Om ni har buyer-sida: avkommentera -->
+          <!-- <span class="muted">|</span>
+          <a href="../buyer/freezer.html" title="Öppna Inköpare-sidan (buyer/freezer.html)">Inköpare</a> -->
         </nav>
 
         <div class="spacer"></div>
@@ -284,5 +294,19 @@ OBS:
   <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
 
   <script src="./freezer.js"></script>
+
+  <!-- ==========================================================
+  ÄNDRINGSLOGG (≤8)
+  1) P0: Lagt till nav-länk till ../picker/freezer.html så du kan nå PICKER-sidan direkt.
+  2) Städ: <link rel="icon" href="data:,"> för att slippa favicon-404.
+  =========================================================== -->
+
+  <!-- ==========================================================
+  TESTNOTERINGAR (klicktest)
+  - Öppna admin/freezer.html → klicka “Plockare” i nav:
+    - Du ska hamna på picker/freezer.html (inte tillbaka på admin).
+  - Om du hamnar fel:
+    - kontrollera att filen verkligen ligger i /picker/freezer.html i repo.
+  =========================================================== -->
 </body>
 </html>
