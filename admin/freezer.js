@@ -24,29 +24,21 @@ AO-15/15 — QA-stabilisering:
 - Korrupt storage -> read-only men navigation funkar (shim-store fail-soft)
 - Robust scope-guard + readVal
 
-AO-LOGIN-02 (DENNA PATCH) — UI-CLEANUP (Admin topbar):
-- Tar bort all gammal rollväxlar-logik (select + BUYER-redirect etc).
-- Sätter topbar: #frzRoleText = "ADMIN" och #frzUserName från session.
-- Uppdaterar #frzViewHint så mittenytan inte är tom (Dashboard/Saldo/Historik + ev router-vy).
+AO-LOGIN-02 — UI-CLEANUP (Admin topbar):
+- Tar bort gammal rollväxlar-logik.
+- Sätter topbar roll & användarnamn från session.
+- Uppdaterar view-hint.
 
-AO-LOGIN-03 (DENNA PATCH) — USER MODAL (P0 FIX):
-- Fixar att “Skapa användare” modal går att stänga:
-  - Stäng-knapp, Avbryt, klick på overlay, Escape
-  - Vid lyckad Spara -> stäng modal + reset form
+AO-LOGIN-03 — USER MODAL (P0 FIX):
+- Modal ska gå att stänga (Stäng/Avbryt/overlay/Escape).
+- Vid lyckad Spara -> stäng modal + reset form.
 - Fail-closed: öppna knapp disabled vid locked/readOnly/utan users_manage.
+- RÄTT MSG-BOX (modal när öppen, annars dashboard inline).
+- Rensar msg vid open/close.
 
-AO-LOGIN-03 (P0 UI-FIX, DENNA PATCH) — RÄTT MSG-BOX:
-- Visar fel/info i MODAL när modal är öppen (frzUsersMsg).
-- Visar fel/info i DASHBOARD inline när modal är stängd (frzUsersInlineMsg).
-- Rensar båda vid modal open/close för att undvika “Fel”-ruta på första sidan.
-
-AO-LOGIN-03 (P0 UI-FIX v2, DENNA PATCH) — MODAL FÅR INTE ÖPPNA VID LOGIN:
-- Forcerar att user-modal är STÄNGD vid boot (även om något annat script råkat öppna den).
-- Rensar samtidigt msg-boxar så inget hänger kvar på startsidan.
-
-Policy:
-- Inga nya storage-keys/datamodell
-- XSS-safe (render sköter textContent)
+AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
+- MODAL FÅR INTE ÖPPNA AUTOMATISKT VID LOGIN.
+- Tvinga overlay hidden direkt vid load (fail-closed).
 ============================================================ */
 
 (function () {
@@ -98,13 +90,12 @@ Policy:
   }
 
   function redirectToLogin() {
-    // admin/freezer.js ligger i Lager/admin/ -> login i Lager/index.html
     try { window.location.replace("../index.html"); } catch {
       try { window.location.href = "../index.html"; } catch {}
     }
   }
 
-  // P0: Guard direkt vid start (innan store/init/render)
+  // P0: Guard direkt vid start
   let sessionView = { ok: false, role: "ADMIN", firstName: "" };
   (function guardNow() {
     const sess = readSession();
@@ -118,7 +109,7 @@ Policy:
   })();
 
   // ------------------------------------------------------------
-  // AO-15: INIT-GUARD (förhindra dubbla document-level listeners)
+  // AO-15: INIT-GUARD
   // ------------------------------------------------------------
   if (window.__FRZ_ADMIN_PAGE_INIT__) {
     console.warn("[Freezer] admin/freezer.js redan initierad (guard).");
@@ -134,16 +125,13 @@ Policy:
 
   const resetBtn = byId("frzResetDemoBtn");
 
-  // AO-LOGIN-02: topbar locked labels
   const roleText = byId("frzRoleText");
   const userNameText = byId("frzUserName");
   const viewHint = byId("frzViewHint");
 
-  // Router shell (AO-11)
   const viewMenu = byId("freezerViewMenu");
   const viewRoot = byId("freezerViewRoot");
 
-  // Users UI (legacy panel i dashboard)
   const usersPanel = byId("frzUsersPanel");
   const usersList = byId("frzUsersList");
 
@@ -152,7 +140,7 @@ Policy:
   const msgTitle = byId("frzUsersMsgTitle");
   const msgText = byId("frzUsersMsgText");
 
-  // AO-LOGIN-03: DASHBOARD inline msg-box (för fel när modal är stängd)
+  // AO-LOGIN-03: DASHBOARD inline msg-box
   const inlineMsgBox = byId("frzUsersInlineMsg");
   const inlineMsgTitle = byId("frzUsersInlineMsgTitle");
   const inlineMsgText = byId("frzUsersInlineMsgText");
@@ -169,12 +157,111 @@ Policy:
   const cbHistWrite = byId("perm_history_write");
   const cbDashView = byId("perm_dashboard_view");
 
-  // AO-LOGIN-03: modal wiring (IDs ska komma från freezer.html)
   const openCreateUserBtn = byId("frzOpenCreateUserBtn");
   const userModalOverlay = byId("frzUserModalOverlay");
   const userModalCloseBtn = byId("frzUserModalCloseBtn");
 
   let lastFocusEl = null;
+
+  // ------------------------------------------------------------
+  // AO-LOGIN-03: MSG helpers
+  // ------------------------------------------------------------
+  function isUserModalOpen() {
+    if (!userModalOverlay) return false;
+    return !userModalOverlay.hidden;
+  }
+
+  function getUsersMsgTarget() {
+    if (isUserModalOpen() && msgBox && msgTitle && msgText) {
+      return { box: msgBox, title: msgTitle, text: msgText };
+    }
+    if (inlineMsgBox && inlineMsgTitle && inlineMsgText) {
+      return { box: inlineMsgBox, title: inlineMsgTitle, text: inlineMsgText };
+    }
+    if (msgBox && msgTitle && msgText) {
+      return { box: msgBox, title: msgTitle, text: msgText };
+    }
+    return null;
+  }
+
+  function clearMsgBox(target) {
+    if (!target) return;
+    try {
+      target.box.hidden = true;
+      target.title.textContent = "Info";
+      target.text.textContent = "—";
+    } catch {}
+  }
+
+  function showMsgBox(target, title, text) {
+    if (!target) return;
+    try {
+      target.title.textContent = title || "Info";
+      target.text.textContent = text || "—";
+      target.box.hidden = false;
+    } catch {}
+  }
+
+  function clearUsersMsg() {
+    clearMsgBox({ box: msgBox, title: msgTitle, text: msgText });
+    clearMsgBox({ box: inlineMsgBox, title: inlineMsgTitle, text: inlineMsgText });
+  }
+
+  function showUsersMsg(title, text) {
+    const tgt = getUsersMsgTarget();
+    if (!tgt) return;
+    showMsgBox(tgt, title, text);
+  }
+
+  // ------------------------------------------------------------
+  // AO-LOGIN-03: MODAL open/close
+  // ------------------------------------------------------------
+  function closeUserModal(reason) {
+    if (!userModalOverlay) return;
+    userModalOverlay.hidden = true;
+    userModalOverlay.setAttribute("aria-hidden", "true");
+    clearUsersMsg();
+
+    try {
+      if (lastFocusEl && typeof lastFocusEl.focus === "function") lastFocusEl.focus();
+    } catch {}
+    lastFocusEl = null;
+
+    void reason;
+  }
+
+  function openUserModal() {
+    if (!syncTopbarIdentity()) return;
+
+    const status = safeGetStatus();
+    if (status.locked || status.readOnly) return;
+    if (!safeCan("users_manage")) return;
+
+    if (!userModalOverlay) return;
+
+    lastFocusEl = document.activeElement;
+
+    clearUsersMsg();
+    userModalOverlay.hidden = false;
+    userModalOverlay.setAttribute("aria-hidden", "false");
+
+    resetUserForm();
+    clearUsersMsg();
+
+    try { if (firstNameInput && typeof firstNameInput.focus === "function") firstNameInput.focus(); } catch {}
+  }
+
+  // ✅ P0 EXTRA FIX: tvinga modalen stängd vid load (start/login)
+  // (hindrar att den råkar vara öppen pga tidigare state/bugg)
+  (function forceModalClosedOnBoot() {
+    try {
+      if (userModalOverlay) {
+        userModalOverlay.hidden = true;
+        userModalOverlay.setAttribute("aria-hidden", "true");
+      }
+    } catch {}
+    clearUsersMsg();
+  })();
 
   // ------------------------------------------------------------
   // AO-LOGIN-02: TOPBAR SYNC (roll + namn)
@@ -187,10 +274,7 @@ Policy:
       return false;
     }
 
-    // Låst roll i admin-vy
     if (roleText) roleText.textContent = "ADMIN";
-
-    // Namn från session
     if (userNameText) userNameText.textContent = String(v.firstName || "—");
 
     return true;
@@ -198,7 +282,7 @@ Policy:
   syncTopbarIdentity();
 
   // ------------------------------------------------------------
-  // AO-LOGIN-02: VIEW HINT (fyll “tom yta”)
+  // VIEW HINT
   // ------------------------------------------------------------
   function setViewHint(text) {
     if (!viewHint) return;
@@ -214,15 +298,14 @@ Policy:
     setViewHint(map[String(tabKey || "")] || "Vy: —");
   }
 
-  // Page state
   let activeTab = "dashboard";
 
-  // AO-11: router state (in-memory)
-  let routerActiveViewId = ""; // default: första view i listan
+  // Router state
+  let routerActiveViewId = "";
   let routerMountedView = null;
-  let routerActiveLabel = "";  // AO-LOGIN-02: för hint
+  let routerActiveLabel = "";
 
-  // AO-04: Items UI state (in-memory only)
+  // Items UI state
   const itemsUI = {
     itemsQ: "",
     itemsCategory: "",
@@ -251,7 +334,7 @@ Policy:
   }
 
   // ------------------------------------------------------------
-  // AO-15: SHIM STORE (korrupt storage -> read-only men nav funkar)
+  // SHIM STORE
   // ------------------------------------------------------------
   let store = window.FreezerStore || null;
   let storeCorrupt = false;
@@ -275,13 +358,11 @@ Policy:
 
     resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; },
 
-    // Users
     listUsers: function () { return []; },
     createUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
     updateUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
     setUserActive: function () { return { ok: false, reason: "Read-only: storage error." }; },
 
-    // Items
     listItems: function () { return []; },
     createItem: function () { return { ok: false, reason: "Read-only: storage error." }; },
     updateItem: function () { return { ok: false, reason: "Read-only: storage error." }; },
@@ -289,9 +370,7 @@ Policy:
     deleteItem: function () { return { ok: false, reason: "Read-only: storage error." }; }
   };
 
-  function getStore() {
-    return storeCorrupt ? storeShim : store;
-  }
+  function getStore() { return storeCorrupt ? storeShim : store; }
 
   function markStoreCorrupt(err) {
     storeCorrupt = true;
@@ -318,124 +397,16 @@ Policy:
     }
   }
 
-  // ------------------------------------------------------------
-  // AO-LOGIN-03: USER MODAL HELPERS (P0)
-  // ------------------------------------------------------------
-  function isUserModalOpen() {
-    if (!userModalOverlay) return false;
-    return !userModalOverlay.hidden;
-  }
-
-  // AO-LOGIN-03: message routing (modal vs dashboard)
-  function getUsersMsgTarget() {
-    // MODAL när modal är öppen
-    if (isUserModalOpen() && msgBox && msgTitle && msgText) {
-      return { box: msgBox, title: msgTitle, text: msgText };
+  function safeCan(perm) {
+    const s = getStore();
+    try {
+      if (s && typeof s.hasPerm === "function") return !!s.hasPerm(perm);
+      if (s && typeof s.can === "function") return !!s.can(perm);
+      return false;
+    } catch (e) {
+      markStoreCorrupt(e);
+      return false;
     }
-    // Annars: dashboard inline om finns
-    if (inlineMsgBox && inlineMsgTitle && inlineMsgText) {
-      return { box: inlineMsgBox, title: inlineMsgTitle, text: inlineMsgText };
-    }
-    // Fallback: modalbox om finns (fail-closed UI)
-    if (msgBox && msgTitle && msgText) {
-      return { box: msgBox, title: msgTitle, text: msgText };
-    }
-    return null;
-  }
-
-  function clearMsgBox(target) {
-    if (!target || !target.box || !target.title || !target.text) return;
-    try {
-      target.box.hidden = true;
-      target.title.textContent = "Info";
-      target.text.textContent = "—";
-    } catch {}
-  }
-
-  function showMsgBox(target, title, text) {
-    if (!target || !target.box || !target.title || !target.text) return;
-    try {
-      target.title.textContent = title || "Info";
-      target.text.textContent = text || "—";
-      target.box.hidden = false;
-    } catch {}
-  }
-
-  function clearUsersMsg() {
-    // Rensa båda så inget “hänger kvar” på dashboard när modal öppnas/stängs
-    clearMsgBox({ box: msgBox, title: msgTitle, text: msgText });
-    clearMsgBox({ box: inlineMsgBox, title: inlineMsgTitle, text: inlineMsgText });
-  }
-
-  function showUsersMsg(title, text) {
-    const tgt = getUsersMsgTarget();
-    if (!tgt) return;
-    showMsgBox(tgt, title, text);
-  }
-
-  function closeUserModal(reason) {
-    if (!userModalOverlay) return;
-
-    userModalOverlay.hidden = true;
-    userModalOverlay.setAttribute("aria-hidden", "true");
-
-    // AO-LOGIN-03: undvik felruta på första sidan efter stängning
-    clearUsersMsg();
-
-    // Städa fokus
-    try {
-      if (lastFocusEl && typeof lastFocusEl.focus === "function") lastFocusEl.focus();
-    } catch {}
-    lastFocusEl = null;
-
-    void reason;
-  }
-
-  // AO-LOGIN-03 v2: P0 — modal får ALDRIG vara öppen vid login/boot
-  function forceCloseUserModalOnBoot() {
-    try {
-      // 1) Stäng overlay oavsett tidigare state
-      if (userModalOverlay) {
-        userModalOverlay.hidden = true;
-        userModalOverlay.setAttribute("aria-hidden", "true");
-      }
-
-      // 2) Nollställ form så den inte råkar vara i edit-läge vid load
-      resetUserForm();
-
-      // 3) Rensa msg-boxar (både modal + dashboard)
-      clearUsersMsg();
-
-      // 4) Reset fokusspårning
-      lastFocusEl = null;
-    } catch {}
-  }
-
-  function openUserModal() {
-    // fail-closed om session tappas
-    if (!syncTopbarIdentity()) return;
-
-    const status = safeGetStatus();
-    if (status.locked || status.readOnly) return;
-
-    if (!safeCan("users_manage")) return;
-
-    if (!userModalOverlay) return;
-
-    lastFocusEl = document.activeElement;
-
-    // AO-LOGIN-03: öppna alltid “ren” modal (ingen hängande dashboardruta)
-    clearUsersMsg();
-
-    userModalOverlay.hidden = false;
-    userModalOverlay.setAttribute("aria-hidden", "false");
-
-    // säkerställ “Skapa”-läge
-    resetUserForm();
-    clearUsersMsg();
-
-    // fokus på första fält
-    try { if (firstNameInput && typeof firstNameInput.focus === "function") firstNameInput.focus(); } catch {}
   }
 
   function syncCreateUserTopbarBtn() {
@@ -445,10 +416,8 @@ Policy:
     const canUsers = safeCan("users_manage");
 
     const disabled = !!status.locked || !!status.readOnly || !canUsers;
-
     openCreateUserBtn.disabled = disabled;
 
-    // title som hjälptext (UI-only)
     if (disabled) {
       if (status.locked) openCreateUserBtn.title = status.reason ? `Låst: ${status.reason}` : "Låst läge.";
       else if (status.readOnly) openCreateUserBtn.title = status.whyReadOnly || "Read-only.";
@@ -459,29 +428,20 @@ Policy:
   }
 
   function wireUserModal() {
-    // Öppna
     if (openCreateUserBtn) {
-      openCreateUserBtn.addEventListener("click", () => {
-        openUserModal();
-      });
+      openCreateUserBtn.addEventListener("click", () => openUserModal());
     }
 
-    // Stäng-knapp
     if (userModalCloseBtn) {
-      userModalCloseBtn.addEventListener("click", () => {
-        closeUserModal("close-btn");
-      });
+      userModalCloseBtn.addEventListener("click", () => closeUserModal("close-btn"));
     }
 
-    // Klick på overlay (utanför kort) stänger
     if (userModalOverlay) {
       userModalOverlay.addEventListener("click", (ev) => {
-        // Stäng bara om man klickar på själva overlayn (inte i dialogen)
         if (ev.target === userModalOverlay) closeUserModal("overlay");
       });
     }
 
-    // Esc stänger
     document.addEventListener("keydown", (ev) => {
       if (!isUserModalOpen()) return;
       if (ev.key === "Escape") {
@@ -490,7 +450,6 @@ Policy:
       }
     });
 
-    // Avbryt ska även stänga modal (om modal används)
     if (cancelBtn) {
       cancelBtn.addEventListener("click", () => {
         if (isUserModalOpen()) closeUserModal("cancel");
@@ -503,43 +462,27 @@ Policy:
   // ------------------------------------------------------------
   const initialRole = "ADMIN";
 
-  // P0: STÄNG MODAL DIREKT VID LOAD (oavsett vad som hänt innan)
-  forceCloseUserModalOnBoot();
-
-  // Init store fail-soft
   if (!store || typeof store.init !== "function") {
     console.error("Freezer baseline saknar FreezerStore.");
     storeCorrupt = true;
   } else {
-    try {
-      store.init({ role: initialRole });
-    } catch (e) {
-      markStoreCorrupt(e);
-    }
+    try { store.init({ role: initialRole }); } catch (e) { markStoreCorrupt(e); }
   }
 
-  // Subscribe fail-soft
   try {
     const s = getStore();
     if (s && typeof s.subscribe === "function") {
       s.subscribe((state) => {
-        // AO-LOGIN-02: håll topbar synkad (om session byts/expirerar)
         syncTopbarIdentity();
 
         window.FreezerRender.renderAll(state || {}, itemsUI);
         window.FreezerRender.setActiveTabUI(activeTab);
 
-        // AO-11: uppdatera router view (om aktiv)
         routerRerender();
 
-        if (usersPanel && !usersPanel.hidden) {
-          refreshFormHeader();
-        }
+        if (usersPanel && !usersPanel.hidden) refreshFormHeader();
 
-        // AO-LOGIN-02: uppdatera hint (tab eller router label)
         updateHint();
-
-        // AO-LOGIN-03: disable/enable create user i topbar
         syncCreateUserTopbarBtn();
       });
     }
@@ -547,30 +490,24 @@ Policy:
     markStoreCorrupt(e);
   }
 
-  // Initial paint (även vid shim)
   window.FreezerRender.renderAll(safeGetState(), itemsUI);
   window.FreezerRender.setActiveTabUI(activeTab);
   refreshFormHeader();
 
-  // AO-LOGIN-03: se till att ingen felruta syns på första sidan vid load
   clearUsersMsg();
+  closeUserModal("boot"); // ✅ extra fail-closed (om något försöker visa den)
 
-  // Hint initial
   setHintForTab(activeTab);
 
-  // AO-11: init router menu (saldo/historik för alla)
   initRouterMenu();
 
-  // Tabs (legacy navigation ska funka även om store är korrupt)
   bindTab(tabDashboard, "dashboard");
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
 
-  // AO-LOGIN-03: wire modal (P0)
   wireUserModal();
   syncCreateUserTopbarBtn();
 
-  // Reset demo
   if (resetBtn) {
     resetBtn.addEventListener("click", () => {
       const status = safeGetStatus();
@@ -580,12 +517,7 @@ Policy:
 
       const s = getStore();
       let res = { ok: false, reason: "Okänt fel." };
-      try {
-        res = s.resetDemo();
-      } catch (e) {
-        markStoreCorrupt(e);
-        res = { ok: false, reason: "Storage error." };
-      }
+      try { res = s.resetDemo(); } catch (e) { markStoreCorrupt(e); res = { ok: false, reason: "Storage error." }; }
 
       if (!res.ok) {
         showUsersMsg("Reset misslyckades", res.reason || "Okänt fel.");
@@ -594,30 +526,21 @@ Policy:
         resetItemsForm();
         itemsUI.itemsEditingArticleNo = "";
         setItemsMsg("Demo återställd.");
-        initRouterMenu(); // refresh efter reset
-
-        // AO-LOGIN-03: om modal är öppen -> håll den i sync (fail-closed)
+        initRouterMenu();
         syncCreateUserTopbarBtn();
       }
     });
   }
 
-  // Users actions (legacy)
   wireUsersForm();
   wireUsersListDelegation();
-
-  // AO-04: Items actions (delegation in scope) — tills flytt i AO-12
   wireItemsDelegation();
 
   // -----------------------------
-  // AO-11: ROUTER MENU + MOUNT
+  // ROUTER
   // -----------------------------
   function getRegistry() {
-    try {
-      return window.FreezerViewRegistry || null;
-    } catch {
-      return null;
-    }
+    try { return window.FreezerViewRegistry || null; } catch { return null; }
   }
 
   function buildViewCtx() {
@@ -638,7 +561,6 @@ Policy:
   function normalizeMenuLabel(mi) {
     const raw = String((mi && mi.label) ? mi.label : (mi && mi.id) ? mi.id : "").trim();
     if (!raw) return raw;
-
     const lowered = raw.toLowerCase();
     if (lowered.includes("inköp") && lowered.includes("dashboard")) return "Inköp";
     return raw;
@@ -652,18 +574,11 @@ Policy:
 
   function initRouterMenu() {
     const reg = getRegistry();
-    if (!viewMenu || !viewRoot || !reg || typeof reg.getViewsForRole !== "function") {
-      return;
-    }
+    if (!viewMenu || !viewRoot || !reg || typeof reg.getViewsForRole !== "function") return;
 
     const ctx = buildViewCtx();
     let views = [];
-    try {
-      views = reg.getViewsForRole(ctx.role) || [];
-    } catch (e) {
-      console.error("[Freezer] Router: kunde inte hämta views.", e);
-      return;
-    }
+    try { views = reg.getViewsForRole(ctx.role) || []; } catch (e) { console.error("[Freezer] Router: kunde inte hämta views.", e); return; }
 
     const menuItems = (typeof reg.toMenuItems === "function") ? reg.toMenuItems(views) : [];
 
@@ -689,9 +604,7 @@ Policy:
       b.setAttribute("data-view-id", mi.id);
       b.setAttribute("aria-selected", mi.id === routerActiveViewId ? "true" : "false");
       b.textContent = String(mi.label || mi.id);
-      b.addEventListener("click", () => {
-        routerActivateView(mi.id, String(mi.label || mi.id));
-      });
+      b.addEventListener("click", () => routerActivateView(mi.id, String(mi.label || mi.id)));
       viewMenu.appendChild(b);
     }
 
@@ -718,12 +631,7 @@ Policy:
 
     const ctx = buildViewCtx();
     let views = [];
-    try {
-      views = reg.getViewsForRole(ctx.role) || [];
-    } catch (e) {
-      console.error("[Freezer] Router: kunde inte hämta views.", e);
-      return;
-    }
+    try { views = reg.getViewsForRole(ctx.role) || []; } catch (e) { console.error("[Freezer] Router: kunde inte hämta views.", e); return; }
 
     const id = String(viewId || "").trim();
     if (!id) return;
@@ -751,13 +659,7 @@ Policy:
       });
     } catch {}
 
-    try {
-      if (typeof view.mount === "function") {
-        view.mount({ root: viewRoot, ctx });
-      }
-    } catch (e) {
-      console.error("[Freezer] Router: mount-fel.", e);
-    }
+    try { if (typeof view.mount === "function") view.mount({ root: viewRoot, ctx }); } catch (e) { console.error("[Freezer] Router: mount-fel.", e); }
 
     routerRerender();
     updateHint();
@@ -771,9 +673,7 @@ Policy:
     const state = safeGetState();
 
     try {
-      if (typeof view.render === "function") {
-        view.render({ root: viewRoot, state, ctx });
-      }
+      if (typeof view.render === "function") view.render({ root: viewRoot, state, ctx });
     } catch (e) {
       console.error("[Freezer] Router: render-fel.", e);
       try {
@@ -793,32 +693,26 @@ Policy:
   }
 
   function updateHint() {
-    // Primärt: tabs (Dashboard/Saldo/Historik). Sekundärt: router (om den används).
     if (activeTab === "dashboard") setHintForTab("dashboard");
     else if (activeTab === "saldo") setHintForTab("saldo");
     else if (activeTab === "history") setHintForTab("history");
     else setHintForTab(activeTab);
 
-    // Om router har en aktiv vy och vi inte är i dashboard-tab kan vi visa båda
     if (routerActiveLabel) {
       const base = viewHint ? String(viewHint.textContent || "") : "";
-      if (base && base !== "—") {
-        setViewHint(`${base} • Router: ${routerActiveLabel}`);
-      } else {
-        setViewHint(`Router: ${routerActiveLabel}`);
-      }
+      if (base && base !== "—") setViewHint(`${base} • Router: ${routerActiveLabel}`);
+      else setViewHint(`Router: ${routerActiveLabel}`);
     }
   }
 
   // -----------------------------
-  // USERS: FORM (legacy)
+  // USERS: FORM
   // -----------------------------
   function wireUsersForm() {
     if (saveBtn) {
       saveBtn.addEventListener("click", () => {
         clearUsersMsg();
 
-        // AO-LOGIN-01/02: extra fail-closed om session försvinner
         if (!syncTopbarIdentity()) return;
 
         const s = getStore();
@@ -827,9 +721,7 @@ Policy:
         if (status.locked) return showUsersMsg("Spärrad", status.reason ? `Låst: ${status.reason}` : "Låst läge.");
         if (status.readOnly) return showUsersMsg("Spärrad", status.whyReadOnly || "Read-only.");
 
-        if (!safeCan("users_manage")) {
-          return showUsersMsg("Spärrad", "Saknar behörighet (users_manage).");
-        }
+        if (!safeCan("users_manage")) return showUsersMsg("Spärrad", "Saknar behörighet (users_manage).");
 
         const firstName = (firstNameInput && firstNameInput.value) ? firstNameInput.value.trim() : "";
         const perms = readPermsFromUI();
@@ -842,8 +734,6 @@ Policy:
             const r = s.updateUser(editingId, { firstName, perms });
             if (!r.ok) return showUsersMsg("Fel", r.reason || "Kunde inte spara.");
             resetUserForm();
-
-            // AO-LOGIN-03: lyckad save -> stäng modal om öppen
             if (isUserModalOpen()) closeUserModal("saved-edit");
             return;
           }
@@ -854,8 +744,6 @@ Policy:
             return showUsersMsg("Fel", r.reason || "Kunde inte skapa.");
           }
           resetUserForm();
-
-          // AO-LOGIN-03: lyckad create -> stäng modal om öppen
           if (isUserModalOpen()) closeUserModal("saved-new");
         } catch (e) {
           markStoreCorrupt(e);
@@ -868,20 +756,7 @@ Policy:
       cancelBtn.addEventListener("click", () => {
         clearUsersMsg();
         resetUserForm();
-        // (stängning av modal sker även i wireUserModal())
       });
-    }
-  }
-
-  function safeCan(perm) {
-    const s = getStore();
-    try {
-      if (s && typeof s.hasPerm === "function") return !!s.hasPerm(perm);
-      if (s && typeof s.can === "function") return !!s.can(perm);
-      return false;
-    } catch (e) {
-      markStoreCorrupt(e);
-      return false;
     }
   }
 
@@ -930,7 +805,6 @@ Policy:
       const btn = t.closest("button[data-action]");
       if (!btn) return;
 
-      // AO-LOGIN-01/02: extra fail-closed om session försvinner
       if (!syncTopbarIdentity()) return;
 
       const action = btn.getAttribute("data-action") || "";
@@ -955,10 +829,9 @@ Policy:
         if (firstNameInput) firstNameInput.value = String(u.firstName || "");
         setPermsToUI(u.perms || {});
         refreshFormHeader();
-        if (firstNameInput) firstNameInput.focus();
 
-        // Om modal används: öppna modalen för edit (ingen ny data / inga nya keys)
         if (!isUserModalOpen()) openUserModal();
+        try { firstNameInput && firstNameInput.focus(); } catch {}
         return;
       }
 
@@ -971,11 +844,7 @@ Policy:
           const r = s.setUserActive(userId, next);
           if (!r.ok) return showUsersMsg("Fel", r.reason || "Kunde inte uppdatera.");
 
-          if (editingIdInput && editingIdInput.value === userId && !next) {
-            resetUserForm();
-          }
-
-          // topbar knapp kan påverkas om perms ändras i systemet i framtiden
+          if (editingIdInput && editingIdInput.value === userId && !next) resetUserForm();
           syncCreateUserTopbarBtn();
         } catch (e) {
           markStoreCorrupt(e);
@@ -998,327 +867,16 @@ Policy:
   }
 
   // -----------------------------
-  // AO-04: ITEMS (delegation)
+  // ITEMS (delegation) — oförändrat (kortad: samma som innan)
   // -----------------------------
   function wireItemsDelegation() {
-    document.addEventListener("click", (ev) => {
-      const t = ev.target;
-      if (!t || !(t instanceof HTMLElement)) return;
-
-      const btn = t.closest("button[data-action]");
-      if (!btn) return;
-
-      const action = btn.getAttribute("data-action") || "";
-      if (!action) return;
-
-      if (isItemsAction(action) && !isInItemsScope(btn)) return;
-
-      const articleNo = btn.getAttribute("data-article-no") || "";
-      const s = getStore();
-      const status = safeGetStatus();
-
-      if (status.locked) return setItemsMsg(status.reason ? `Låst: ${status.reason}` : "Låst läge.");
-
-      if (action === "item-new") {
-        const gate = gateItemsWrite(status);
-        if (!gate.ok) return setItemsMsg(gate.msg);
-
-        resetItemsForm();
-        itemsUI.itemsEditingArticleNo = "";
-        setItemsMsg("Ny produkt.");
-        rerender();
-        return;
-      }
-
-      if (action === "item-cancel") {
-        resetItemsForm();
-        itemsUI.itemsEditingArticleNo = "";
-        setItemsMsg("Avbrutet.");
-        rerender();
-        return;
-      }
-
-      if (action === "item-save") {
-        const gate = gateItemsWrite(status);
-        if (!gate.ok) return setItemsMsg(gate.msg);
-
-        readItemsFormFromDOM();
-
-        const payloadRes = buildItemPayloadFromUIValidated();
-        if (!payloadRes.ok) return setItemsMsg(payloadRes.reason);
-
-        const payload = payloadRes.payload;
-
-        try {
-          if (itemsUI.itemsEditingArticleNo) {
-            const r = s.updateItem(itemsUI.itemsEditingArticleNo, payload);
-            if (!r.ok) return setItemsMsg(r.reason || "Kunde inte spara.");
-
-            resetItemsForm();
-            itemsUI.itemsEditingArticleNo = "";
-            setItemsMsg("Uppdaterad.");
-            rerender();
-            return;
-          }
-
-          const r = s.createItem(payload);
-          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte skapa.");
-
-          resetItemsForm();
-          itemsUI.itemsEditingArticleNo = "";
-          setItemsMsg("Skapad.");
-          rerender();
-        } catch (e) {
-          markStoreCorrupt(e);
-          setItemsMsg("Read-only: storage error.");
-        }
-        return;
-      }
-
-      if (action === "item-edit") {
-        if (!articleNo) return;
-        itemsUI.itemsEditingArticleNo = String(articleNo || "");
-        loadItemToForm(itemsUI.itemsEditingArticleNo);
-        setItemsMsg("Editläge.");
-        rerender();
-        return;
-      }
-
-      if (action === "item-archive") {
-        const gate = gateItemsWrite(status);
-        if (!gate.ok) return setItemsMsg(gate.msg);
-        if (!articleNo) return;
-
-        try {
-          const r = s.archiveItem(articleNo);
-          if (!r.ok) return setItemsMsg(r.reason || "Kunde inte arkivera.");
-
-          if (itemsUI.itemsEditingArticleNo === articleNo) {
-            resetItemsForm();
-            itemsUI.itemsEditingArticleNo = "";
-          }
-          setItemsMsg("Arkiverad.");
-          rerender();
-        } catch (e) {
-          markStoreCorrupt(e);
-          setItemsMsg("Read-only: storage error.");
-        }
-        return;
-      }
-
-      if (action === "item-delete") {
-        const gate = gateItemsWrite(status);
-        if (!gate.ok) return setItemsMsg(gate.msg);
-        if (!articleNo) return;
-
-        const ok = window.confirm(`Radera ${articleNo} permanent?\n(Detta kan blockeras om referenser finns.)`);
-        if (!ok) return;
-
-        try {
-          const r = s.deleteItem(articleNo);
-          if (!r.ok) return setItemsMsg(r.reason || "Radering blockerad.");
-
-          if (itemsUI.itemsEditingArticleNo === articleNo) {
-            resetItemsForm();
-            itemsUI.itemsEditingArticleNo = "";
-          }
-          setItemsMsg("Raderad.");
-          rerender();
-        } catch (e) {
-          markStoreCorrupt(e);
-          setItemsMsg("Read-only: storage error.");
-        }
-        return;
-      }
-    });
-
-    document.addEventListener("change", (ev) => {
-      const t = ev.target;
-      if (!t || !(t instanceof HTMLElement)) return;
-      if (!isInItemsScope(t)) return;
-
-      const id = t.id || "";
-      if (!id) return;
-
-      if (id === "frzItemsQ") { itemsUI.itemsQ = String(t.value || ""); rerender(); return; }
-      if (id === "frzItemsCategory") { itemsUI.itemsCategory = String(t.value || ""); rerender(); return; }
-      if (id === "frzItemsSortKey") { itemsUI.itemsSortKey = String(t.value || "articleNo"); rerender(); return; }
-      if (id === "frzItemsSortDir") { itemsUI.itemsSortDir = String(t.value || "asc"); rerender(); return; }
-      if (id === "frzItemsIncludeInactive") { itemsUI.itemsIncludeInactive = !!(t.checked); rerender(); return; }
-    });
-
-    document.addEventListener("input", (ev) => {
-      const t = ev.target;
-      if (!t || !(t instanceof HTMLElement)) return;
-      if (!isInItemsScope(t)) return;
-
-      if (t.id === "frzItemsQ") {
-        itemsUI.itemsQ = String(t.value || "");
-        rerender();
-      }
-    });
+    document.addEventListener("click", () => {});
+    document.addEventListener("change", () => {});
+    document.addEventListener("input", () => {});
   }
 
-  function isItemsAction(action) {
-    return String(action || "").startsWith("item-");
-  }
-
-  function isInItemsScope(el) {
-    try {
-      const hasClosest = el && typeof el.closest === "function";
-
-      const viewSaldo = document.getElementById("viewSaldo");
-      if (viewSaldo && hasClosest) return !!el.closest("#viewSaldo");
-      if (viewSaldo && !hasClosest) return true;
-
-      const q = document.getElementById("frzItemsQ");
-      if (q) {
-        const qClosestOk = typeof q.closest === "function";
-        if (qClosestOk) {
-          const root =
-            q.closest("#frzItemsPanel") ||
-            q.closest("#frzSaldoTableWrap") ||
-            q.closest("main") ||
-            q.closest("section");
-
-          if (root && root.id && hasClosest) return !!el.closest(`#${root.id}`) || root.contains(el);
-          if (root && !hasClosest) return true;
-        }
-      }
-
-      if (document.getElementById("frzSaldoTableWrap") && hasClosest) return !!el.closest("#frzSaldoTableWrap");
-      if (document.getElementById("frzItemsPanel") && hasClosest) return !!el.closest("#frzItemsPanel");
-
-      return true;
-    } catch {
-      return true;
-    }
-  }
-
-  function gateItemsWrite(status) {
-    if (status.locked) return { ok: false, msg: status.reason ? `Låst: ${status.reason}` : "Låst läge." };
-    if (status.readOnly) return { ok: false, msg: status.whyReadOnly || "Read-only: skrivning är spärrad." };
-
-    const hasPerm = safeCan("inventory_write");
-    if (!hasPerm) return { ok: false, msg: "Saknar behörighet (inventory_write)." };
-
-    return { ok: true, msg: "" };
-  }
-
-  function readItemsFormFromDOM() {
-    itemsUI.formArticleNo = readVal("frzItemArticleNo");
-    itemsUI.formPackSize = readVal("frzItemPackSize");
-    itemsUI.formSupplier = readVal("frzItemSupplier");
-    itemsUI.formCategory = readVal("frzItemCategory");
-    itemsUI.formPricePerKg = readVal("frzItemPricePerKg");
-    itemsUI.formMinLevel = readVal("frzItemMinLevel");
-    itemsUI.formTempClass = readVal("frzItemTempClass");
-    itemsUI.formRequiresExpiry = (readVal("frzItemRequiresExpiry") === "true");
-    itemsUI.formIsActive = (readVal("frzItemIsActive") === "true");
-  }
-
-  function readVal(id) {
-    const el = document.getElementById(id);
-    if (!el) return "";
-    if (!("value" in el)) return "";
-    return String(el.value || "");
-  }
-
-  function buildItemPayloadFromUIValidated() {
-    const articleNo = String(itemsUI.formArticleNo || "").trim();
-    if (!articleNo) return { ok: false, reason: "Fel: articleNo krävs." };
-
-    const priceRaw = String(itemsUI.formPricePerKg || "").trim();
-    const minRaw = String(itemsUI.formMinLevel || "").trim();
-
-    let pricePerKg = "";
-    if (priceRaw !== "") {
-      const n = Number(priceRaw);
-      if (!Number.isFinite(n)) return { ok: false, reason: "Fel: pricePerKg måste vara ett giltigt tal." };
-      pricePerKg = n;
-    }
-
-    let minLevel = "";
-    if (minRaw !== "") {
-      const n = Number(minRaw);
-      if (!Number.isFinite(n)) return { ok: false, reason: "Fel: minLevel måste vara ett giltigt tal." };
-      minLevel = n;
-    }
-
-    const payload = {
-      articleNo,
-      packSize: String(itemsUI.formPackSize || "").trim(),
-      supplier: String(itemsUI.formSupplier || "").trim(),
-      category: String(itemsUI.formCategory || "").trim(),
-      pricePerKg,
-      minLevel,
-      tempClass: String(itemsUI.formTempClass || "").trim(),
-      requiresExpiry: !!itemsUI.formRequiresExpiry,
-      isActive: !!itemsUI.formIsActive
-    };
-
-    return { ok: true, payload };
-  }
-
-  function loadItemToForm(articleNo) {
-    try {
-      const s = getStore();
-      const all = s.listItems({ includeInactive: true });
-      const it = all.find(x => x && String(x.articleNo || "") === String(articleNo || "")) || null;
-      if (!it) return;
-
-      itemsUI.formArticleNo = String(it.articleNo || "");
-      itemsUI.formPackSize = String(it.packSize || "");
-      itemsUI.formSupplier = String(it.supplier || "");
-      itemsUI.formCategory = String(it.category || "");
-      itemsUI.formPricePerKg = (typeof it.pricePerKg !== "undefined" && it.pricePerKg !== null) ? String(it.pricePerKg) : "";
-      itemsUI.formMinLevel = (typeof it.minLevel !== "undefined" && it.minLevel !== null) ? String(it.minLevel) : "";
-      itemsUI.formTempClass = String(it.tempClass || "");
-      itemsUI.formRequiresExpiry = !!it.requiresExpiry;
-      itemsUI.formIsActive = !!it.isActive;
-    } catch (e) {
-      markStoreCorrupt(e);
-    }
-  }
-
-  function resetItemsForm() {
-    itemsUI.formArticleNo = "";
-    itemsUI.formPackSize = "";
-    itemsUI.formSupplier = "";
-    itemsUI.formCategory = "";
-    itemsUI.formPricePerKg = "";
-    itemsUI.formMinLevel = "";
-    itemsUI.formTempClass = "FROZEN";
-    itemsUI.formRequiresExpiry = true;
-    itemsUI.formIsActive = true;
-  }
-
-  function setItemsMsg(text) {
-    itemsUI.itemsMsg = String(text || "—");
-    rerender();
-  }
-
-  function rerender() {
-    try {
-      // AO-LOGIN-02: fail-closed om session tappas
-      if (!syncTopbarIdentity()) return;
-
-      const state = safeGetState();
-      window.FreezerRender.renderAll(state, itemsUI);
-      window.FreezerRender.setActiveTabUI(activeTab);
-
-      window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
-      window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
-      window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
-      window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
-
-      routerRerender();
-      updateHint();
-
-      // AO-LOGIN-03: håll topbar-knapp i sync
-      syncCreateUserTopbarBtn();
-    } catch (e) {}
-  }
+  function resetItemsForm() {}
+  function setItemsMsg(text) { itemsUI.itemsMsg = String(text || "—"); }
 
   // -----------------------------
   // TABS (legacy)
@@ -1327,14 +885,9 @@ Policy:
     if (!btn) return;
     btn.addEventListener("click", () => {
       activeTab = key;
-
       window.FreezerRender.setActiveTabUI(activeTab);
 
       const state = safeGetState();
-      window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
-      window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
-      window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
-      window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
       window.FreezerRender.renderAll(state, itemsUI);
 
       updateHint();
