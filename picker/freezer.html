@@ -1,1 +1,201 @@
+<!-- ============================================================
+AO-05/15 — PICKER Shell (egen HTML-sida) | FIL-ID: picker/freezer.html
+Projekt: Fryslager (UI-only / localStorage-first)
+
+Syfte:
+- Plockare ska ha en egen sida (ingen admin-UI).
+- Visar PICKER-rutor via router-menyn (renderas av freezer-picker.js via FreezerViewRegistry).
+- Fail-closed: om registry/router/store saknas -> visa minimal fallback och inga actions.
+
+POLICY (LÅST):
+- UI-only • inga nya storage-keys/datamodell
+- XSS-safe (ingen innerHTML)
+- P0: picker-controller får INTE init före ESM registry är redo -> väntar/pollar (i freezer-picker.js)
+
+P0-FIX:
+- Ingen init/hydrate i HTML. FreezerStore init/hydrate sker endast i freezer-picker.js efter registry-ready.
+
+Städ:
+- <link rel="icon" href="data:,"> för att slippa favicon-404
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freezer – Plockare</title>
+
+  <!-- Städ: slipp favicon-404 -->
+  <link rel="icon" href="data:,">
+
+  <style>
+    :root { color-scheme: light; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header { border-bottom:1px solid #e6e6e6; background:#fff; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .brand { font-weight:700; }
+    nav a { text-decoration:none; color:inherit; opacity:.8; }
+    nav a:hover { opacity:1; }
+    .spacer { flex: 1; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fafafa; font-size: 13px; }
+    .pill b { font-weight:600; }
+    .muted { opacity:.75; }
+    .panel { border:1px solid #e6e6e6; border-radius: 12px; padding: 12px; background:#fff; }
+    main { background:#f6f7f8; min-height: calc(100vh - 64px); }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .tabBtn { border:1px solid #e6e6e6; background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; font-size: 14px; }
+    .tabBtn[aria-selected="true"] { font-weight:700; }
+    .danger { border-color:#f2b8b5; background:#fff5f5; }
+    .ok { border-color:#cfe9cf; background:#f4fff4; }
+    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    footer { padding: 16px 0; }
+    .hr { height:1px; background:#eee; margin:10px 0; }
+    .fallbackBox { padding:12px; border-radius:12px; border:1px dashed #ddd; background:#fff; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="wrap">
+      <div class="row">
+        <div class="brand">🧊 Freezer</div>
+
+        <nav class="row" aria-label="Picker navigation">
+          <a href="../admin/index.html" class="muted">Admin Hem</a>
+          <span class="muted">/</span>
+          <a href="./freezer.html"><b>Plockare</b></a>
+        </nav>
+
+        <div class="spacer"></div>
+
+        <!-- (Valfritt) Status/pill-ytor: behåller samma id som Buyer för enkel återanvändning -->
+        <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
+          <span class="muted">Status:</span>
+          <b id="frzStatusText">Laddar…</b>
+        </div>
+
+        <div class="pill" title="Roll är låst på denna sida">
+          <span class="muted">Roll:</span>
+          <b>PLOCKARE</b>
+        </div>
+
+        <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data (endast om ej read-only)">
+          Återställ demo
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <!-- Fail-closed -->
+      <section id="frzLockPanel" class="panel danger" hidden>
+        <div class="row">
+          <div>
+            <b>Import stoppad / Låst läge</b>
+            <div class="muted" id="frzLockReason">Orsak: okänd</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Debug (visas bara vid avvikelse enligt freezer-picker.js) -->
+      <section id="frzDebugPanel" class="panel" hidden>
+        <div class="row">
+          <b>Debug</b>
+          <div class="spacer"></div>
+          <div class="muted" id="frzDebugText">—</div>
+        </div>
+      </section>
+
+      <!-- PICKER ROUTER YTA -->
+      <section class="panel">
+        <div class="row">
+          <div>
+            <h1 style="margin:0; font-size:22px;">Plockare</h1>
+            <div class="muted" style="margin-top:4px;">
+              Välj vad du vill göra i fryslagret.
+            </div>
+          </div>
+
+          <div class="spacer"></div>
+
+          <div class="pill" title="Visar om sidan är read-only">
+            <span class="muted">Läge:</span>
+            <b id="frzModeText">—</b>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <!-- Router-meny -->
+        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny">
+          <!-- fylls av freezer-picker.js -->
+        </div>
+
+        <!-- Router-root -->
+        <div id="freezerViewRoot" style="margin-top:10px;">
+          <div id="frzPickerFallback" class="fallbackBox muted">
+            Laddar vyer…
+          </div>
+        </div>
+      </section>
+
+      <footer class="muted">
+        AO-05/15 • PICKER shell • UI-only • localStorage-first • fail-closed
+      </footer>
+    </div>
+  </main>
+
+  <!-- ==========================================================
+  Script order (KRITISK):
+  Core → Contract → Store → Render/Dash → ModalShell → ESM views/registry → picker controller (defer)
+  =========================================================== -->
+
+  <!-- Core -->
+  <script src="../UI/pages/freezer/02-core.js"></script>
+  <script src="../UI/pages/freezer/04-contract.js"></script>
+
+  <!-- Store (MÅSTE skapa window.FreezerStore) -->
+  <script src="../UI/pages/freezer/03-store.js"></script>
+
+  <!-- Render + dash (valfritt) -->
+  <script src="../UI/freezer-render.js"></script>
+  <script src="../UI/freezer-dashboard.js"></script>
+
+  <!-- Modal shell (window.FreezerModal) -->
+  <script src="../UI/pages/freezer/05-modal-shell.js"></script>
+
+  <!-- ESM views + registry (MÅSTE vara type="module") -->
+  <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
+  <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
+
+  <!-- OBS:
+    Picker-vyerna bör antingen:
+    A) importeras/registreras inifrån 01-view-registry.js, eller
+    B) läggas till här som extra <script type="module" src="..."> (om ni vill styra exakt per sida).
+    Vi gör ingen gissning här för att undvika 404 om filerna inte finns ännu.
+  -->
+
+  <!-- Picker controller (P0: defer + väntar/pollar på registry innan init/hydrate) -->
+  <script defer src="../UI/pages/freezer/picker/freezer-picker.js"></script>
+
+  <!-- ==========================================================
+  ÄNDRINGSLOGG (≤8)
+  1) Skapat ny sida picker/freezer.html (PICKER shell) speglad från buyer/freezer.html.
+  2) Lagt till favicon städ: <link rel="icon" href="data:,"> för att slippa 404.
+  3) Behåller samma core/contract/store/modal/ESM registry-ordning. Ingen init i HTML.
+  =========================================================== -->
+
+  <!-- ==========================================================
+  TESTNOTERINGAR (klicktest)
+  - Öppna picker/freezer.html → Console:
+    - window.FreezerViewRegistry ska finnas efter ESM laddat.
+    - window.FreezerStore ska finnas efter 03-store.js.
+  - Inga console errors från script-paths (404).
+  - Meny syns när freezer-picker.js + picker-vyer är på plats.
+  =========================================================== -->
+</body>
+</html>
 
