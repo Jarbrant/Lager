@@ -1,4 +1,20 @@
 /* ============================================================
+AO-LOGIN-01 | FIL: Lager/admin/freezer.js
+Projekt: Freezer (UI-only / localStorage-first)
+
+Syfte (AO-LOGIN-01):
+- Session-guard för admin-sidan:
+  - Kräver FRZ_SESSION_V1 (sessionStorage-first, localStorage fallback)
+  - Fail-closed: om saknas/utgången/ej ADMIN -> redirect till ../index.html
+- Synka UI så ADMIN-sida inte kan växlas till BUYER/PICKER via demo-select.
+
+OBS:
+- Detta är UI-only demo-login (inte riktig säkerhet).
+- Inga nya storage keys/datamodell i denna fil.
+
+============================================================ */
+
+/* ============================================================
 AO-03/15 — Users CRUD + rättigheter (Admin) | BLOCK 4/4
 AUTOPATCH | FIL: Lager/admin/freezer.js
 Projekt: Freezer (UI-only / localStorage-first)
@@ -24,6 +40,71 @@ Policy:
 
 (function () {
   "use strict";
+
+  // ------------------------------------------------------------
+  // AO-LOGIN-01: SESSION GUARD (fail-closed)
+  // ------------------------------------------------------------
+  const SESSION_KEY = "FRZ_SESSION_V1";
+
+  function safeJsonParse(raw) {
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+
+  function readSession() {
+    try {
+      const sRaw = (window.sessionStorage && window.sessionStorage.getItem(SESSION_KEY)) || null;
+      if (sRaw) return safeJsonParse(sRaw);
+    } catch {}
+    try {
+      const lRaw = (window.localStorage && window.localStorage.getItem(SESSION_KEY)) || null;
+      if (lRaw) return safeJsonParse(lRaw);
+    } catch {}
+    return null;
+  }
+
+  function clearSession() {
+    try { window.sessionStorage && window.sessionStorage.removeItem(SESSION_KEY); } catch {}
+    try { window.localStorage && window.localStorage.removeItem(SESSION_KEY); } catch {}
+  }
+
+  function isSessionValidAndAdmin(sess) {
+    try {
+      if (!sess || typeof sess !== "object") return { ok: false, reason: "NO_SESSION" };
+
+      const role = String(sess.role || "").toUpperCase().trim();
+      if (role !== "ADMIN") return { ok: false, reason: "NOT_ADMIN" };
+
+      const exp = Number(sess.exp || 0);
+      if (exp && Date.now() > exp) return { ok: false, reason: "EXPIRED" };
+
+      const firstName = String(sess.firstName || "").trim();
+      if (!firstName) return { ok: false, reason: "BAD_SESSION" };
+
+      return { ok: true, role: role, firstName: firstName };
+    } catch {
+      return { ok: false, reason: "BAD_SESSION" };
+    }
+  }
+
+  function redirectToLogin() {
+    // admin/freezer.js ligger i Lager/admin/ -> login i Lager/index.html
+    // relativt: ../index.html
+    try { window.location.replace("../index.html"); } catch {
+      try { window.location.href = "../index.html"; } catch {}
+    }
+  }
+
+  // P0: Guard direkt vid start (innan store/init/render)
+  (function guardNow() {
+    const sess = readSession();
+    const v = isSessionValidAndAdmin(sess);
+    if (!v.ok) {
+      // fail-closed: rensa vid EXPIRED/BAD_SESSION (men inte nödvändigt vid NO_SESSION)
+      if (v.reason === "EXPIRED" || v.reason === "BAD_SESSION") clearSession();
+      redirectToLogin();
+      return;
+    }
+  })();
 
   // ------------------------------------------------------------
   // AO-15: INIT-GUARD (förhindra dubbla document-level listeners)
@@ -64,6 +145,34 @@ Policy:
   const cbInvWrite = byId("perm_inventory_write");
   const cbHistWrite = byId("perm_history_write");
   const cbDashView = byId("perm_dashboard_view");
+
+  // ------------------------------------------------------------
+  // AO-LOGIN-01: Lås roll på admin-sidan till ADMIN (sessionstyrd)
+  // ------------------------------------------------------------
+  function enforceAdminRoleUI() {
+    try {
+      const sess = readSession();
+      const v = isSessionValidAndAdmin(sess);
+      if (!v.ok) {
+        redirectToLogin();
+        return false;
+      }
+      if (userSelect) {
+        // lås select till ADMIN i admin-sidan
+        userSelect.value = "ADMIN";
+        userSelect.disabled = true;
+        userSelect.setAttribute("aria-disabled", "true");
+        userSelect.title = "Roll styrs av inloggning (ADMIN).";
+      }
+      return true;
+    } catch {
+      redirectToLogin();
+      return false;
+    }
+  }
+
+  // kör direkt efter att userSelect finns
+  enforceAdminRoleUI();
 
   // ------------------------------------------------------------
   // P0: ROLE -> PAGE ROUTING (Admin -> Buyer)
@@ -150,7 +259,7 @@ Policy:
     getState: function () { return {}; },
     getStatus: function () {
       return {
-        role: (userSelect && userSelect.value) ? userSelect.value : "ADMIN",
+        role: "ADMIN",
         locked: false,
         readOnly: true,
         whyReadOnly: "Read-only: korrupt storage eller init-fel.",
@@ -208,10 +317,8 @@ Policy:
   // ------------------------------------------------------------
   // BOOT
   // ------------------------------------------------------------
-  const initialRole = (userSelect && userSelect.value) ? userSelect.value : "ADMIN";
-
-  // P0: Om admin-sidan råkar öppnas i BUYER-läge -> gå till buyer-sidan direkt.
-  navToRolePageIfNeeded(initialRole);
+  // AO-LOGIN-01: roll är alltid ADMIN här
+  const initialRole = "ADMIN";
 
   // Init store fail-soft
   if (!store || typeof store.init !== "function") {
@@ -258,27 +365,20 @@ Policy:
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
 
-  // Role select (legacy)
+  // Role select (legacy) — AO-LOGIN-01: låst, men fail-soft om någon tar bort disabled i DOM
   if (userSelect) {
     userSelect.addEventListener("change", () => {
-      const role = userSelect.value || "ADMIN";
-
-      // P0: BUYER -> egen sida
-      navToRolePageIfNeeded(role);
+      // AO-LOGIN-01: stäng ned allt annat än ADMIN
+      enforceAdminRoleUI();
 
       const s = getStore();
-
       try {
-        if (!storeCorrupt && s && typeof s.setRole === "function") s.setRole(role);
+        if (!storeCorrupt && s && typeof s.setRole === "function") s.setRole("ADMIN");
       } catch (e) {
         markStoreCorrupt(e);
       }
 
-      // AO-11: uppdatera router meny efter rollbyte
       initRouterMenu();
-
-      const st = safeGetStatus();
-      if (st && userSelect.value !== st.role) userSelect.value = st.role;
       rerender();
     });
   }
@@ -333,26 +433,22 @@ Policy:
   function buildViewCtx() {
     const status = safeGetStatus();
     return {
-      role: status.role,
+      role: "ADMIN",
       locked: !!status.locked,
       readOnly: !!status.readOnly,
       whyReadOnly: status.whyReadOnly || "",
-      // Views ska använda ctx.can(...) för RBAC (AO-09/11 kontrakt)
       can: function (perm) { return safeCan(String(perm || "")); }
     };
   }
 
   function hasLegacyTabs() {
-    // P0: Om legacy-tabs finns ska vi inte dubbla Saldo/Historik i router-menyn.
     return !!(tabDashboard || tabSaldo || tabHistorik);
   }
 
   function normalizeMenuLabel(mi) {
-    // P0: UI-only: förbättra label utan att ändra id/logik.
     const raw = String((mi && mi.label) ? mi.label : (mi && mi.id) ? mi.id : "").trim();
     if (!raw) return raw;
 
-    // "Inköp • Dashboard" -> "Inköp"
     const lowered = raw.toLowerCase();
     if (lowered.includes("inköp") && lowered.includes("dashboard")) return "Inköp";
 
@@ -362,14 +458,12 @@ Policy:
   function isLegacyDuplicate(mi) {
     const id = String((mi && mi.id) ? mi.id : "").trim();
     if (!id) return false;
-    // Duplicerar legacy-tabs: dessa ska inte visas i router-menyn när legacy finns.
     return (id === "shared-saldo" || id === "shared-history");
   }
 
   function initRouterMenu() {
     const reg = getRegistry();
     if (!viewMenu || !viewRoot || !reg || typeof reg.getViewsForRole !== "function") {
-      // Fail-soft: router saknas, legacy tabs fortsatt OK.
       return;
     }
 
@@ -382,31 +476,22 @@ Policy:
       return;
     }
 
-    // Skapa meny items och filtrera på requiredPerm (om satt)
     const menuItems = (typeof reg.toMenuItems === "function") ? reg.toMenuItems(views) : [];
 
     const visible = menuItems
       .filter((mi) => {
         if (!mi) return false;
-
-        // P0: undvik dubblering mot legacy-tabs
         if (hasLegacyTabs() && isLegacyDuplicate(mi)) return false;
-
         if (!mi.requiredPerm) return true;
         return !!ctx.can(mi.requiredPerm);
       })
-      .map((mi) => {
-        // UI-only label normalize
-        return Object.assign({}, mi, { label: normalizeMenuLabel(mi) });
-      });
+      .map((mi) => Object.assign({}, mi, { label: normalizeMenuLabel(mi) }));
 
-    // Om vi saknar aktiv viewId → ta första
     if (!routerActiveViewId && visible.length) routerActiveViewId = visible[0].id;
     if (routerActiveViewId && visible.length && !visible.some(x => x.id === routerActiveViewId)) {
       routerActiveViewId = visible[0].id;
     }
 
-    // Render meny (XSS-safe)
     viewMenu.textContent = "";
     for (const mi of visible) {
       const b = document.createElement("button");
@@ -421,11 +506,9 @@ Policy:
       viewMenu.appendChild(b);
     }
 
-    // Mount aktiv view (om någon finns kvar)
     if (visible.length) {
       routerActivateView(routerActiveViewId || visible[0].id || "");
     } else {
-      // Inga router-views synliga -> unmount + töm root
       try {
         if (routerMountedView && typeof routerMountedView.unmount === "function") {
           routerMountedView.unmount({ root: viewRoot, ctx });
@@ -456,22 +539,17 @@ Policy:
     const view = (typeof reg.findView === "function") ? reg.findView(views, id) : null;
     if (!view) return;
 
-    // Unmount tidigare
     try {
       if (routerMountedView && typeof routerMountedView.unmount === "function") {
         routerMountedView.unmount({ root: viewRoot, ctx });
       }
-    } catch {
-      // fail-soft
-    }
+    } catch {}
 
-    // Rensa root (kontrakt: view får en tom container)
     while (viewRoot.firstChild) viewRoot.removeChild(viewRoot.firstChild);
 
     routerMountedView = view;
     routerActiveViewId = id;
 
-    // Uppdatera aria-selected i menyn
     try {
       const btns = viewMenu ? viewMenu.querySelectorAll("button[data-view-id]") : [];
       btns.forEach((b) => {
@@ -480,7 +558,6 @@ Policy:
       });
     } catch {}
 
-    // Mount + första render
     try {
       if (typeof view.mount === "function") {
         view.mount({ root: viewRoot, ctx });
@@ -505,7 +582,6 @@ Policy:
       }
     } catch (e) {
       console.error("[Freezer] Router: render-fel.", e);
-      // fail-soft: visa enkel fallback
       try {
         const box = document.createElement("div");
         box.className = "panel warn";
@@ -704,7 +780,6 @@ Policy:
       const action = btn.getAttribute("data-action") || "";
       if (!action) return;
 
-      // Scope-guard: endast Items-actions i saldo/Items-området
       if (isItemsAction(action) && !isInItemsScope(btn)) return;
 
       const articleNo = btn.getAttribute("data-article-no") || "";
@@ -858,13 +933,12 @@ Policy:
   }
 
   function isInItemsScope(el) {
-    // AO-15: extra robust: kontrollera att .closest finns innan vi använder den.
     try {
       const hasClosest = el && typeof el.closest === "function";
 
       const viewSaldo = document.getElementById("viewSaldo");
       if (viewSaldo && hasClosest) return !!el.closest("#viewSaldo");
-      if (viewSaldo && !hasClosest) return true; // fail-soft
+      if (viewSaldo && !hasClosest) return true;
 
       const q = document.getElementById("frzItemsQ");
       if (q) {
@@ -877,16 +951,16 @@ Policy:
             q.closest("section");
 
           if (root && root.id && hasClosest) return !!el.closest(`#${root.id}`) || root.contains(el);
-          if (root && !hasClosest) return true; // fail-soft
+          if (root && !hasClosest) return true;
         }
       }
 
       if (document.getElementById("frzSaldoTableWrap") && hasClosest) return !!el.closest("#frzSaldoTableWrap");
       if (document.getElementById("frzItemsPanel") && hasClosest) return !!el.closest("#frzItemsPanel");
 
-      return true; // fail-soft
+      return true;
     } catch {
-      return true; // fail-soft
+      return true;
     }
   }
 
@@ -913,7 +987,6 @@ Policy:
   }
 
   function readVal(id) {
-    // AO-15: robust: läs bara .value om det faktiskt finns
     const el = document.getElementById(id);
     if (!el) return "";
     if (!("value" in el)) return "";
@@ -1000,17 +1073,13 @@ Policy:
       window.FreezerRender.renderAll(state, itemsUI);
       window.FreezerRender.setActiveTabUI(activeTab);
 
-      // Bonus: render status/mode/lock/debug om de finns
       window.FreezerRender.renderStatus && window.FreezerRender.renderStatus(state);
       window.FreezerRender.renderMode && window.FreezerRender.renderMode(state);
       window.FreezerRender.renderLockPanel && window.FreezerRender.renderLockPanel(state);
       window.FreezerRender.renderDebug && window.FreezerRender.renderDebug(state);
 
-      // AO-11: uppdatera router view
       routerRerender();
-    } catch (e) {
-      // fail-soft
-    }
+    } catch (e) {}
   }
 
   // -----------------------------
@@ -1053,3 +1122,16 @@ Policy:
   function byId(id) { return document.getElementById(id); }
 
 })();
+
+/* ============================================================
+ÄNDRINGSLOGG (≤8)
+1) AO-LOGIN-01: Session-guard på admin-sidan (FRZ_SESSION_V1) -> ej ADMIN => redirect till ../index.html.
+2) AO-LOGIN-01: Låser frzUserSelect till ADMIN (roll styrs av login).
+============================================================ */
+
+/* ============================================================
+TESTNOTERINGAR (3–10)
+- Öppna /admin/freezer.html direkt utan login -> ska redirecta till /index.html.
+- Logga in Admin/1111 -> /admin/freezer.html ska fungera som vanligt.
+- Försök manipulera DOM (enable select) och byta roll -> den ska studsa tillbaka till ADMIN.
+============================================================ */
