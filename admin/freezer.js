@@ -29,6 +29,12 @@ AO-LOGIN-02 (DENNA PATCH) — UI-CLEANUP (Admin topbar):
 - Sätter topbar: #frzRoleText = "ADMIN" och #frzUserName från session.
 - Uppdaterar #frzViewHint så mittenytan inte är tom (Dashboard/Saldo/Historik + ev router-vy).
 
+AO-LOGIN-03 (DENNA PATCH) — USER MODAL (P0 FIX):
+- Fixar att “Skapa användare” modal går att stänga:
+  - Stäng-knapp, Avbryt, klick på overlay, Escape
+  - Vid lyckad Spara -> stäng modal + reset form
+- Fail-closed: öppna knapp disabled vid locked/readOnly/utan users_manage.
+
 Policy:
 - Inga nya storage-keys/datamodell
 - XSS-safe (render sköter textContent)
@@ -147,6 +153,13 @@ Policy:
   const cbInvWrite = byId("perm_inventory_write");
   const cbHistWrite = byId("perm_history_write");
   const cbDashView = byId("perm_dashboard_view");
+
+  // AO-LOGIN-03: modal wiring (IDs ska komma från freezer.html)
+  const openCreateUserBtn = byId("frzOpenCreateUserBtn");
+  const userModalOverlay = byId("frzUserModalOverlay");
+  const userModalCloseBtn = byId("frzUserModalCloseBtn");
+
+  let lastFocusEl = null;
 
   // ------------------------------------------------------------
   // AO-LOGIN-02: TOPBAR SYNC (roll + namn)
@@ -291,6 +304,116 @@ Policy:
   }
 
   // ------------------------------------------------------------
+  // AO-LOGIN-03: USER MODAL HELPERS (P0)
+  // ------------------------------------------------------------
+  function isUserModalOpen() {
+    if (!userModalOverlay) return false;
+    return !userModalOverlay.hidden;
+  }
+
+  function closeUserModal(reason) {
+    if (!userModalOverlay) return;
+    userModalOverlay.hidden = true;
+    userModalOverlay.setAttribute("aria-hidden", "true");
+
+    // Städa fokus
+    try {
+      if (lastFocusEl && typeof lastFocusEl.focus === "function") lastFocusEl.focus();
+    } catch {}
+    lastFocusEl = null;
+
+    // (valfritt) om man vill nollställa felruta vid stängning:
+    // clearUsersMsg();
+
+    // reason används inte i UI just nu (ingen ny data / inga nya keys)
+    void reason;
+  }
+
+  function openUserModal() {
+    // fail-closed om session tappas
+    if (!syncTopbarIdentity()) return;
+
+    const status = safeGetStatus();
+    if (status.locked || status.readOnly) return;
+
+    if (!safeCan("users_manage")) return;
+
+    if (!userModalOverlay) return;
+
+    lastFocusEl = document.activeElement;
+
+    userModalOverlay.hidden = false;
+    userModalOverlay.setAttribute("aria-hidden", "false");
+
+    // säkerställ “Skapa”-läge
+    resetUserForm();
+    clearUsersMsg();
+
+    // fokus på första fält
+    try { if (firstNameInput && typeof firstNameInput.focus === "function") firstNameInput.focus(); } catch {}
+  }
+
+  function syncCreateUserTopbarBtn() {
+    if (!openCreateUserBtn) return;
+
+    const status = safeGetStatus();
+    const canUsers = safeCan("users_manage");
+
+    const disabled = !!status.locked || !!status.readOnly || !canUsers;
+
+    openCreateUserBtn.disabled = disabled;
+
+    // title som hjälptext (UI-only)
+    if (disabled) {
+      if (status.locked) openCreateUserBtn.title = status.reason ? `Låst: ${status.reason}` : "Låst läge.";
+      else if (status.readOnly) openCreateUserBtn.title = status.whyReadOnly || "Read-only.";
+      else openCreateUserBtn.title = "Saknar behörighet (users_manage).";
+    } else {
+      openCreateUserBtn.title = "Skapa ny användare";
+    }
+  }
+
+  function wireUserModal() {
+    // Öppna
+    if (openCreateUserBtn) {
+      openCreateUserBtn.addEventListener("click", () => {
+        openUserModal();
+      });
+    }
+
+    // Stäng-knapp
+    if (userModalCloseBtn) {
+      userModalCloseBtn.addEventListener("click", () => {
+        closeUserModal("close-btn");
+      });
+    }
+
+    // Klick på overlay (utanför kort) stänger
+    if (userModalOverlay) {
+      userModalOverlay.addEventListener("click", (ev) => {
+        // Stäng bara om man klickar på själva overlayn (inte i dialogen)
+        if (ev.target === userModalOverlay) closeUserModal("overlay");
+      });
+    }
+
+    // Esc stänger
+    document.addEventListener("keydown", (ev) => {
+      if (!isUserModalOpen()) return;
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        closeUserModal("esc");
+      }
+    });
+
+    // Avbryt ska även stänga modal (om modal används)
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => {
+        if (isUserModalOpen()) closeUserModal("cancel");
+      });
+    }
+  }
+
+  // ------------------------------------------------------------
   // BOOT
   // ------------------------------------------------------------
   const initialRole = "ADMIN";
@@ -327,6 +450,9 @@ Policy:
 
         // AO-LOGIN-02: uppdatera hint (tab eller router label)
         updateHint();
+
+        // AO-LOGIN-03: disable/enable create user i topbar
+        syncCreateUserTopbarBtn();
       });
     }
   } catch (e) {
@@ -348,6 +474,10 @@ Policy:
   bindTab(tabDashboard, "dashboard");
   bindTab(tabSaldo, "saldo");
   bindTab(tabHistorik, "history");
+
+  // AO-LOGIN-03: wire modal (P0)
+  wireUserModal();
+  syncCreateUserTopbarBtn();
 
   // Reset demo
   if (resetBtn) {
@@ -374,6 +504,9 @@ Policy:
         itemsUI.itemsEditingArticleNo = "";
         setItemsMsg("Demo återställd.");
         initRouterMenu(); // refresh efter reset
+
+        // AO-LOGIN-03: om modal är öppen -> håll den i sync (fail-closed)
+        syncCreateUserTopbarBtn();
       }
     });
   }
@@ -619,6 +752,9 @@ Policy:
             const r = s.updateUser(editingId, { firstName, perms });
             if (!r.ok) return showUsersMsg("Fel", r.reason || "Kunde inte spara.");
             resetUserForm();
+
+            // AO-LOGIN-03: lyckad save -> stäng modal om öppen
+            if (isUserModalOpen()) closeUserModal("saved-edit");
             return;
           }
 
@@ -628,6 +764,9 @@ Policy:
             return showUsersMsg("Fel", r.reason || "Kunde inte skapa.");
           }
           resetUserForm();
+
+          // AO-LOGIN-03: lyckad create -> stäng modal om öppen
+          if (isUserModalOpen()) closeUserModal("saved-new");
         } catch (e) {
           markStoreCorrupt(e);
           showUsersMsg("Spärrad", "Read-only: storage error.");
@@ -639,6 +778,7 @@ Policy:
       cancelBtn.addEventListener("click", () => {
         clearUsersMsg();
         resetUserForm();
+        // (stängning av modal sker även i wireUserModal())
       });
     }
   }
@@ -726,6 +866,8 @@ Policy:
         setPermsToUI(u.perms || {});
         refreshFormHeader();
         if (firstNameInput) firstNameInput.focus();
+
+        // Om modal används: håll den öppen (edit i modal)
         return;
       }
 
@@ -741,6 +883,9 @@ Policy:
           if (editingIdInput && editingIdInput.value === userId && !next) {
             resetUserForm();
           }
+
+          // topbar knapp kan påverkas om perms ändras i systemet i framtiden
+          syncCreateUserTopbarBtn();
         } catch (e) {
           markStoreCorrupt(e);
           showUsersMsg("Spärrad", "Read-only: storage error.");
@@ -1078,6 +1223,9 @@ Policy:
 
       routerRerender();
       updateHint();
+
+      // AO-LOGIN-03: håll topbar-knapp i sync
+      syncCreateUserTopbarBtn();
     } catch (e) {}
   }
 
@@ -1116,6 +1264,7 @@ Policy:
       window.FreezerRender.renderAll(state, itemsUI);
 
       updateHint();
+      syncCreateUserTopbarBtn();
     });
   }
 
@@ -1123,17 +1272,19 @@ Policy:
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) AO-LOGIN-02: Tog bort all gammal rollväxlarlogik (ingen select, ingen BUYER/PICKER-redirect).
-2) AO-LOGIN-02: Synkar topbar med session: #frzRoleText="ADMIN", #frzUserName=session.firstName.
-3) AO-LOGIN-02: Uppdaterar #frzViewHint vid tab-click och router-aktiv vy.
-4) AO-LOGIN-01: Session-guard kvar (fail-closed) — vid tappad/utgången session redirect till ../index.html.
+1) AO-LOGIN-03: P0 fix – modal “Skapa användare” kan nu stängas via Stäng/Avbryt/overlay-klick/Esc.
+2) AO-LOGIN-03: Vid lyckad Spara (create/update) stängs modalen automatiskt och formulär resetas.
+3) AO-LOGIN-03: Topbar-knapp “Skapa användare” blir disabled vid locked/readOnly/utan users_manage (fail-closed).
+4) Inga nya storage-keys/datamodell. UI-only.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (3–10)
-- Öppna /admin/freezer.html utan session -> redirect till /index.html.
-- Logga in Admin/1111 -> topbar visar Roll: ADMIN och Användare: <förnamn>.
-- Ingen roll-dropdown ska finnas eller fungera på admin-sidan.
-- Klicka Dashboard/Saldo/Historik -> frzViewHint uppdateras.
-- Router-meny: om den används, frzViewHint visar även “Router: <label>”.
+- Klick “Skapa användare” i topbar -> modal öppnas, fokus i Förnamn.
+- Klick “Stäng” -> modal stängs.
+- Klick utanför dialog (overlay) -> modal stängs.
+- Tryck Escape -> modal stängs.
+- Klick “Avbryt” -> modal stängs + form reset.
+- Spara ny user -> modal stängs + form reset + user syns i listan.
+- Sätt read-only eller låst -> “Skapa användare” är disabled och öppnar inget.
 ============================================================ */
