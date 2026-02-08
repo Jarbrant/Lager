@@ -17,13 +17,26 @@ POLICY (LÅST):
 AUTOPATCH:
 - Store.init ska få role="BUYER" (store normaliserar ADMIN/BUYER/PICKER/SYSTEM_ADMIN).
 - Registry kan vara case-känslig -> prova buyer/BUYER fail-soft.
+
+P0 FIX (denna patch):
+- Singleton-guard: förhindrar dubbel boot (t.ex. script laddas 2 ggr).
+- Same-view guard: om route pekar på samma vy -> render-only (ingen unmount/mount).
+- Debounce hashchange: minskar risk för remount-loop.
 ============================================================ */
 
 (function () {
   "use strict";
 
   /* =========================
-  BLOCK 0 — Kontrakt: EXAKT 5 BUYER-rutor i menyn (AO-05/15)
+  BLOCK 0 — P0: Singleton guard (förhindrar dubbel boot)
+  ========================= */
+  try {
+    if (window.__FRZ_BUYER_CONTROLLER_BOOTED__) return;
+    window.__FRZ_BUYER_CONTROLLER_BOOTED__ = true;
+  } catch {}
+
+  /* =========================
+  BLOCK 0.1 — Kontrakt: EXAKT 5 BUYER-rutor i menyn (AO-05/15)
   ========================= */
 
   const BUYER_MENU_ALLOWLIST = [
@@ -174,7 +187,10 @@ AUTOPATCH:
   function setRouteHash(viewId) {
     try {
       const vid = encodeURIComponent(safeStr(viewId).trim());
-      window.location.hash = "#view=" + vid;
+      const next = "#view=" + vid;
+      // P0: skriv inte samma hash om det redan är samma => minskar onödiga hashchange/remount
+      if (safeStr(window.location.hash || "") === next) return;
+      window.location.hash = next;
     } catch {}
   }
 
@@ -278,6 +294,7 @@ AUTOPATCH:
     const st = computeStatus(store);
 
     setText(pillText, st.ok ? "Redo" : "Fel");
+    // OBS: vi skriver bara text — rör inte viewRoot här (P0)
     setText(modeText, st.modeLabel || "—");
 
     if (!st.ok || st.locked) {
@@ -397,6 +414,7 @@ AUTOPATCH:
     if (activeId && !reg.findView(views, activeId)) activeId = getDefaultViewId(menuItems);
 
     let active = { id: "", view: null, root: viewRoot, ctx: makeCtx(), state: {} };
+    let __applyTimer = null;
 
     function pick(id) {
       const nextId = safeStr(id).trim();
@@ -405,7 +423,7 @@ AUTOPATCH:
       setRouteHash(nextId);
     }
 
-    function applyRoute(nextId) {
+    function applyRouteNow(nextId) {
       const vid = safeStr(nextId).trim();
       if (!isAllowedBuyerMenuId(vid)) {
         const def = getDefaultViewId(menuItems);
@@ -415,6 +433,14 @@ AUTOPATCH:
       const view = reg.findView(views, vid);
       if (!view) { showFailClosed(viewRoot, "Okänd vy: " + vid); return; }
 
+      // P0: Same-view guard => RENDER ONLY (ingen unmount/mount)
+      if (active && active.id === vid && active.view) {
+        active.ctx = makeCtx(); // uppdatera ev store/render-referenser
+        safeRender(active.view, viewRoot, active.ctx, active.state);
+        renderMenu(menuRoot, menuItems, vid, pick);
+        return;
+      }
+
       safeUnmount(active);
 
       active = { id: vid, view, root: viewRoot, ctx: makeCtx(), state: {} };
@@ -423,8 +449,17 @@ AUTOPATCH:
       renderMenu(menuRoot, menuItems, vid, pick);
     }
 
+    function applyRoute(nextId) {
+      // Debounce för hashchange-fladder
+      try { if (__applyTimer) window.clearTimeout(__applyTimer); } catch {}
+      __applyTimer = window.setTimeout(() => {
+        __applyTimer = null;
+        try { applyRouteNow(nextId); } catch {}
+      }, 0);
+    }
+
     renderMenu(menuRoot, menuItems, activeId, pick);
-    applyRoute(activeId);
+    applyRouteNow(activeId);
 
     window.addEventListener("hashchange", () => {
       try {
@@ -472,16 +507,20 @@ AUTOPATCH:
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) AO-05/15: BUYER-menyn är nu EXAKT 5 rutor (inkl. buyer-saldo/Lagersaldo).
-2) I övrigt oförändrat: väntar/pollar på ESM registry innan init/hydrate och mount.
+1) P0: Singleton-guard stoppar dubbel boot om filen laddas två gånger.
+2) P0: Same-view guard => render-only när route redan är aktiv (ingen unmount/mount).
+3) P0: setRouteHash skriver inte samma hash igen (minskar hashchange/remount).
+4) Hashchange debounced (0ms) för stabilare view-livscykel.
+5) I övrigt: samma AO-05/15 beteende (exakt 5 BUYER-rutor, init efter registry).
 ============================================================ */
 
 /* ============================================================
-TESTNOTERINGAR (klicktest)
-- Öppna buyer/freezer.html:
-  - 5 flikar syns (Ny Leverantör, Ny produkt, Lägga in produkter, Sök Leverantör, Lagersaldo)
-- Klicka “Lagersaldo”:
-  - ska mounta saldo-vyn (om registry definierar buyer-saldo)
-- Reload:
-  - produkter och history ska finnas kvar (03-store.js localStorage-first)
+TESTNOTERINGAR
+- Öppna buyer/freezer.html#view=buyer-stock-in
+  - Skriv i "Antal kg" och vänta 5–10 sek:
+    - input får INTE försvinna, cursor kvar, value kvar.
+- Klicka mellan flikar och tillbaka:
+  - vy mountas vid byte, men render-only om man “landar” på samma vy igen.
+- Om du råkat inkludera buyer-controller två gånger:
+  - ska nu inte kunna dubbelstarta (P0 fix).
 ============================================================ */
