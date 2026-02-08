@@ -16,6 +16,9 @@ POLICY (LÅST):
 <!doctype html>
 <html lang="sv">
 <head>
+  <!-- ==========================================================
+  BLOCK 1/5 — HEAD + STYLES
+  =========================================================== -->
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Freezer – Admin</title>
@@ -102,10 +105,20 @@ POLICY (LÅST):
       position:absolute; width:1px; height:1px; padding:0; margin:-1px;
       overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
     }
+
+    /* ==========================================================
+       AO-LOGIN-03: P0 FIX (UI) — Ta bort dashboard-rutan från startsidan
+       - Denna inline-msg ska inte visas (modalen ska bära fel/feedback).
+       - Vi behåller DOM-noden för bakåtkompabilitet, men låser den visuellt.
+    =========================================================== */
+    #frzUsersInlineMsg { display:none !important; }
   </style>
 </head>
 
 <body>
+  <!-- ==========================================================
+  BLOCK 2/5 — TOPBAR
+  =========================================================== -->
   <header>
     <div class="wrap">
       <div class="row">
@@ -146,6 +159,9 @@ POLICY (LÅST):
     </div>
   </header>
 
+  <!-- ==========================================================
+  BLOCK 3/5 — MAIN + PANELS
+  =========================================================== -->
   <main>
     <div class="wrap">
       <!-- Fail-closed -->
@@ -280,8 +296,7 @@ POLICY (LÅST):
   </main>
 
   <!-- ==========================================================
-  AO-LOGIN-03: CREATE USER MODAL (hidden by default)
-  - IDs återanvänds från legacy form så freezer.js kan fortsätta använda samma logik.
+  BLOCK 4/5 — CREATE USER MODAL
   =========================================================== -->
   <div id="frzUserModalOverlay" class="modalOverlay" hidden>
     <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="frzUserModalTitle">
@@ -333,7 +348,7 @@ POLICY (LÅST):
   </div>
 
   <!-- ==========================================================
-  Script order (KRITISK):
+  BLOCK 5/5 — SCRIPTS (KRITISK ORDNING)
   Core → Contract → Store → Render → Dashboard → ModalShell → view-interface → registry → vyfiler → router/page
   =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
@@ -356,17 +371,15 @@ POLICY (LÅST):
 
   <!-- ==========================================================
   ÄNDRINGSLOGG (≤8)
-  1) AO-LOGIN-03: Lade till topbar-knapp “Skapa användare” (id frzOpenCreateUserBtn).
-  2) AO-LOGIN-03: Flyttade användarformulär till modal (frzUserModalOverlay) och återanvände legacy-IDs.
-  3) AO-LOGIN-03: Städ: frzUsersPanel visar lista + hint, inte formuläret.
-  4) AO-LOGIN-03: Lade till inline msg i listpanelen (frzUsersInlineMsg*) för list-actions när modal är stängd.
+  1) AO-LOGIN-03: P0 fix – låser bort dashboardens inline msg-box visuellt (#frzUsersInlineMsg) så rutan inte syns på startsidan.
+  2) BLOCK-märkning (BLOCK 1–5) för tydligare struktur.
   =========================================================== -->
 
   <!-- ==========================================================
   TESTNOTERINGAR (klicktest)
-  - Knappen “Skapa användare” syns i topbar (kan vara disabled beroende på perms/locked/readOnly).
-  - Klick → modal öppnas. Avbryt/Stäng/Esc → modal stängs.
-  - Spara → skapar användare och stänger modal (logik i freezer.js).
+  - Ladda sidan → ingen inline-felruta syns i dashboard under/ bakom modalen.
+  - Klick “Skapa användare” → modal öppnas.
+  - Klick “Spara” utan förnamn → fel ska visas i modalen.
   =========================================================== -->
 </body>
 </html>
