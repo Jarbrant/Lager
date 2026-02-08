@@ -1,46 +1,65 @@
-Lager/  (repo-root)
-├─ 🟩 index.html                     [PUBLIK] Entré/länkning (start)
-├─ 🟩 readme                         [STÖD] Dokumentation
-├─ 🟩 admin/                         [PUBLIK-MAPP] Sidor man kan öppna i webben
-│  ├─ 🟩 freezer.html                [PUBLIK][SHELL] Fryslager-sidan (gemensam URL)
-│  ├─ 🟩 freezer.js                  [ROUTER] Controller/router (ska bli “vy-router”)
-│  ├─ 🟩 freezer-store.js            [STÖD] (DUPLIKAT?) Äldre/alternativ store (städ senare)
-│  ├─ 🟩 freezer-render.js           [STÖD] (DUPLIKAT?) Äldre/alternativ render (städ senare)
-│  └─ 🟩 freezer-dashboard.js        [STÖD] (DUPLIKAT?) Äldre/alternativ dashboard (städ senare)
+Lager/ (repo-root)
 │
-└─ 🟩 UI/                            [STÖD-MAPP] Delad UI-kod (ska återanvändas av alla roller)
-   ├─ 🟩 freezer-store.js             [STÖD] Bas-store (legacy) / delad API-yta
-   ├─ 🟩 freezer-render.js            [STÖD] Render helpers (tabeller/listor), XSS-safe
-   ├─ 🟩 freezer-dashboard.js         [STÖD] Statistik/beräkningar (delad)
+├─ index.html                         [PUBLIK] Start/entré
+├─ readme                             [STÖD] Dokumentation
+│
+├─ admin/                             [PUBLIK] Admin-URL
+│  ├─ freezer.html                    [SHELL] Admin shell
+│  │  └─ Samarbetar med: admin/freezer.js + UI/pages/freezer/* + UI/freezer-*.js
+│  └─ freezer.js                      [ROUTER] (Admin router/controller)
+│     └─ Samarbetar med: 03-store.js + 01-view-registry.js + admin-vyer + shared-vyer
+│
+├─ buyer/                             [PUBLIK] Buyer-URL (egen mapp)
+│  └─ freezer.html                    [SHELL] Buyer shell (root buyer)
+│     └─ Samarbetar med: UI/pages/freezer/buyer/* + delade UI/pages/freezer/*
+│
+└─ UI/                                [DELAT] Gemensamma helpers (legacy/övergripande)
+   ├─ freezer-dashboard.js            [DELAT] Statistik-helpers
+   ├─ freezer-render.js               [DELAT] Render-helpers (XSS-safe)
+   ├─ freezer-store.js                [DELAT] (legacy/delad yta)
    │
-   └─ 🟩 pages/
-      └─ 🟩 freezer/
-         ├─ 🟩 02-core.js             [STÖD] Core helpers/guards (måste laddas tidigt)
-         ├─ 🟩 03-store.js            [STÖD] Split-store (public store API, RBAC, CRUD)
-         ├─ 🟩 04-contract.js         [STÖD] Kontrakt/validering/normalizers (fail-closed)
-         │
-         ├─ 🆕 shared/                [VY-STÖD] Delade vyer (saldo/historik) + RBAC-styrda actions
-         │  ├─ 🆕 saldo-view.js        [VY] Saldo (delad) – läser perms, visar actions om tillåtet
-         │  └─ 🆕 historik-view.js     [VY] Historik (delad) – filtrerar/visar enligt roll/perms
-         │
-         ├─ 🆕 admin/                 [VY] ADMIN-specifika vyer (dashboard m.m.)
-         │  └─ 🆕 dashboard.js         [VY] Admin Dashboard (egen)
-         │
-         ├─ 🆕 buyer/                 [VY] INKÖPARE-specifika vyer
-         │  └─ 🆕 dashboard.js         [VY] Buyer Dashboard (egen)
-         │
-         └─ 🆕 picker/                [VY] PLOCK-specifika vyer
-            └─ 🆕 dashboard.js        [VY] Picker Dashboard (egen)
-
-UI/pages/freezer/
-├─ shared/
-│  ├─ saldo-view.js        (delad vy: tabell + sök/sort/filter; RBAC styr actions)
-│  ├─ historik-view.js     (delad vy: lista; RBAC styr vad som visas)
-│  └─ ui-shell.js          (små helpers för tabs/menu, valfritt)
-├─ admin/
-│  └─ dashboard.js         (ADMIN dashboard)
-├─ buyer/
-│  └─ dashboard.js         (INKÖPARE dashboard)
-└─ picker/
-   └─ dashboard.js         (PLOCK dashboard)
-
+   └─ pages/freezer/                  [KÄRNA + VYER]
+      │
+      ├─ 00-view-interface.js         [KÄRNA] View-kontrakt/shape
+      │  └─ Samarbetar med: 01-view-registry.js + alla vyer
+      ├─ 01-view-registry.js          [KÄRNA] Registry (roller → vyer)
+      │  └─ Samarbetar med: controllers (admin/freezer.js, freezer-buyer.js) + vyer
+      ├─ 02-core.js                   [KÄRNA] Små core-helpers
+      │  └─ Samarbetar med: 03-store.js + controllers + vyer
+      ├─ 03-store.js                  [KÄRNA] Store (AO_FREEZER_V1, RBAC, CRUD, guards)
+      │  └─ Samarbetar med: 04-contract.js + alla vyer
+      ├─ 04-contract.js               [KÄRNA] Datakontrakt/validering (fail-closed)
+      │  └─ Samarbetar med: 03-store.js
+      │
+      ├─ 00-modal-shell.js            [MODAL] Modal-system (variant A)
+      ├─ 05-modal-shell.js            [MODAL] Modal-system (variant B)
+      │  └─ Notis: två varianter finns → städ senare (behåll 1 som “senaste sanning”)
+      │
+      ├─ 02-view-buyer-stockin.js     [VY] Buyer stock-in (P0 stable DOM)
+      ├─ 02-view-buyer-products.js    [VY] Buyer products (skapad)
+      ├─ 02-view-buyer-suppliers.js   [VY] Buyer suppliers (skapad)
+      │
+      ├─ shared/                      [DELAT] Vyer som alla kan använda
+      │  ├─ shared-saldo.js           [VY] Saldo (delad)
+      │  └─ shared-history.js         [VY] Historik (delad)
+      │
+      ├─ admin/                       [ADMIN] Admin-vyer
+      │  ├─ admin-dashboard.js        [VY] Admin dashboard
+      │  ├─ admin-items.js            [VY] Admin produktregister
+      │  ├─ admin-settings.js         [VY] Admin settings
+      │  └─ admin-users.js            [VY] Admin users + rättigheter
+      │
+      ├─ buyer/                       [BUYER] Buyer “app”
+      │  ├─ freezer.html              [SHELL] Buyer shell (inne i UI/pages också)
+      │  ├─ freezer-buyer.js          [ROUTER] Buyer controller/router
+      │  ├─ buyer-in.js               [VY] Buyer IN (form/flow)
+      │  ├─ buyer-dashboard.js        [VY] Buyer dashboard
+      │  └─ modals/                   [BUYER MODALS]
+      │     ├─ modal-buylist.js
+      │     ├─ modal-help.js
+      │     ├─ modal-products.js
+      │     └─ modal-status.js
+      │
+      └─ picker/                      [PICKER] Plock-vyer
+         ├─ picker-out.js             [VY] Picker OUT
+         └─ picker-dashboard.js       [VY] Picker dashboard
