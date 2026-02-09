@@ -1,21 +1,30 @@
 /* ============================================================
-AO-02A/15 — Dashboard Top OUT/IN (7/30/90) | FIL: UI/freezer-dashboard.js
+AO-01/15 — NY-BASELINE | FIL: UI/freezer-dashboard.js
++ AO-02A/15 — Dashboard Top OUT/IN (7/30/90)
++ AO-03A/15 — Artikeltrend (data + insikt) (30 dagar)
+
 AUTOPATCH (hel fil)
 Projekt: Freezer (UI-only / localStorage-first)
 
 Syfte:
-- Dashboard-beräkningar (baseline: stub-safe)
+- Dashboard-beräkningar (stub-safe)
 - Får aldrig kasta fel även om state är null/korrupt
-- Topplistor IN/OUT för valbar period (7/30/90) utan ny storage-key
+- AO-02A: Topplistor IN/OUT för valbar period (7/30/90) utan ny storage-key
+- AO-03A: Trendserie (30 dagar) per artikel: IN vs OUT per dag + deterministisk insiktstext
 
 Policy:
 - UI-only • inga nya storage-keys/datamodell
 - Fail-soft i beräkningar (returnerar tomt läge hellre än fel)
+- XSS-safe: denna fil renderar inget; endast data
 
-P1/P0-policy i denna patch:
-- Moves utan timestamp (ts=0/okänd) ignoreras i period-topplistor (för att period ska vara meningsfull).
+P1/P0-policy (AO-02A):
+- Moves utan timestamp (ts=0/okänd) ignoreras i period-topplistor.
 - Aggregat-nyckel normaliseras (trim + lowercase) för att minska splittrade rader.
-- inferDir() görs striktare (tar bort “includes(IN/OUT)” för att undvika falska träffar).
+- inferDir() striktare (inga includes(IN/OUT)).
+
+P0-policy (AO-03A):
+- Trend kräver timestamp; moves utan timestamp ignoreras.
+- Dag definieras som lokal dag (00:00–23:59 lokal tid), stabilt via dayKey().
 ============================================================ */
 (function () {
   "use strict";
@@ -26,7 +35,11 @@ P1/P0-policy i denna patch:
     computeNotes,
 
     // AO-02A exports
-    computeTopInOut
+    computeTopInOut,
+
+    // AO-03A exports
+    computeArticleTrend30,
+    computeTrendInsight
   };
 
   window.FreezerDashboard = FreezerDashboard;
@@ -337,6 +350,232 @@ P1/P0-policy i denna patch:
     }
   }
 
+  /* ============================================================
+     AO-03A: ARTIKELTREND (30 dagar)
+     - Serie med exakt 30 datapunkter (dag 0..29)
+     - Saknade dagar = 0
+     - Lokal dag-normalisering via dayKey()
+     - POLICY: moves utan timestamp ignoreras
+     ============================================================ */
+
+  /**
+   * Compute 30-day IN vs OUT series for one article.
+   * articleKey kan vara articleNo/sku/itemId/label – vi matchar “best effort”
+   * mot move.key/label (normaliserat).
+   *
+   * @param {any} state
+   * @param {string} articleKey
+   * @param {number} days default 30 (clamp 1..90), men AO kräver 30 i UI
+   * @returns {{
+   *   ok:boolean,
+   *   articleKey:string,
+   *   days:number,
+   *   series:Array<{ dayKey:string, dayLabel:string, inQty:number, outQty:number }>,
+   *   meta:{ totalMoves:number, usedMoves:number, ignoredMoves:number, matchedMoves:number }
+   * }}
+   */
+  function computeArticleTrend30(state, articleKey, days) {
+    try {
+      const keyRaw = safeStr(articleKey);
+      const keyNorm = normalizeKey(keyRaw);
+      const d = clampRangeDays(days, 30);
+
+      // skapa 30-dagars fönster: idag (lokal) bakåt
+      const today = new Date();
+      const todayKey = dayKey(today);
+
+      const keys = buildDayKeysBackwards(today, d); // [oldest..today]
+      /** @type {Record<string, {dayKey:string, dayLabel:string, inQty:number, outQty:number}>} */
+      const map = Object.create(null);
+
+      for (const k of keys) {
+        map[k] = { dayKey: k, dayLabel: dayLabelFromKey(k), inQty: 0, outQty: 0 };
+      }
+
+      const moves = extractMoves(state);
+      let used = 0, ignored = 0, matched = 0;
+
+      for (const mv of moves) {
+        const info = normalizeMove(mv);
+        if (!info) { ignored++; continue; }
+        if (!(info.ts > 0)) { ignored++; continue; } // policy
+
+        const dk = dayKey(new Date(info.ts));
+        // inom fönster?
+        if (!map[dk]) { ignored++; continue; }
+
+        // match artikel? (best effort)
+        const mvKeyNorm = normalizeKey(info.key || "");
+        const mvLabelNorm = normalizeKey(info.label || "");
+
+        const isMatch =
+          (keyNorm && (mvKeyNorm === keyNorm || mvLabelNorm === keyNorm)) ||
+          (!keyNorm && false);
+
+        if (!isMatch) { used++; continue; } // räknas som “analyserad men ej match”
+        matched++;
+
+        if (info.dir === "IN") map[dk].inQty += safeNum(info.qty, 0);
+        else if (info.dir === "OUT") map[dk].outQty += safeNum(info.qty, 0);
+
+        used++;
+      }
+
+      const series = keys.map(k => map[k]);
+
+      // om användaren valt tom nyckel → ok=false men stabil serie (alla 0)
+      const ok = !!keyNorm;
+
+      return {
+        ok,
+        articleKey: keyRaw,
+        days: d,
+        series,
+        meta: { totalMoves: moves.length, usedMoves: used, ignoredMoves: ignored, matchedMoves: matched }
+      };
+    } catch {
+      return {
+        ok: false,
+        articleKey: safeStr(articleKey),
+        days: clampRangeDays(days, 30),
+        series: buildZeroSeries(30),
+        meta: { totalMoves: 0, usedMoves: 0, ignoredMoves: 0, matchedMoves: 0 }
+      };
+    }
+  }
+
+  /**
+   * Deterministisk insiktstext för trendserien.
+   * @param {{ series?: Array<{dayKey:string, dayLabel:string, inQty:number, outQty:number }> }|any} trend
+   * @returns {string}
+   */
+  function computeTrendInsight(trend) {
+    try {
+      const series = Array.isArray(trend && trend.series) ? trend.series : [];
+      if (!series.length) return "Ingen data.";
+
+      let totalIn = 0, totalOut = 0;
+      let nonZeroDays = 0;
+
+      let maxIn = 0, maxInDay = "";
+      let maxOut = 0, maxOutDay = "";
+
+      for (const p of series) {
+        const inQ = safeNum(p && p.inQty, 0);
+        const outQ = safeNum(p && p.outQty, 0);
+        totalIn += inQ;
+        totalOut += outQ;
+        if ((inQ + outQ) > 0) nonZeroDays++;
+
+        if (inQ > maxIn) { maxIn = inQ; maxInDay = safeStr(p && p.dayLabel); }
+        if (outQ > maxOut) { maxOut = outQ; maxOutDay = safeStr(p && p.dayLabel); }
+      }
+
+      // Regel 1: mest 0
+      if (nonZeroDays <= 1) return "Ingen eller nästan ingen aktivitet senaste 30 dagar.";
+
+      // Regel 2: senaste 7 dagar OUT > IN
+      const last7 = series.slice(-7);
+      let in7 = 0, out7 = 0;
+      for (const p of last7) { in7 += safeNum(p && p.inQty, 0); out7 += safeNum(p && p.outQty, 0); }
+      if (out7 > in7 && (out7 + in7) > 0) return "Utflöde högre än inflöde senaste 7 dagar.";
+
+      // Regel 3: IN-spike
+      const avgIn = totalIn / series.length;
+      if (maxIn > 0 && maxIn >= (avgIn * 3) && maxInDay) return `Stor inleverans ${maxInDay}.`;
+
+      // Regel 4: OUT-spike
+      const avgOut = totalOut / series.length;
+      if (maxOut > 0 && maxOut >= (avgOut * 3) && maxOutDay) return `Stor utleverans ${maxOutDay}.`;
+
+      // Regel 5: balans
+      if (Math.abs(totalIn - totalOut) <= Math.max(1, (totalIn + totalOut) * 0.1)) {
+        return "Inflöde och utflöde är ungefär i balans över 30 dagar.";
+      }
+
+      // Default
+      return (totalOut > totalIn)
+        ? "Utflöde dominerar över 30 dagar."
+        : "Inflöde dominerar över 30 dagar.";
+    } catch {
+      return "Insikt kunde inte beräknas.";
+    }
+  }
+
+  function clampRangeDays(days, fallback) {
+    try {
+      const n = Number(days);
+      if (!Number.isFinite(n) || n <= 0) return fallback;
+      if (n < 1) return 1;
+      if (n > 90) return 90;
+      return Math.round(n);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function buildDayKeysBackwards(nowDate, days) {
+    try {
+      const d = Math.max(1, safeNum(days, 30));
+      const base = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate()); // local midnight
+      const out = [];
+      for (let i = d - 1; i >= 0; i--) {
+        const dt = new Date(base.getTime() - (i * 86400000));
+        out.push(dayKey(dt));
+      }
+      return out;
+    } catch {
+      return buildZeroKeys(30);
+    }
+  }
+
+  function buildZeroKeys(days) {
+    const d = Math.max(1, safeNum(days, 30));
+    const out = [];
+    for (let i = 0; i < d; i++) out.push(`0000-00-00#${String(i).padStart(2, "0")}`);
+    return out;
+  }
+
+  function buildZeroSeries(days) {
+    const keys = buildZeroKeys(days);
+    return keys.map((k, idx) => ({
+      dayKey: k,
+      dayLabel: `Dag ${idx + 1}`,
+      inQty: 0,
+      outQty: 0
+    }));
+  }
+
+  /**
+   * Local day key YYYY-MM-DD (stabil lokal dag).
+   * @param {Date} dt
+   * @returns {string}
+   */
+  function dayKey(dt) {
+    try {
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, "0");
+      const d = String(dt.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    } catch {
+      return "0000-00-00";
+    }
+  }
+
+  function dayLabelFromKey(k) {
+    try {
+      // Visa "MM-DD" (enkel, deterministisk). Render-lagret kan välja annat senare.
+      const s = safeStr(k);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(5);
+      return s || "—";
+    } catch {
+      return "—";
+    }
+  }
+
+  // -----------------------------
+  // common utils
+  // -----------------------------
   function safeNum(v, fallback) {
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
@@ -352,9 +591,10 @@ P1/P0-policy i denna patch:
   }
 
   /* ÄNDRINGSLOGG (≤8)
-  1) P0: Säkrade sortTop() (safeNum används; ingen safeNum2/typo kan krascha sort).
-  2) P1-policy: Moves utan timestamp ignoreras (ts=0) så 7/30/90-period blir korrekt.
-  3) P2: inferDir() striktare (tar bort includes(IN/OUT) för att minska falska träffar).
-  4) Aggregat-nyckel normaliseras (trim+lowercase) för mindre splittrade rader.
+  1) AO-03A: Added computeArticleTrend30(state, articleKey, days) -> stabil 30-dagars serie (saknade dagar=0).
+  2) AO-03A: Added computeTrendInsight(trend) -> deterministiska regler (OUT>IN 7d, spikes, balans, etc.).
+  3) AO-03A: Lokal dag-normalisering via dayKey() (stabil dag-bucketing).
+  4) AO-03A: POLICY: moves utan timestamp ignoreras även i trend.
+  5) Behöll AO-02A topplistor oförändrade (fail-soft, inga nya keys).
   */
 })();
