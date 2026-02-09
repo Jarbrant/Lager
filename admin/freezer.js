@@ -39,6 +39,7 @@ AO-LOGIN-03 — USER MODAL (P0 FIX):
 AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
 - MODAL FÅR INTE ÖPPNA AUTOMATISKT VID LOGIN.
 - Tvinga overlay hidden direkt vid load (fail-closed).
+- Blockera externa "auto-open" från modal-shell tills användaren klickar "Skapa användare".
 ============================================================ */
 
 (function () {
@@ -164,6 +165,49 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
   let lastFocusEl = null;
 
   // ------------------------------------------------------------
+  // P0: MODAL OPEN GATE (hindrar auto-open vid boot)
+  // ------------------------------------------------------------
+  let __allowModalOpenOnce = false;
+
+  function armModalOpenOnce() {
+    __allowModalOpenOnce = true;
+  }
+
+  function consumeModalOpenAllowance() {
+    const ok = __allowModalOpenOnce;
+    __allowModalOpenOnce = false;
+    return ok;
+  }
+
+  // Om någon extern modal-shell finns, blockera dess open-metoder tills vi "armar"
+  function patchExternalModalShellIfAny() {
+    try {
+      const M = window.FreezerModal;
+      if (!M || typeof M !== "object") return;
+
+      // Wrap valfria open-funktioner vi kan se
+      const candidates = ["open", "openCreateUser", "openUser", "show", "showCreateUser"];
+      for (const k of candidates) {
+        if (typeof M[k] !== "function") continue;
+        const orig = M[k].bind(M);
+        // Undvik dubbelwrap
+        if (orig.__FRZ_WRAPPED__) continue;
+
+        const wrapped = function () {
+          // Blockera alla "auto-open" om vi inte har explicit armning från knapp
+          if (!consumeModalOpenAllowance()) {
+            try { forceModalClosed("blocked-external"); } catch {}
+            return false;
+          }
+          return orig.apply(null, arguments);
+        };
+        wrapped.__FRZ_WRAPPED__ = true;
+        M[k] = wrapped;
+      }
+    } catch {}
+  }
+
+  // ------------------------------------------------------------
   // AO-LOGIN-03: MSG helpers
   // ------------------------------------------------------------
   function isUserModalOpen() {
@@ -216,18 +260,24 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
   // ------------------------------------------------------------
   // AO-LOGIN-03: MODAL open/close
   // ------------------------------------------------------------
-  function closeUserModal(reason) {
-    if (!userModalOverlay) return;
-    userModalOverlay.hidden = true;
-    userModalOverlay.setAttribute("aria-hidden", "true");
+  function forceModalClosed(reason) {
+    try {
+      if (userModalOverlay) {
+        userModalOverlay.hidden = true;
+        userModalOverlay.setAttribute("aria-hidden", "true");
+      }
+    } catch {}
     clearUsersMsg();
+    void reason;
+  }
+
+  function closeUserModal(reason) {
+    forceModalClosed(reason);
 
     try {
       if (lastFocusEl && typeof lastFocusEl.focus === "function") lastFocusEl.focus();
     } catch {}
     lastFocusEl = null;
-
-    void reason;
   }
 
   function openUserModal() {
@@ -251,16 +301,12 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
     try { if (firstNameInput && typeof firstNameInput.focus === "function") firstNameInput.focus(); } catch {}
   }
 
-  // ✅ P0 EXTRA FIX: tvinga modalen stängd vid load (start/login)
-  // (hindrar att den råkar vara öppen pga tidigare state/bugg)
-  (function forceModalClosedOnBoot() {
-    try {
-      if (userModalOverlay) {
-        userModalOverlay.hidden = true;
-        userModalOverlay.setAttribute("aria-hidden", "true");
-      }
-    } catch {}
-    clearUsersMsg();
+  // ✅ P0: tvinga modalen stängd vid boot, och efter andra scripts fått chans att köra
+  (function hardCloseModalOnBoot() {
+    forceModalClosed("boot-0");
+    // Extra hårdning: om något script försöker öppna efter vår boot, stäng igen.
+    try { setTimeout(() => forceModalClosed("boot-1"), 0); } catch {}
+    try { setTimeout(() => forceModalClosed("boot-2"), 60); } catch {}
   })();
 
   // ------------------------------------------------------------
@@ -429,7 +475,14 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
 
   function wireUserModal() {
     if (openCreateUserBtn) {
-      openCreateUserBtn.addEventListener("click", () => openUserModal());
+      openCreateUserBtn.addEventListener("click", () => {
+        // ✅ Enda stället som "armar" öppning
+        armModalOpenOnce();
+
+        // Om extern modal-shell vill öppna, låt den göra det nu (armad),
+        // annars använder vi vår overlay.
+        openUserModal();
+      });
     }
 
     if (userModalCloseBtn) {
@@ -462,6 +515,9 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
   // ------------------------------------------------------------
   const initialRole = "ADMIN";
 
+  // ✅ P0: blockera extern auto-open så tidigt som möjligt
+  patchExternalModalShellIfAny();
+
   if (!store || typeof store.init !== "function") {
     console.error("Freezer baseline saknar FreezerStore.");
     storeCorrupt = true;
@@ -484,6 +540,9 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
 
         updateHint();
         syncCreateUserTopbarBtn();
+
+        // ✅ om något script försökt visa modalen under subscribe-cykel: stäng
+        if (!__allowModalOpenOnce) forceModalClosed("subscribe-safety");
       });
     }
   } catch (e) {
@@ -495,7 +554,7 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
   refreshFormHeader();
 
   clearUsersMsg();
-  closeUserModal("boot"); // ✅ extra fail-closed (om något försöker visa den)
+  closeUserModal("boot"); // extra fail-closed
 
   setHintForTab(activeTab);
 
@@ -830,7 +889,12 @@ AO-LOGIN-03 (P0 EXTRA FIX, DENNA PATCH):
         setPermsToUI(u.perms || {});
         refreshFormHeader();
 
-        if (!isUserModalOpen()) openUserModal();
+        if (!isUserModalOpen()) {
+          // ✅ Endast list-edit får öppna modalen programmatisk (inte boot)
+          // Vi "armar" innan vi öppnar.
+          armModalOpenOnce();
+          openUserModal();
+        }
         try { firstNameInput && firstNameInput.focus(); } catch {}
         return;
       }
