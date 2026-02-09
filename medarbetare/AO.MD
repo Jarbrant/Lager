@@ -128,3 +128,59 @@ KRAV ska vara testbara.
 Allt som inte står i AO markeras FÖRSLAG.
 
 Prioritera stabilitet, fail-closed och policy.
+alla mallar ska märkas så här
+AO-ID: AO-XX/YY — [Titel]
+Projekt: [namn]
+FILSCOPE (max 2 filer):
+1) [path/fil1]
+2) [path/fil2]
+
+SENASTE SANNING:
+- FIL 1: [klistra in hel fil här]  (eller: repo + commit + exakt path)
+- FIL 2: [klistra in hel fil här]  (eller: repo + commit + exakt path)
+
+SYFTE (1–3 rader):
+- [vad som ska uppnås, kort]
+
+POLICY (om avviker, annars “standard”):
+- UI-only: JA/NEJ
+- Inga nya storage-keys/datamodell: JA/NEJ
+- XSS-safe: JA/NEJ
+- Fail-closed: JA/NEJ
+- Övrigt: [t.ex. “inga nya endpoints”, “ingen redesign”]
+
+KONTRAKT (KRAV 1..N, testbara):
+KRAV 1 — P0: [exakt krav]
+KRAV 2 — P0: [...]
+KRAV 3 — P1: [...]
+...
+KRAV N — P?: [...]
+
+DoD (Definition of Done):
+- [Klart när …]
+- [Klart när …]
+- [Inga console errors vid …]
+- [Eventuella exakta texter / tom-läge / fel-läge]
+- [Datumlogik inkl/exkl om relevant]
+- [Vilka fält som matchas om dataset-shape är relevant]
+
+BLOCK (valfritt men rekommenderat):
+BLOCK 1/3: [vad som ändras var]
+BLOCK 2/3: [...]
+BLOCK 3/3: [...]
+
+TESTPLAN (manuell klicklista 5–10 steg):
+1) ...
+2) ...
+3) ...
+
+RISKER / EDGE CASES (max 5):
+- ...
+- ...
+
+LEVERANSFORMAT (lås):
+- Hel fil för varje fil i FILSCOPE
+- Ändringslogg ≤ 8 rader
+- Testnoteringar 5–10
+- Risk/edge cases ≤ 5
+
