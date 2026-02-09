@@ -4,6 +4,7 @@ AO-01/15 — NY-BASELINE | FIL: UI/freezer-render.js
 + AO-03/15 — Users CRUD UI render (Admin)
 + AO-04/15 — Produktregister (Items) CRUD (Admin) — BLOCK 1/6
 + AO-05A/15 — Historikfilter UI + render (IN/OUT/ALL + datum + artikel)  [AUTOPATCH: BUGFIX]
++ AO-05B/15 — Historikfilter logik + stabil filterstate (ARK-FIX: controller-owned state)
 
 Syfte:
 - XSS-safe rendering (textContent, aldrig osäker innerHTML)
@@ -12,6 +13,7 @@ Syfte:
 - Users-panel: visa/dölj via RBAC (users_manage), rendera lista + count
 - Items (AO-04): renderar produktregister i Saldo-vyn utan HTML-ändring
 - Historik (AO-05A): filterrad + filtrerad lista (fail-soft, deterministiskt datumfilter)
+- AO-05B: gör render "dum" för historikfilter (tar in filterstate + callback från controller)
 
 Kontrakt:
 - Förväntar window.FreezerStore.getStatus() och state-shape från store
@@ -23,9 +25,9 @@ Policy:
 - XSS-safe: textContent, aldrig osäker innerHTML
 
 AUTOPATCH (DENNA):
-- P0: Fixar listener-läckage genom bind-once event delegation på #frzHistoryList.
-- P1: Dämpar rerender-storm via requestAnimationFrame-dedupe (ingen direkt renderHistory() i varje event).
-- P2: Gör items btnEdit disabled konsekvent med locked (inkl readOnly).
+- AO-05B: renderHistory() accepterar ui.historyFilter + ui.onHistoryFilterChange.
+- AO-05B: bind-once delegation ropar callback istället för att äga state.
+- Bakåtkompat: om controller inte skickar in filterstate används legacy _historyUi.
 ============================================================ */
 (function () {
   "use strict";
@@ -38,13 +40,18 @@ AUTOPATCH (DENNA):
     renderStatus,
     renderMode,
     renderLockPanel,
-    renderDebug
+    renderDebug,
+
+    // AO-05B: optional granular hooks (controller kan använda om den vill)
+    renderHistoryOnly,
+    wireHistoryFilterOnce
   };
 
   window.FreezerRender = FreezerRender;
 
   // -----------------------------
-  // AO-05A: local UI-state (no storage)
+  // AO-05A legacy local UI-state (no storage)
+  // (AO-05B: används endast som fallback om controller inte skickar in state)
   // -----------------------------
   const _historyUi = {
     from: "",     // "YYYY-MM-DD"
@@ -70,10 +77,15 @@ AUTOPATCH (DENNA):
     // AO-04: Saldo-vyn används som Produktregister (Items CRUD)
     renderItemsRegister(state, ui);
 
-    // AO-05A: History (filter + list)
-    renderHistory(state);
+    // AO-05A/05B: History (filter + list)
+    renderHistory(state, ui);
 
     renderDashboard(state);
+  }
+
+  // AO-05B: controller kan rendera bara historik om den vill
+  function renderHistoryOnly(state, ui = {}) {
+    renderHistory(state, ui);
   }
 
   // -----------------------------
@@ -495,7 +507,6 @@ AUTOPATCH (DENNA):
       btnEdit.textContent = "Redigera";
       btnEdit.setAttribute("data-action", "item-edit");
       btnEdit.setAttribute("data-article-no", it.articleNo);
-      // P2 fix: consistent lock (include readOnly + perm)
       btnEdit.disabled = locked;
 
       const btnArchive = document.createElement("button");
@@ -626,15 +637,19 @@ AUTOPATCH (DENNA):
   }
 
   // -----------------------------
-  // AO-05A: HISTORY (filter + list)
+  // AO-05A/05B: HISTORY (filter + list)
   // -----------------------------
-  function renderHistory(state) {
+  function renderHistory(state, ui) {
     const root = byId("frzHistoryList");
     const count = byId("frzHistoryCount");
     if (!root || !count) return;
 
-    // P0 fix: bind-once event delegation (no leaks)
-    bindHistoryFilterOnce(root);
+    // AO-05B: controller-owned filterstate + callback (fallback till legacy)
+    const filter = (ui && ui.historyFilter && typeof ui.historyFilter === "object") ? ui.historyFilter : _historyUi;
+    const onFilterChange = (ui && typeof ui.onHistoryFilterChange === "function") ? ui.onHistoryFilterChange : null;
+
+    // P0 fix: bind-once event delegation (no leaks) — AO-05B: wire callback
+    wireHistoryFilterOnce(root, { filter, onFilterChange });
 
     const st = safeStatus();
     const locked = !!(st.locked || st.readOnly);
@@ -649,10 +664,10 @@ AUTOPATCH (DENNA):
     const wrap = document.createElement("div");
     wrap.className = "list";
 
-    const filterBar = renderHistoryFilterBar({ locked });
+    const filterBar = renderHistoryFilterBar({ locked, filter });
     wrap.appendChild(filterBar);
 
-    const filtered = applyHistoryFilter(rows, _historyUi);
+    const filtered = applyHistoryFilter(rows, filter);
     count.textContent = String(filtered.length);
 
     // 3) Tomt-läge
@@ -705,21 +720,22 @@ AUTOPATCH (DENNA):
 
   function renderHistoryFilterBar(ctx) {
     const locked = !!(ctx && ctx.locked);
+    const filter = (ctx && ctx.filter && typeof ctx.filter === "object") ? ctx.filter : _historyUi;
 
     const bar = document.createElement("div");
     bar.className = "row";
     bar.style.marginBottom = "10px";
 
-    const fromLabel = pillDate("Från", "frzHistFrom", _historyUi.from, locked);
-    const toLabel = pillDate("Till", "frzHistTo", _historyUi.to, locked);
+    const fromLabel = pillDate("Från", "frzHistFrom", filter.from, locked);
+    const toLabel = pillDate("Till", "frzHistTo", filter.to, locked);
 
     const typeLabel = pillSelect("Typ", "frzHistType", [
       { v: "ALL", t: "Alla" },
       { v: "IN", t: "IN" },
       { v: "OUT", t: "OUT" }
-    ], _historyUi.type, locked);
+    ], filter.type, locked);
 
-    const qLabel = pillText("Artikel", "frzHistQ", _historyUi.q, "t.ex. FZ-010 / kyckling", locked);
+    const qLabel = pillText("Artikel", "frzHistQ", filter.q, "t.ex. FZ-010 / kyckling", locked);
 
     const spacer = document.createElement("div");
     spacer.className = "spacer";
@@ -744,7 +760,6 @@ AUTOPATCH (DENNA):
     bar.appendChild(btnClear);
     bar.appendChild(hint);
 
-    // P0 fix: inga per-render listeners här (delegation sker i bindHistoryFilterOnce)
     return bar;
   }
 
@@ -790,24 +805,47 @@ AUTOPATCH (DENNA):
     return wrap;
   }
 
-  function bindHistoryFilterOnce(root) {
+  // AO-05B: public hook (controller kan kalla direkt om den vill)
+  function wireHistoryFilterOnce(root, cfg) {
+    _wireHistoryFilterOnce(root, cfg);
+  }
+
+  function _wireHistoryFilterOnce(root, cfg) {
     try {
       if (!root) return;
-      if (root.dataset && root.dataset.histBound === "1") return;
+      if (root.dataset && root.dataset.histBound === "1") {
+        // uppdatera referenser/callback om controller byter dem
+        try {
+          root.__frzHistCfg = cfg || root.__frzHistCfg || null;
+        } catch {}
+        return;
+      }
       if (root.dataset) root.dataset.histBound = "1";
+      try { root.__frzHistCfg = cfg || null; } catch {}
 
       const onChange = (ev) => {
         const t = ev && ev.target ? ev.target : null;
         if (!t || !t.id) return;
 
-        if (t.id === "frzHistFrom") {
-          _historyUi.from = safeText(t.value || "");
-          scheduleHistoryRerender();
-        } else if (t.id === "frzHistTo") {
-          _historyUi.to = safeText(t.value || "");
-          scheduleHistoryRerender();
-        } else if (t.id === "frzHistType") {
-          _historyUi.type = safeText(t.value || "ALL") || "ALL";
+        const cfgNow = root.__frzHistCfg || {};
+        const filter = (cfgNow.filter && typeof cfgNow.filter === "object") ? cfgNow.filter : _historyUi;
+        const cb = (typeof cfgNow.onFilterChange === "function") ? cfgNow.onFilterChange : null;
+
+        let changed = false;
+        const next = { from: safeText(filter.from), to: safeText(filter.to), type: safeText(filter.type || "ALL") || "ALL", q: safeText(filter.q) };
+
+        if (t.id === "frzHistFrom") { next.from = safeText(t.value || ""); changed = true; }
+        else if (t.id === "frzHistTo") { next.to = safeText(t.value || ""); changed = true; }
+        else if (t.id === "frzHistType") { next.type = safeText(t.value || "ALL") || "ALL"; changed = true; }
+
+        if (!changed) return;
+
+        if (cb) cb(next);
+        else {
+          // legacy fallback (render äger state)
+          _historyUi.from = next.from;
+          _historyUi.to = next.to;
+          _historyUi.type = next.type;
           scheduleHistoryRerender();
         }
       };
@@ -815,8 +853,17 @@ AUTOPATCH (DENNA):
       const onInput = (ev) => {
         const t = ev && ev.target ? ev.target : null;
         if (!t || !t.id) return;
-        if (t.id === "frzHistQ") {
-          _historyUi.q = safeText(t.value || "");
+        if (t.id !== "frzHistQ") return;
+
+        const cfgNow = root.__frzHistCfg || {};
+        const filter = (cfgNow.filter && typeof cfgNow.filter === "object") ? cfgNow.filter : _historyUi;
+        const cb = (typeof cfgNow.onFilterChange === "function") ? cfgNow.onFilterChange : null;
+
+        const next = { from: safeText(filter.from), to: safeText(filter.to), type: safeText(filter.type || "ALL") || "ALL", q: safeText(t.value || "") };
+
+        if (cb) cb(next);
+        else {
+          _historyUi.q = next.q;
           scheduleHistoryRerender();
         }
       };
@@ -824,15 +871,23 @@ AUTOPATCH (DENNA):
       const onClick = (ev) => {
         const t = ev && ev.target ? ev.target : null;
         if (!t) return;
-        // match clear button by id OR closest
+
         const btn = (t.id === "frzHistClearBtn") ? t : (t.closest ? t.closest("#frzHistClearBtn") : null);
         if (!btn) return;
 
-        _historyUi.from = "";
-        _historyUi.to = "";
-        _historyUi.type = "ALL";
-        _historyUi.q = "";
-        scheduleHistoryRerender();
+        const cfgNow = root.__frzHistCfg || {};
+        const cb = (typeof cfgNow.onFilterChange === "function") ? cfgNow.onFilterChange : null;
+
+        const next = { from: "", to: "", type: "ALL", q: "" };
+
+        if (cb) cb(next);
+        else {
+          _historyUi.from = "";
+          _historyUi.to = "";
+          _historyUi.type = "ALL";
+          _historyUi.q = "";
+          scheduleHistoryRerender();
+        }
       };
 
       root.addEventListener("change", onChange);
@@ -851,17 +906,16 @@ AUTOPATCH (DENNA):
         requestHistoryRerender();
       });
     } catch {
-      // fail-soft
       requestHistoryRerender();
     }
   }
 
   function requestHistoryRerender() {
     try {
-      // Best effort: render bara historik-sektionen
       if (window.FreezerStore && typeof window.FreezerStore.getState === "function") {
         const st = window.FreezerStore.getState();
-        renderHistory(st);
+        // legacy: render historik med legacyfilter
+        renderHistory(st, { historyFilter: _historyUi });
       }
     } catch {
       // fail-soft
@@ -1039,6 +1093,7 @@ AUTOPATCH (DENNA):
       itemCount = items.length;
     } catch {}
 
+    // OBS: admin/freezer.js kan injicera paneler före/efter — vi nollställer som baseline
     cards.textContent = "";
     addCard(cards, "Produkter", String(itemCount));
     addCard(cards, "Status", okLike ? "OK" : safeText(st.status || "KORRUPT"));
@@ -1213,9 +1268,9 @@ AUTOPATCH (DENNA):
   }
 
   /* ÄNDRINGSLOGG (≤8)
-  1) P0: Fix listener-läckage i historikfilter via bind-once event delegation på #frzHistoryList (inga per-render listeners).
-  2) P1: Rerender dedupe via requestAnimationFrame (scheduleHistoryRerender) för att undvika storms.
-  3) P2: Items “Redigera” disabled följer locked (inkl readOnly + perm) för konsekvent UX.
-  4) AO-05A: bibehållen fail-soft + XSS-safe + inga nya storage-keys/datamodell.
+  1) AO-05B: renderHistory tar ui.historyFilter (state från controller) istället för att alltid använda intern _historyUi.
+  2) AO-05B: bind-once delegation wire: ropar ui.onHistoryFilterChange(next) om callback finns (controller äger state).
+  3) Bakåtkompat: om callback saknas används legacy _historyUi + scheduleHistoryRerender som tidigare.
+  4) Inga nya storage keys/datamodell. XSS-safe bibehållet.
   */
 })();
