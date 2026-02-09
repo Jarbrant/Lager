@@ -1,16 +1,27 @@
 <!-- ============================================================
-AO-LOGIN-03 | USERS: Topbar “Skapa användare” + Modal | FIL-ID: admin/freezer.html
+AO-LOGIN-03 (REBUILD) | FIL: admin/freezer.html
 Projekt: Freezer (UI-only / localStorage-first)
 
 Syfte:
-- Flytta “Skapa användare” till topbaren som knapp.
-- Skapa användare sker i ett modalfönster (UI-only).
-- Städning: Dashboard visar listan “Användare & behörigheter”, men själva skapaflödet ligger i modal.
+- Admin-sida utan “legacy modal” i HTML (den som låste sidan).
+- “Skapa användare” öppnar endast via FreezerModal (window.FreezerModal) från 05-modal-shell.js.
+- Dashboard kan fortfarande visa listan “Användare & behörigheter” (skapaflöde ligger i modal-shell).
 
 POLICY (LÅST):
 - UI-only • inga nya storage-keys/datamodell
 - XSS-safe (ingen osäker innerHTML)
 - Fail-closed oförändrat
+
+SAMARBETAR MED:
+- admin/freezer.js (controller: session-guard, modal-open, tabbar, render)
+- UI/pages/freezer/05-modal-shell.js (gemensam modal: window.FreezerModal)
+- UI/pages/freezer/02-core.js + 03-store.js + 04-contract.js (core/store/kontrakt)
+- UI/freezer-render.js + UI/freezer-dashboard.js (render + statistik)
+- UI/pages/freezer/00-view-interface.js + 01-view-registry.js (router registry)
+- UI/pages/freezer/admin/admin-dashboard.js + admin-items.js (admin-vyer)
+
+VIKTIGT:
+- Den gamla HTML-modalen (#frzUserModalOverlay) är borttagen helt för att eliminera “låser sidan”.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -58,44 +69,6 @@ POLICY (LÅST):
     .chkRow { display:flex; gap:10px; flex-wrap:wrap; }
     .chk { display:flex; gap:6px; align-items:center; font-size:13px; }
     .warn { border-color:#f2b8b5; background:#fff5f5; }
-
-    .modalOverlay {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,.35);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 18px;
-      z-index: 9999;
-    }
-    .modalCard {
-      width: min(720px, 100%);
-      border-radius: 14px;
-      border: 1px solid #e6e6e6;
-      background: #fff;
-      box-shadow: 0 20px 60px rgba(0,0,0,.18);
-    }
-    .modalHead {
-      display:flex; align-items:center; gap:10px;
-      padding: 12px 14px;
-      border-bottom:1px solid #eee;
-    }
-    .modalBody { padding: 14px; }
-    .modalFoot {
-      display:flex; align-items:center; gap:10px;
-      padding: 12px 14px;
-      border-top:1px solid #eee;
-      justify-content:flex-end;
-    }
-    .modalTitle { font-weight:800; margin:0; }
-    .iconBtn {
-      border:1px solid #e6e6e6; background:#fff;
-      border-radius: 10px; padding:8px 10px; cursor:pointer;
-    }
-    .srOnly {
-      position:absolute; width:1px; height:1px; padding:0; margin:-1px;
-      overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
-    }
   </style>
 </head>
 
@@ -128,6 +101,7 @@ POLICY (LÅST):
           <b id="frzUserName">—</b>
         </div>
 
+        <!-- REBUILD: Skapa användare öppnar ENDAST FreezerModal shell (inte legacy HTML modal) -->
         <button id="frzOpenCreateUserBtn" class="btn" type="button" title="Skapa ny användare (öppnar modal)" disabled>
           Skapa användare
         </button>
@@ -254,53 +228,14 @@ POLICY (LÅST):
     </div>
   </main>
 
-  <div id="frzUserModalOverlay" class="modalOverlay" hidden>
-    <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="frzUserModalTitle">
-      <div class="modalHead">
-        <h3 id="frzUserModalTitle" class="modalTitle">Skapa användare</h3>
-        <div class="spacer"></div>
-        <button id="frzUserModalCloseBtn" class="iconBtn" type="button" title="Stäng (Esc)">Stäng</button>
-      </div>
-
-      <div class="modalBody">
-        <div id="frzUsersMsg" class="panel warn" hidden>
-          <b id="frzUsersMsgTitle">Fel</b>
-          <div class="muted" id="frzUsersMsgText">—</div>
-        </div>
-
-        <div class="panel" style="background:#fafafa;">
-          <div class="row" style="margin-bottom:10px;">
-            <b id="frzUserFormTitle">Skapa användare</b>
-            <div class="spacer"></div>
-            <span class="muted" id="frzUserFormMode">—</span>
-          </div>
-
-          <div class="row" style="margin-bottom:10px;">
-            <label class="pill" for="frzUserFirstName">
-              <span class="muted">Förnamn:</span>
-              <input id="frzUserFirstName" type="text" placeholder="t.ex. Anna" maxlength="32" />
-            </label>
-          </div>
-
-          <div class="chkRow" aria-label="Behörigheter">
-            <label class="chk"><input id="perm_users_manage" type="checkbox" /> users_manage</label>
-            <label class="chk"><input id="perm_inventory_write" type="checkbox" /> inventory_write</label>
-            <label class="chk"><input id="perm_history_write" type="checkbox" /> history_write</label>
-            <label class="chk"><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
-          </div>
-
-          <input id="frzUserEditingId" type="hidden" value="" />
-          <div class="srOnly" aria-live="polite" id="frzUserModalLive">—</div>
-        </div>
-      </div>
-
-      <div class="modalFoot">
-        <button id="frzUserCancelBtn" class="btn" type="button">Avbryt</button>
-        <button id="frzUserSaveBtn" class="btn" type="button">Spara</button>
-      </div>
-    </div>
-  </div>
-
+  <!-- ==========================================================
+  SCRIPT-ORDNING (viktig)
+  - Core/Contract/Store (vanliga script)
+  - Render/Dashboard (vanliga script)
+  - ModalShell (vanliga script) -> window.FreezerModal
+  - View interface/registry + views (type="module")
+  - Page controller sist (admin/freezer.js)
+  =========================================================== -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
   <script src="../UI/pages/freezer/03-store.js"></script>
@@ -317,106 +252,22 @@ POLICY (LÅST):
   <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
 
   <script src="./freezer.js"></script>
-<script>
-/* ============================================================
-AO-MODAL-KILLER-01 — Emergency overlay unlock (UI-only)
-Syfte: Om någon modal/overlay fastnar och låser UI -> släck den.
-POLICY: Ingen storage • XSS-safe • Fail-soft
-============================================================ */
-(function () {
-  "use strict";
 
-  function isVisible(el) {
-    try {
-      if (!el) return false;
-      if (el.hidden) return false;
-      const cs = window.getComputedStyle(el);
-      return cs && cs.display !== "none" && cs.visibility !== "hidden" && cs.opacity !== "0";
-    } catch { return false; }
-  }
+  <!-- ==========================================================
+  ÄNDRINGSLOGG (≤8)
+  1) REBUILD: Tog bort legacy HTML-modal (#frzUserModalOverlay) helt.
+  2) “Skapa användare” är kvar i topbar och ska öppna FreezerModal (shell).
+  3) Inga modal-close/overlay hooks i HTML längre (hanteras av 05-modal-shell + controller).
+  4) Script-ordning tydliggjord: ModalShell före modules och controller sist.
+  =========================================================== -->
 
-  function hardHide(el) {
-    try {
-      if (!el) return;
-      el.hidden = true;
-      el.setAttribute("aria-hidden", "true");
-      el.style.display = "none";
-      el.style.pointerEvents = "none";
-    } catch {}
-  }
-
-  function killAllOverlays(reason) {
-    void reason;
-    // 1) Legacy overlay i HTML (id)
-    hardHide(document.getElementById("frzUserModalOverlay"));
-
-    // 2) Modal shell overlay (data attribute)
-    const shell = document.querySelector('[data-frz-modal="overlay"]');
-    if (shell) hardHide(shell);
-
-    // 3) Andra overlays (class)
-    document.querySelectorAll(".modalOverlay").forEach(hardHide);
-  }
-
-  // Försök stänga via API först (om den finns)
-  function tryCloseModalApi() {
-    try {
-      if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
-        window.FreezerModal.close();
-      }
-    } catch {}
-  }
-
-  // Boot: släck allt direkt (om det redan är öppet)
-  tryCloseModalApi();
-  killAllOverlays("boot");
-
-  // Extra: om något öppnar overlay efter boot, släck igen kort stund
-  let ticks = 0;
-  const timer = setInterval(() => {
-    ticks++;
-    tryCloseModalApi();
-
-    // Om någon overlay faktiskt är synlig -> släck
-    const legacy = document.getElementById("frzUserModalOverlay");
-    const shell = document.querySelector('[data-frz-modal="overlay"]');
-    const anyClass = document.querySelector(".modalOverlay");
-
-    if (isVisible(legacy) || isVisible(shell) || isVisible(anyClass)) {
-      killAllOverlays("watchdog");
-    }
-
-    if (ticks > 60) clearInterval(timer); // ~6 sekunder
-  }, 100);
-
-  // ESC = alltid släck overlays (även om annan kod kraschat)
-  document.addEventListener("keydown", (ev) => {
-    try {
-      if (ev.key !== "Escape") return;
-      tryCloseModalApi();
-      killAllOverlays("esc");
-    } catch {}
-  }, true);
-
-  // Klick på overlay ska inte kunna låsa: om du klickar på overlay -> släck
-  document.addEventListener("click", (ev) => {
-    try {
-      const t = ev.target;
-      if (!(t instanceof HTMLElement)) return;
-      if (t.id === "frzUserModalOverlay") { killAllOverlays("click-legacy"); }
-      if (t.matches && t.matches('[data-frz-modal="overlay"]')) { killAllOverlays("click-shell"); }
-      if (t.classList && t.classList.contains("modalOverlay")) { killAllOverlays("click-class"); }
-    } catch {}
-  }, true);
-
-})();
-</script>
-
-  <!-- ÄNDRINGSLOGG (≤8)
-  1) AO-LOGIN-03: Topbar-knapp “Skapa användare”.
-  2) AO-LOGIN-03: Modal för skapaflöde (legacy-IDs).
-  3) Städ: Users-panel visar lista + hint.
-  4) Inline msg i listpanelen när modal är stängd.
-  -->
+  <!-- ==========================================================
+  TESTNOTERINGAR (klicktest)
+  - Ladda admin/freezer.html: ska ALDRIG visa modal automatiskt.
+  - Om sidan tidigare låste sig: Ctrl+F5 -> ska vara klickbar direkt.
+  - Klick “Skapa användare”:
+      - Om FreezerModal finns -> ska öppna shell-modal som går att stänga (Stäng/ESC/overlay).
+      - Om FreezerModal saknas -> inget ska låsa sidan (fail-soft).
+  =========================================================== -->
 </body>
 </html>
