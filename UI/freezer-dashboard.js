@@ -1,6 +1,7 @@
 /* ============================================================
 AO-02A/15 — Dashboard Top OUT/IN (7/30/90) | FIL: UI/freezer-dashboard.js
 + AO-03A/15 — Artikeltrend (30 dagar) (data + insight)
++ AO-04A/15 — Under minLevel (beräkning + lista)  [DENNA PATCH]
 AUTOPATCH (hel fil)
 Projekt: Freezer (UI-only / localStorage-first)
 
@@ -9,6 +10,7 @@ Syfte:
 - Får aldrig kasta fel även om state är null/korrupt
 - Topplistor IN/OUT för valbar period (7/30/90) utan ny storage-key
 - Artikeltrend: välj artikel → visa IN/OUT per dag (30 dagar) + regelbaserad insikt
+- Under-min: lista produkter där currentStock < minLevel + underBy
 
 Policy:
 - UI-only • inga nya storage-keys/datamodell
@@ -19,9 +21,9 @@ P1/P0-policy:
 - Aggregat-nyckel normaliseras (trim + lowercase) för att minska splittrade rader.
 - inferDir() görs striktare (tar bort “includes(IN/OUT)” för att undvika falska träffar).
 
-AUTOPATCH (QA-fix):
-- Meta vid “ingen selection” ska inte påstå ignoredMoves=moves.length om vi inte filtrerar.
-- normalizeMove(): key ska vara stabil identifierare (artikelNo/sku/id) och inte “label” (label kan ändras).
+AO-04A policy:
+- Ingen ny datamodell/keys
+- Saknad/korrupt data => tom lista (ingen crash)
 ============================================================ */
 (function () {
   "use strict";
@@ -36,7 +38,10 @@ AUTOPATCH (QA-fix):
 
     // AO-03A exports
     computeArticleTrend30,
-    computeTrendInsight
+    computeTrendInsight,
+
+    // AO-04A exports
+    computeUnderMin
   };
 
   window.FreezerDashboard = FreezerDashboard;
@@ -54,7 +59,7 @@ AUTOPATCH (QA-fix):
       let lowStockCount = 0;
       for (const it of items) {
         const onHand = safeNum(it && it.onHand, 0);
-        const min = safeNum(it && it.min, 0);
+        const min = safeNum((it && (it.minLevel ?? it.min)), 0);
         if (onHand < min) lowStockCount++;
       }
 
@@ -82,6 +87,102 @@ AUTOPATCH (QA-fix):
       return notes;
     } catch {
       return [];
+    }
+  }
+
+  /* ============================================================
+     AO-04A: UNDER MIN-NIVÅ (BERÄKNING)
+     - Returnerar lista över items där currentStock < minLevel
+     - Sort: mest kritiska först (störst underBy, tie-break: label)
+     - Fail-soft: saknad/korrupt data => []
+     ============================================================ */
+
+  /**
+   * Compute items under minLevel.
+   * @param {any} state
+   * @returns {{
+   *   underMin: Array<{ key:string, articleNo:string, label:string, currentStock:number, minLevel:number, underBy:number }>,
+   *   meta: { itemCount:number, usedCount:number }
+   * }}
+   */
+  function computeUnderMin(state) {
+    try {
+      const items = extractItems(state);
+      const stockMap = extractStockMap(state);
+
+      /** @type {Array<{ key:string, articleNo:string, label:string, currentStock:number, minLevel:number, underBy:number }>} */
+      const out = [];
+
+      for (const it of items) {
+        const articleNo = safeStr(it && (it.articleNo ?? it.sku ?? it.id ?? it.itemId ?? it.productId));
+        const label = safeStr(it && (it.name ?? it.title ?? it.label ?? it.itemName ?? it.productName)) || articleNo || "—";
+
+        const minLevel = safeInt(it && (it.minLevel ?? it.min), 0);
+        if (!(minLevel > 0)) continue;
+
+        // current stock: prefer explicit onHand; else lookup in stockMap by articleNo
+        let currentStock = safeInt(it && it.onHand, NaN);
+        if (!Number.isFinite(currentStock)) currentStock = safeInt(stockMap[articleNo], 0);
+
+        const underBy = minLevel - currentStock;
+        if (underBy >= 1) {
+          const key = normalizeKey(articleNo || label || "—");
+          out.push({ key, articleNo, label, currentStock, minLevel, underBy });
+        }
+      }
+
+      out.sort((a, b) => {
+        const au = safeNum(a && a.underBy, 0);
+        const bu = safeNum(b && b.underBy, 0);
+        if (bu !== au) return bu - au;
+        // tie-break: lägre currentStock först (mer kritiskt)
+        const ac = safeNum(a && a.currentStock, 0);
+        const bc = safeNum(b && b.currentStock, 0);
+        if (ac !== bc) return ac - bc;
+        return String(a && a.label || "").localeCompare(String(b && b.label || ""), "sv-SE");
+      });
+
+      return { underMin: out, meta: { itemCount: items.length, usedCount: out.length } };
+    } catch {
+      return { underMin: [], meta: { itemCount: 0, usedCount: 0 } };
+    }
+  }
+
+  function extractItems(state) {
+    try {
+      const s = state && typeof state === "object" ? state : {};
+      const d = s.data && typeof s.data === "object" ? s.data : {};
+      if (Array.isArray(d.items)) return d.items;
+      if (Array.isArray(s.items)) return s.items;
+      return [];
+    } catch {
+      return [];
+    }
+  }
+
+  function extractStockMap(state) {
+    try {
+      const s = state && typeof state === "object" ? state : {};
+      const d = s.data && typeof s.data === "object" ? s.data : {};
+      const stock = d.stock ?? s.stock ?? null;
+
+      // accept: object map {articleNo: qty}
+      if (stock && typeof stock === "object" && !Array.isArray(stock)) return stock;
+
+      // accept: array [{articleNo, qty}] => map
+      if (Array.isArray(stock)) {
+        const map = Object.create(null);
+        for (const r of stock) {
+          const k = safeStr(r && (r.articleNo ?? r.sku ?? r.id));
+          if (!k) continue;
+          map[k] = safeInt(r && (r.onHand ?? r.qty ?? r.quantity ?? r.count ?? r.units), 0);
+        }
+        return map;
+      }
+
+      return Object.create(null);
+    } catch {
+      return Object.create(null);
     }
   }
 
@@ -551,6 +652,12 @@ AUTOPATCH (QA-fix):
     return Number.isFinite(n) ? n : fallback;
   }
 
+  function safeInt(v, fallback) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.trunc(n);
+  }
+
   function safeStr(v) {
     try {
       const s = String(v == null ? "" : v).trim();
@@ -561,8 +668,10 @@ AUTOPATCH (QA-fix):
   }
 
   /* ÄNDRINGSLOGG (≤8)
-  1) QA-fix: computeArticleTrend30() meta vid “ingen selection” -> ignoredMoves=0 (mer korrekt).
-  2) QA-fix: normalizeMove(): key blir stabil identifierare (artikelNo/sku/id), label separat (kan ändras).
-  3) QA-fix: Trend-matchning primärt på key, fallback på label endast om key saknas.
+  1) AO-04A: lagt till computeUnderMin(state) -> underMin lista + deterministisk sort.
+  2) AO-04A: robust item/stock-join (onHand först, fallback stockMap), fail-soft => [].
+  3) AO-04A: minLevel stöder både minLevel och legacy min.
+  4) Inga nya storage-keys/datamodell.
+  5) Ingen påverkan på AO-02A/AO-03A flöden.
   */
 })();
