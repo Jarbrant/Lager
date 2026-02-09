@@ -1,1 +1,631 @@
+<!-- ============================================================
+AO-LOGIN-04 (NY) — Admin Clean Page (utan legacy-modal) | FIL: admin/freezer-clean.html
+Projekt: Freezer (UI-only / localStorage-first)
+
+Syfte:
+- Ren ADMIN-startsida utan inbyggd HTML-overlay som kan låsa UI.
+- Använder ENDAST window.FreezerModal (05-modal-shell.js).
+- Modal öppnas bara via knappen “Skapa användare”.
+
+Policy:
+- UI-only • inga nya storage-keys/datamodell
+- XSS-safe (textContent, ingen osäker innerHTML)
+- Fail-closed: om Store/Render saknas -> disable actions, visa tydligt fel
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freezer – Admin (Clean)</title>
+  <link rel="icon" href="data:,">
+
+  <style>
+    :root { color-scheme: light; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header { border-bottom:1px solid #e6e6e6; background:#fff; }
+    main { background:#f6f7f8; min-height: calc(100vh - 64px); }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .brand { font-weight:800; letter-spacing:.2px; }
+    .spacer { flex:1; }
+    nav a { text-decoration:none; color:inherit; opacity:.8; }
+    nav a:hover { opacity:1; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fafafa; font-size: 13px; }
+    .pill b { font-weight:700; }
+    .muted { opacity:.75; }
+    .panel { border:1px solid #e6e6e6; border-radius: 12px; padding: 12px; background:#fff; }
+    .danger { border-color:#f2b8b5; background:#fff5f5; }
+    .ok { border-color:#cfe9cf; background:#f4fff4; }
+    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .tabBtn { border:1px solid #e6e6e6; background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; font-size: 14px; }
+    .tabBtn[aria-selected="true"] { font-weight:800; }
+    .grid2 { display:grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 900px){ .grid2 { grid-template-columns: 1fr 1fr; } }
+    .hr { height:1px; background:#eee; margin:10px 0; }
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .userRow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:8px; border:1px solid #e6e6e6; border-radius:10px; background:#fff; }
+    .userRow .name { font-weight:800; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size: 12px; }
+    label { display:block; font-size: 13px; margin: 0 0 6px 0; }
+    input[type="text"] { width:100%; box-sizing:border-box; padding:10px 12px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
+    .chkRow { display:flex; gap:10px; flex-wrap:wrap; }
+    .chk { display:flex; gap:6px; align-items:center; font-size:13px; }
+    .small { font-size:12px; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="wrap">
+      <div class="row">
+        <div class="brand">🧊 Freezer</div>
+
+        <nav class="row" aria-label="Admin navigation">
+          <a href="./index.html" class="muted">Admin Hem</a>
+          <span class="muted">/</span>
+          <a href="./freezer-clean.html"><b>Fryslager</b></a>
+        </nav>
+
+        <div class="spacer"></div>
+
+        <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
+          <span class="muted">Status:</span>
+          <b id="frzStatusText">Laddar…</b>
+        </div>
+
+        <div class="pill">
+          <span class="muted">Roll:</span>
+          <b id="frzRoleText">ADMIN</b>
+        </div>
+
+        <div class="pill">
+          <span class="muted">Användare:</span>
+          <b id="frzUserName">—</b>
+        </div>
+
+        <button id="frzOpenCreateUserBtn" class="btn" type="button" disabled>Skapa användare</button>
+        <button id="frzResetDemoBtn" class="btn" type="button">Återställ demo</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <section id="frzLockPanel" class="panel danger" hidden>
+        <b>Spärrad</b>
+        <div class="muted" id="frzLockReason">—</div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <div class="tabs" role="tablist" aria-label="Vy">
+            <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true">Dashboard</button>
+            <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false">Saldo</button>
+            <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false">Historik</button>
+          </div>
+          <div class="spacer"></div>
+          <div class="pill">
+            <span class="muted">Läge:</span>
+            <b id="frzModeText">—</b>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <section id="viewDashboard">
+          <div class="grid2">
+            <div>
+              <h2 style="margin:0 0 8px 0;">Översikt</h2>
+              <div class="muted" style="margin-bottom:12px;">Ren startsida (ingen legacy-modal).</div>
+              <div id="frzDashCards" class="grid2"></div>
+            </div>
+            <div>
+              <h2 style="margin:0 0 8px 0;">Noteringar</h2>
+              <div class="muted" id="frzDashNotes">—</div>
+            </div>
+          </div>
+
+          <div class="hr"></div>
+
+          <section class="panel" style="background:#fff;">
+            <div class="row">
+              <div>
+                <h2 style="margin:0;">Användare & behörigheter</h2>
+                <div class="muted" style="margin-top:4px;">Skapa/ändra användare via <b>Skapa användare</b> i topbaren.</div>
+              </div>
+              <div class="spacer"></div>
+              <div class="pill"><span class="muted">Users:</span> <b id="frzUsersCount">0</b></div>
+            </div>
+            <div class="hr"></div>
+            <div id="frzUsersInlineMsg" class="panel danger" hidden>
+              <b id="frzUsersInlineMsgTitle">Info</b>
+              <div class="muted" id="frzUsersInlineMsgText">—</div>
+            </div>
+            <div class="list" id="frzUsersList"></div>
+          </section>
+        </section>
+
+        <section id="viewSaldo" hidden>
+          <div class="row" style="margin-bottom:10px;">
+            <h2 style="margin:0;">Lagersaldo</h2>
+            <div class="spacer"></div>
+            <div class="pill"><span class="muted">Artiklar:</span> <b id="frzSaldoCount">0</b></div>
+          </div>
+          <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;"></div>
+        </section>
+
+        <section id="viewHistorik" hidden>
+          <div class="row" style="margin-bottom:10px;">
+            <h2 style="margin:0;">Historik</h2>
+            <div class="spacer"></div>
+            <div class="pill"><span class="muted">Händelser:</span> <b id="frzHistoryCount">0</b></div>
+          </div>
+          <div id="frzHistoryList" class="panel" style="background:#fafafa;"></div>
+        </section>
+      </section>
+
+      <footer class="muted small" style="padding:16px 0;">
+        AO-LOGIN-04 • Clean Admin • modal via FreezerModal
+      </footer>
+    </div>
+  </main>
+
+  <!-- Baseline scripts -->
+  <script src="../UI/pages/freezer/02-core.js"></script>
+  <script src="../UI/pages/freezer/04-contract.js"></script>
+  <script src="../UI/pages/freezer/03-store.js"></script>
+
+  <script src="../UI/freezer-render.js"></script>
+  <script src="../UI/freezer-dashboard.js"></script>
+
+  <!-- ENDA modal-systemet -->
+  <script src="../UI/pages/freezer/05-modal-shell.js"></script>
+
+  <script>
+    (function(){
+      "use strict";
+
+      // --- Session guard (ADMIN)
+      const SESSION_KEY = "FRZ_SESSION_V1";
+
+      function safeJsonParse(raw){ try { return JSON.parse(raw); } catch { return null; } }
+
+      function readSession(){
+        try {
+          const sRaw = (window.sessionStorage && window.sessionStorage.getItem(SESSION_KEY)) || null;
+          if (sRaw) return safeJsonParse(sRaw);
+        } catch {}
+        try {
+          const lRaw = (window.localStorage && window.localStorage.getItem(SESSION_KEY)) || null;
+          if (lRaw) return safeJsonParse(lRaw);
+        } catch {}
+        return null;
+      }
+
+      function isAdminSession(sess){
+        try {
+          if (!sess || typeof sess !== "object") return { ok:false, reason:"NO_SESSION" };
+          const role = String(sess.role||"").toUpperCase().trim();
+          if (role !== "ADMIN") return { ok:false, reason:"NOT_ADMIN" };
+          const exp = Number(sess.exp||0);
+          if (exp && Date.now() > exp) return { ok:false, reason:"EXPIRED" };
+          const firstName = String(sess.firstName||"").trim();
+          if (!firstName) return { ok:false, reason:"BAD_SESSION" };
+          return { ok:true, firstName:firstName };
+        } catch {
+          return { ok:false, reason:"BAD_SESSION" };
+        }
+      }
+
+      function redirectToLogin(){
+        try { window.location.replace("../index.html"); } catch {
+          try { window.location.href = "../index.html"; } catch {}
+        }
+      }
+
+      // Guard direkt
+      (function guardNow(){
+        const sess = readSession();
+        const v = isAdminSession(sess);
+        if (!v.ok) { redirectToLogin(); return; }
+      })();
+
+      // --- DOM helpers
+      const $ = (id) => document.getElementById(id);
+
+      const statusText = $("frzStatusText");
+      const roleText = $("frzRoleText");
+      const userNameText = $("frzUserName");
+      const modeText = $("frzModeText");
+      const lockPanel = $("frzLockPanel");
+      const lockReason = $("frzLockReason");
+
+      const tabDashboard = $("tabDashboard");
+      const tabSaldo = $("tabSaldo");
+      const tabHistorik = $("tabHistorik");
+      const viewDashboard = $("viewDashboard");
+      const viewSaldo = $("viewSaldo");
+      const viewHistorik = $("viewHistorik");
+
+      const usersCount = $("frzUsersCount");
+      const usersList = $("frzUsersList");
+      const inlineMsgBox = $("frzUsersInlineMsg");
+      const inlineMsgTitle = $("frzUsersInlineMsgTitle");
+      const inlineMsgText = $("frzUsersInlineMsgText");
+
+      const openCreateBtn = $("frzOpenCreateUserBtn");
+      const resetBtn = $("frzResetDemoBtn");
+
+      // --- Fail-closed baseline check
+      if (!window.FreezerStore || typeof window.FreezerStore.init !== "function") {
+        if (statusText) statusText.textContent = "Fel";
+        if (lockPanel) lockPanel.hidden = false;
+        if (lockReason) lockReason.textContent = "FreezerStore saknas. Kontrollera script-path.";
+        if (openCreateBtn) openCreateBtn.disabled = true;
+        return;
+      }
+      if (!window.FreezerRender) {
+        if (statusText) statusText.textContent = "Fel";
+        if (lockPanel) lockPanel.hidden = false;
+        if (lockReason) lockReason.textContent = "FreezerRender saknas. Kontrollera script-path.";
+        if (openCreateBtn) openCreateBtn.disabled = true;
+        return;
+      }
+      if (!window.FreezerModal || typeof window.FreezerModal.open !== "function") {
+        if (statusText) statusText.textContent = "Fel";
+        if (lockPanel) lockPanel.hidden = false;
+        if (lockReason) lockReason.textContent = "FreezerModal saknas. Kontrollera att 05-modal-shell.js laddas.";
+        if (openCreateBtn) openCreateBtn.disabled = true;
+        return;
+      }
+
+      // --- Init store
+      let store = window.FreezerStore;
+      try { store.init({ role: "ADMIN" }); } catch (e) {
+        if (statusText) statusText.textContent = "Fel";
+        if (lockPanel) lockPanel.hidden = false;
+        if (lockReason) lockReason.textContent = "Store init-fel (storage/JSON). Se Console.";
+        if (openCreateBtn) openCreateBtn.disabled = true;
+        console.error(e);
+        return;
+      }
+
+      function safeGetStatus(){
+        try { return store.getStatus ? store.getStatus() : { locked:false, readOnly:false }; }
+        catch { return { locked:false, readOnly:true, whyReadOnly:"Storage error" }; }
+      }
+      function safeCan(perm){
+        try {
+          if (store.hasPerm) return !!store.hasPerm(perm);
+          if (store.can) return !!store.can(perm);
+          return false;
+        } catch { return false; }
+      }
+      function showInlineMsg(title, text){
+        if (!inlineMsgBox) return;
+        inlineMsgTitle.textContent = title || "Info";
+        inlineMsgText.textContent = text || "—";
+        inlineMsgBox.hidden = false;
+      }
+      function clearInlineMsg(){
+        if (!inlineMsgBox) return;
+        inlineMsgBox.hidden = true;
+        inlineMsgTitle.textContent = "Info";
+        inlineMsgText.textContent = "—";
+      }
+
+      function syncTopbar(){
+        const sess = readSession();
+        const v = isAdminSession(sess);
+        if (!v.ok) { redirectToLogin(); return false; }
+        if (roleText) roleText.textContent = "ADMIN";
+        if (userNameText) userNameText.textContent = v.firstName || "—";
+        return true;
+      }
+
+      function syncLocks(){
+        const st = safeGetStatus();
+        const canUsers = safeCan("users_manage");
+
+        if (statusText) statusText.textContent = "OK";
+        if (modeText) modeText.textContent = st.readOnly ? "READ-ONLY" : (st.locked ? "LÅST" : "FULL");
+
+        const blocked = !!st.locked || !!st.readOnly;
+        if (lockPanel) lockPanel.hidden = !(blocked);
+        if (lockReason) lockReason.textContent = blocked ? (st.reason || st.whyReadOnly || "Spärrad") : "—";
+
+        if (openCreateBtn) openCreateBtn.disabled = blocked || !canUsers;
+        if (resetBtn) resetBtn.disabled = blocked;
+      }
+
+      function renderUsers(){
+        clearInlineMsg();
+        if (!usersList) return;
+
+        let users = [];
+        try { users = store.listUsers ? (store.listUsers() || []) : []; } catch { users = []; }
+
+        usersList.textContent = "";
+        if (usersCount) usersCount.textContent = String(users.length || 0);
+
+        if (!users.length) {
+          const empty = document.createElement("div");
+          empty.className = "muted small";
+          empty.textContent = "Inga användare skapade ännu.";
+          usersList.appendChild(empty);
+          return;
+        }
+
+        for (const u of users) {
+          if (!u) continue;
+          const row = document.createElement("div");
+          row.className = "userRow";
+
+          const name = document.createElement("div");
+          name.className = "name";
+          name.textContent = String(u.firstName || "—");
+
+          const meta = document.createElement("div");
+          meta.className = "muted meta";
+          const perms = u.perms && typeof u.perms === "object" ? u.perms : {};
+          const p = [];
+          if (perms.users_manage) p.push("users_manage");
+          if (perms.inventory_write) p.push("inventory_write");
+          if (perms.history_write) p.push("history_write");
+          if (perms.dashboard_view) p.push("dashboard_view");
+          meta.textContent = (p.length ? p.join(", ") : "—");
+
+          const editBtn = document.createElement("button");
+          editBtn.type = "button";
+          editBtn.className = "btn";
+          editBtn.textContent = "Redigera";
+          editBtn.addEventListener("click", () => openUserModal({ mode:"edit", user:u }));
+
+          row.appendChild(name);
+          row.appendChild(meta);
+          row.appendChild(editBtn);
+          usersList.appendChild(row);
+        }
+      }
+
+      function setTab(key){
+        const isDash = key === "dashboard";
+        const isSaldo = key === "saldo";
+        const isHist = key === "history";
+
+        tabDashboard.setAttribute("aria-selected", isDash ? "true" : "false");
+        tabSaldo.setAttribute("aria-selected", isSaldo ? "true" : "false");
+        tabHistorik.setAttribute("aria-selected", isHist ? "true" : "false");
+
+        viewDashboard.hidden = !isDash;
+        viewSaldo.hidden = !isSaldo;
+        viewHistorik.hidden = !isHist;
+
+        // Render baseline views via FreezerRender om de finns
+        try {
+          const state = store.getState ? store.getState() : {};
+          window.FreezerRender.renderAll(state, {}); // itemsUI stub
+        } catch {}
+      }
+
+      function openUserModal(opts){
+        clearInlineMsg();
+        if (!syncTopbar()) return;
+
+        const st = safeGetStatus();
+        if (st.locked) return showInlineMsg("Spärrad", st.reason ? ("Låst: " + st.reason) : "Låst läge.");
+        if (st.readOnly) return showInlineMsg("Spärrad", st.whyReadOnly || "Read-only.");
+        if (!safeCan("users_manage")) return showInlineMsg("Spärrad", "Saknar behörighet (users_manage).");
+
+        const mode = (opts && opts.mode) ? String(opts.mode) : "new";
+        const user = (opts && opts.user) ? opts.user : null;
+
+        window.FreezerModal.open({
+          title: mode === "edit" ? "Redigera användare" : "Skapa användare",
+          render: function(root){
+            const panel = document.createElement("div");
+            panel.className = "panel";
+            panel.style.background = "#fafafa";
+
+            const head = document.createElement("div");
+            head.className = "row";
+            head.style.marginBottom = "10px";
+
+            const h = document.createElement("b");
+            h.textContent = mode === "edit" ? "Redigera användare" : "Skapa användare";
+
+            const hint = document.createElement("div");
+            hint.className = "muted small";
+            hint.textContent = mode === "edit" ? "Editläge" : "Nytt";
+
+            head.appendChild(h);
+            head.appendChild(document.createElement("div")).className = "spacer";
+            head.appendChild(hint);
+
+            const msg = document.createElement("div");
+            msg.className = "panel danger";
+            msg.hidden = true;
+
+            const msgT = document.createElement("b");
+            msgT.textContent = "Fel";
+            const msgM = document.createElement("div");
+            msgM.className = "muted";
+            msgM.textContent = "—";
+            msg.appendChild(msgT);
+            msg.appendChild(msgM);
+
+            const nameLabel = document.createElement("label");
+            nameLabel.textContent = "Förnamn";
+
+            const nameInput = document.createElement("input");
+            nameInput.type = "text";
+            nameInput.maxLength = 32;
+            nameInput.placeholder = "t.ex. Anna";
+            nameInput.value = user ? String(user.firstName || "") : "";
+
+            const chkRow = document.createElement("div");
+            chkRow.className = "chkRow";
+
+            function mkChk(id, label, checked){
+              const l = document.createElement("label");
+              l.className = "chk";
+              const cb = document.createElement("input");
+              cb.type = "checkbox";
+              cb.id = id;
+              cb.checked = !!checked;
+              const t = document.createTextNode(" " + label);
+              l.appendChild(cb);
+              l.appendChild(t);
+              return { l, cb };
+            }
+
+            const perms = user && user.perms ? user.perms : {};
+            const c1 = mkChk("perm_users_manage", "users_manage", perms.users_manage);
+            const c2 = mkChk("perm_inventory_write", "inventory_write", perms.inventory_write);
+            const c3 = mkChk("perm_history_write", "history_write", perms.history_write);
+            const c4 = mkChk("perm_dashboard_view", "dashboard_view", ("dashboard_view" in perms) ? perms.dashboard_view : true);
+
+            chkRow.appendChild(c1.l);
+            chkRow.appendChild(c2.l);
+            chkRow.appendChild(c3.l);
+            chkRow.appendChild(c4.l);
+
+            const foot = document.createElement("div");
+            foot.className = "row";
+            foot.style.marginTop = "12px";
+
+            const cancel = document.createElement("button");
+            cancel.type = "button";
+            cancel.className = "btn";
+            cancel.textContent = "Avbryt";
+            cancel.addEventListener("click", () => window.FreezerModal.close());
+
+            const save = document.createElement("button");
+            save.type = "button";
+            save.className = "btn";
+            save.textContent = "Spara";
+
+            function showErr(text){
+              msg.hidden = false;
+              msgM.textContent = String(text || "Okänt fel.");
+            }
+
+            save.addEventListener("click", () => {
+              msg.hidden = true;
+              const firstName = String(nameInput.value || "").trim();
+              if (!firstName) return showErr("Förnamn krävs.");
+
+              const nextPerms = {
+                users_manage: !!c1.cb.checked,
+                inventory_write: !!c2.cb.checked,
+                history_write: !!c3.cb.checked,
+                dashboard_view: !!c4.cb.checked
+              };
+
+              try {
+                if (mode === "edit" && user && user.id) {
+                  const r = store.updateUser(user.id, { firstName, perms: nextPerms });
+                  if (!r || !r.ok) return showErr((r && r.reason) ? r.reason : "Kunde inte spara.");
+                } else {
+                  const r = store.createUser({ firstName, perms: nextPerms });
+                  if (!r || !r.ok) {
+                    if (r && r.errorCode === "FRZ_E_USER_NAME_NOT_UNIQUE") return showErr("Förnamn måste vara unikt.");
+                    return showErr((r && r.reason) ? r.reason : "Kunde inte skapa.");
+                  }
+                }
+                window.FreezerModal.close();
+              } catch (e) {
+                console.error(e);
+                showErr("Storage error (read-only). Se Console.");
+              }
+            });
+
+            foot.appendChild(cancel);
+            foot.appendChild(document.createElement("div")).className = "spacer";
+            foot.appendChild(save);
+
+            panel.appendChild(head);
+            panel.appendChild(msg);
+            panel.appendChild(nameLabel);
+            panel.appendChild(nameInput);
+            panel.appendChild(document.createElement("div")).style.height = "10px";
+            panel.appendChild(chkRow);
+            panel.appendChild(foot);
+
+            root.appendChild(panel);
+
+            try { nameInput.focus(); } catch {}
+          },
+          onClose: function(){
+            // efter stäng → rerender users
+            try { renderUsers(); } catch {}
+          }
+        });
+      }
+
+      function wire(){
+        tabDashboard.addEventListener("click", () => setTab("dashboard"));
+        tabSaldo.addEventListener("click", () => setTab("saldo"));
+        tabHistorik.addEventListener("click", () => setTab("history"));
+
+        openCreateBtn.addEventListener("click", () => openUserModal({ mode:"new" }));
+
+        resetBtn.addEventListener("click", () => {
+          clearInlineMsg();
+          const st = safeGetStatus();
+          if (st.locked || st.readOnly) return;
+
+          try {
+            const r = store.resetDemo ? store.resetDemo() : { ok:false, reason:"resetDemo saknas." };
+            if (!r || !r.ok) return showInlineMsg("Reset misslyckades", (r && r.reason) ? r.reason : "Okänt fel.");
+          } catch (e) {
+            console.error(e);
+            return showInlineMsg("Reset misslyckades", "Storage error. Se Console.");
+          }
+
+          renderUsers();
+        });
+
+        // Subscribe
+        try {
+          if (store.subscribe) {
+            store.subscribe(() => {
+              syncTopbar();
+              syncLocks();
+              renderUsers();
+            });
+          }
+        } catch {}
+      }
+
+      // Boot
+      syncTopbar();
+      syncLocks();
+      renderUsers();
+      setTab("dashboard");
+      wire();
+
+    })();
+  </script>
+
+  <!-- ==========================================================
+  ÄNDRINGSLOGG (≤8)
+  1) NY admin/freezer-clean.html utan legacy HTML-modal overlay.
+  2) Modal öppnas endast via FreezerModal (05-modal-shell.js).
+  3) Skapa användare renderas i FreezerModal och stängs alltid (ESC/overlay/Stäng).
+  4) Fail-closed: om Store/Render/Modal saknas -> actions disabled + tydligt fel.
+  =========================================================== -->
+
+  <!-- ==========================================================
+  TESTNOTERINGAR (klicktest)
+  - Logga in Admin/1111 -> öppna /admin/freezer-clean.html -> ingen modal får synas.
+  - Klicka "Skapa användare" -> modal öppnas -> Stäng/ESC/overlay stänger.
+  - Skapa ny user -> modalen stänger -> user syns i listan.
+  - Redigera user -> ändra perms -> spara -> listan uppdateras.
+  =========================================================== -->
+</body>
+</html>
 
