@@ -3,25 +3,29 @@ AO-01/15 — NY-BASELINE | FIL: UI/freezer-render.js
 + AO-02/15 — Statuspanel + Read-only UX + felkoder
 + AO-03/15 — Users CRUD UI render (Admin)
 + AO-04/15 — Produktregister (Items) CRUD (Admin) — BLOCK 1/6
++ AO-05A/15 — Historikfilter UI + render (IN/OUT/ALL + datum + artikel)  [AUTOPATCH: BUGFIX]
 
 Syfte:
 - XSS-safe rendering (textContent, aldrig osäker innerHTML)
 - Render av status banner/pill + lockpanel + debug + mode
 - Tab UI växling (dashboard/saldo/history)
 - Users-panel: visa/dölj via RBAC (users_manage), rendera lista + count
-- Items (AO-04): renderar produktregister i Saldo-vyn utan HTML-ändring:
-  - Search + sort + kategori-filter + includeInactive
-  - Lista + actions (edit / arkivera / radera guarded)
-  - Editor (create/update) inline
+- Items (AO-04): renderar produktregister i Saldo-vyn utan HTML-ändring
+- Historik (AO-05A): filterrad + filtrerad lista (fail-soft, deterministiskt datumfilter)
 
 Kontrakt:
 - Förväntar window.FreezerStore.getStatus() och state-shape från store
 - Får inte skapa nya storage-keys eller skriva till storage
 
-AUTOPATCH (P0):
-- Status-pill ska vara GRÖN när systemet inte är låst och inga tydliga felindikatorer finns,
-  även om status-text inte är exakt "OK" (t.ex. READY/INIT/FULL).
-- Debug-panel ska inte triggas bara för att status !== "OK", utan baseras på samma OK-klassning.
+Policy:
+- UI-only • inga nya storage-keys/datamodell
+- Fail-soft i beräkningar och render (tomt läge hellre än crash)
+- XSS-safe: textContent, aldrig osäker innerHTML
+
+AUTOPATCH (DENNA):
+- P0: Fixar listener-läckage genom bind-once event delegation på #frzHistoryList.
+- P1: Dämpar rerender-storm via requestAnimationFrame-dedupe (ingen direkt renderHistory() i varje event).
+- P2: Gör items btnEdit disabled konsekvent med locked (inkl readOnly).
 ============================================================ */
 (function () {
   "use strict";
@@ -40,6 +44,19 @@ AUTOPATCH (P0):
   window.FreezerRender = FreezerRender;
 
   // -----------------------------
+  // AO-05A: local UI-state (no storage)
+  // -----------------------------
+  const _historyUi = {
+    from: "",     // "YYYY-MM-DD"
+    to: "",       // "YYYY-MM-DD"
+    type: "ALL",  // ALL | IN | OUT
+    q: ""         // article query
+  };
+
+  // AO-05A: rerender dedupe (no storms)
+  let _historyRaf = 0;
+
+  // -----------------------------
   // MAIN RENDER
   // -----------------------------
   function renderAll(state, ui = {}) {
@@ -53,7 +70,9 @@ AUTOPATCH (P0):
     // AO-04: Saldo-vyn används som Produktregister (Items CRUD)
     renderItemsRegister(state, ui);
 
+    // AO-05A: History (filter + list)
     renderHistory(state);
+
     renderDashboard(state);
   }
 
@@ -70,7 +89,6 @@ AUTOPATCH (P0):
     const okLike = isOkLikeStatus(st);
 
     if (pillText) {
-      // Visa alltid store-status text, men färg styrs av okLike/locked.
       pillText.textContent = safeText(st.status || (okLike ? "OK" : "KORRUPT"));
     }
 
@@ -139,7 +157,6 @@ AUTOPATCH (P0):
     const st = safeStatus();
     const okLike = isOkLikeStatus(st);
 
-    // AUTOPATCH: debug ska visas när vi har faktisk avvikelse (ej okLike) eller debug-flaggor.
     const shouldShow = (!okLike) || (st.debug && (st.debug.demoCreated || st.debug.rawWasEmpty));
     panel.hidden = !shouldShow;
 
@@ -284,7 +301,6 @@ AUTOPATCH (P0):
 
     wrap.textContent = "";
 
-    // Top controls
     const top = document.createElement("div");
     top.className = "row";
     top.style.marginBottom = "10px";
@@ -339,7 +355,6 @@ AUTOPATCH (P0):
 
     wrap.appendChild(top);
 
-    // Editor
     const editor = document.createElement("div");
     editor.className = "panel";
     editor.style.background = "#fafafa";
@@ -364,7 +379,6 @@ AUTOPATCH (P0):
     grid.className = "row";
     grid.style.flexWrap = "wrap";
 
-    // inputs (ids used by freezer.js controller)
     grid.appendChild(pillInput("articleNo", "frzItemArticleNo", safeText(ui && ui.formArticleNo), "t.ex. FZ-010", 32, isEdit || locked));
     grid.appendChild(pillInput("packSize", "frzItemPackSize", safeText(ui && ui.formPackSize), "t.ex. 2kg", 32, locked));
     grid.appendChild(pillInput("supplier", "frzItemSupplier", safeText(ui && ui.formSupplier), "t.ex. FoodSupplier AB", 48, locked));
@@ -419,7 +433,6 @@ AUTOPATCH (P0):
 
     wrap.appendChild(editor);
 
-    // List
     const listWrap = document.createElement("div");
     listWrap.className = "panel";
     listWrap.style.background = "#fff";
@@ -482,7 +495,8 @@ AUTOPATCH (P0):
       btnEdit.textContent = "Redigera";
       btnEdit.setAttribute("data-action", "item-edit");
       btnEdit.setAttribute("data-article-no", it.articleNo);
-      btnEdit.disabled = !!st.locked;
+      // P2 fix: consistent lock (include readOnly + perm)
+      btnEdit.disabled = locked;
 
       const btnArchive = document.createElement("button");
       btnArchive.className = "btn";
@@ -612,39 +626,67 @@ AUTOPATCH (P0):
   }
 
   // -----------------------------
-  // HISTORY / DASH
+  // AO-05A: HISTORY (filter + list)
   // -----------------------------
   function renderHistory(state) {
-    const list = byId("frzHistoryList");
+    const root = byId("frzHistoryList");
     const count = byId("frzHistoryCount");
-    if (!list || !count) return;
+    if (!root || !count) return;
 
-    const history = safeHistory(state);
-    count.textContent = String(history.length);
+    // P0 fix: bind-once event delegation (no leaks)
+    bindHistoryFilterOnce(root);
 
-    list.textContent = "";
-    if (!history.length) {
+    const st = safeStatus();
+    const locked = !!(st.locked || st.readOnly);
+
+    // 1) Dataset (fail-soft)
+    const raw = extractHistoryLike(state);
+    const rows = normalizeHistoryRows(raw);
+
+    // 2) Render filterrad (utan HTML-krav)
+    root.textContent = "";
+
+    const wrap = document.createElement("div");
+    wrap.className = "list";
+
+    const filterBar = renderHistoryFilterBar({ locked });
+    wrap.appendChild(filterBar);
+
+    const filtered = applyHistoryFilter(rows, _historyUi);
+    count.textContent = String(filtered.length);
+
+    // 3) Tomt-läge
+    if (!filtered.length) {
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Ingen historik ännu.";
-      list.appendChild(d);
+      d.textContent = rows.length
+        ? "Inga händelser matchar filtret."
+        : "Ingen historik ännu.";
+      wrap.appendChild(d);
+      root.appendChild(wrap);
       return;
     }
 
-    const ul = document.createElement("div");
-    ul.className = "list";
+    // 4) Lista (senaste först, max 100)
+    const list = document.createElement("div");
+    list.className = "list";
 
-    history.slice().reverse().slice(0, 50).forEach(h => {
+    const toShow = filtered
+      .slice()
+      .sort((a, b) => (b.ts - a.ts))
+      .slice(0, 100);
+
+    toShow.forEach(h => {
       const row = document.createElement("div");
       row.className = "userRow";
 
       const left = document.createElement("div");
       left.className = "meta";
-      left.textContent = `${safeText(h.ts || "")} • ${safeText(h.type || "")}`;
+      left.textContent = `${safeText(h.day)} • ${safeText(h.dir)} • qty=${String(h.qty)}`;
 
       const note = document.createElement("div");
       note.className = "muted";
-      note.textContent = safeText(h.note || "");
+      note.textContent = safeText(h.label || h.key || h.note || "");
 
       const by = document.createElement("span");
       by.className = "badge";
@@ -654,12 +696,334 @@ AUTOPATCH (P0):
       row.appendChild(note);
       row.appendChild(by);
 
-      ul.appendChild(row);
+      list.appendChild(row);
     });
 
-    list.appendChild(ul);
+    wrap.appendChild(list);
+    root.appendChild(wrap);
   }
 
+  function renderHistoryFilterBar(ctx) {
+    const locked = !!(ctx && ctx.locked);
+
+    const bar = document.createElement("div");
+    bar.className = "row";
+    bar.style.marginBottom = "10px";
+
+    const fromLabel = pillDate("Från", "frzHistFrom", _historyUi.from, locked);
+    const toLabel = pillDate("Till", "frzHistTo", _historyUi.to, locked);
+
+    const typeLabel = pillSelect("Typ", "frzHistType", [
+      { v: "ALL", t: "Alla" },
+      { v: "IN", t: "IN" },
+      { v: "OUT", t: "OUT" }
+    ], _historyUi.type, locked);
+
+    const qLabel = pillText("Artikel", "frzHistQ", _historyUi.q, "t.ex. FZ-010 / kyckling", locked);
+
+    const spacer = document.createElement("div");
+    spacer.className = "spacer";
+
+    const btnClear = document.createElement("button");
+    btnClear.className = "btn";
+    btnClear.type = "button";
+    btnClear.id = "frzHistClearBtn";
+    btnClear.textContent = "Rensa";
+    btnClear.disabled = locked;
+
+    const hint = document.createElement("span");
+    hint.className = "muted";
+    hint.style.fontSize = "13px";
+    hint.textContent = "Filter: datum (inklusive), typ och artikel (case-insensitiv).";
+
+    bar.appendChild(fromLabel);
+    bar.appendChild(toLabel);
+    bar.appendChild(typeLabel);
+    bar.appendChild(qLabel);
+    bar.appendChild(spacer);
+    bar.appendChild(btnClear);
+    bar.appendChild(hint);
+
+    // P0 fix: inga per-render listeners här (delegation sker i bindHistoryFilterOnce)
+    return bar;
+  }
+
+  function pillDate(label, id, value, disabled) {
+    const wrap = document.createElement("label");
+    wrap.className = "pill";
+    wrap.setAttribute("for", id);
+
+    const muted = document.createElement("span");
+    muted.className = "muted";
+    muted.textContent = `${label}:`;
+
+    const inp = document.createElement("input");
+    inp.id = id;
+    inp.type = "date";
+    inp.value = safeText(value || "");
+    if (disabled) inp.disabled = true;
+
+    wrap.appendChild(muted);
+    wrap.appendChild(inp);
+    return wrap;
+  }
+
+  function pillText(label, id, value, placeholder, disabled) {
+    const wrap = document.createElement("label");
+    wrap.className = "pill";
+    wrap.setAttribute("for", id);
+
+    const muted = document.createElement("span");
+    muted.className = "muted";
+    muted.textContent = `${label}:`;
+
+    const inp = document.createElement("input");
+    inp.id = id;
+    inp.type = "text";
+    inp.value = safeText(value || "");
+    inp.placeholder = safeText(placeholder || "");
+    inp.maxLength = 64;
+    if (disabled) inp.disabled = true;
+
+    wrap.appendChild(muted);
+    wrap.appendChild(inp);
+    return wrap;
+  }
+
+  function bindHistoryFilterOnce(root) {
+    try {
+      if (!root) return;
+      if (root.dataset && root.dataset.histBound === "1") return;
+      if (root.dataset) root.dataset.histBound = "1";
+
+      const onChange = (ev) => {
+        const t = ev && ev.target ? ev.target : null;
+        if (!t || !t.id) return;
+
+        if (t.id === "frzHistFrom") {
+          _historyUi.from = safeText(t.value || "");
+          scheduleHistoryRerender();
+        } else if (t.id === "frzHistTo") {
+          _historyUi.to = safeText(t.value || "");
+          scheduleHistoryRerender();
+        } else if (t.id === "frzHistType") {
+          _historyUi.type = safeText(t.value || "ALL") || "ALL";
+          scheduleHistoryRerender();
+        }
+      };
+
+      const onInput = (ev) => {
+        const t = ev && ev.target ? ev.target : null;
+        if (!t || !t.id) return;
+        if (t.id === "frzHistQ") {
+          _historyUi.q = safeText(t.value || "");
+          scheduleHistoryRerender();
+        }
+      };
+
+      const onClick = (ev) => {
+        const t = ev && ev.target ? ev.target : null;
+        if (!t) return;
+        // match clear button by id OR closest
+        const btn = (t.id === "frzHistClearBtn") ? t : (t.closest ? t.closest("#frzHistClearBtn") : null);
+        if (!btn) return;
+
+        _historyUi.from = "";
+        _historyUi.to = "";
+        _historyUi.type = "ALL";
+        _historyUi.q = "";
+        scheduleHistoryRerender();
+      };
+
+      root.addEventListener("change", onChange);
+      root.addEventListener("input", onInput);
+      root.addEventListener("click", onClick);
+    } catch {
+      // fail-soft
+    }
+  }
+
+  function scheduleHistoryRerender() {
+    try {
+      if (_historyRaf) return;
+      _historyRaf = window.requestAnimationFrame(() => {
+        _historyRaf = 0;
+        requestHistoryRerender();
+      });
+    } catch {
+      // fail-soft
+      requestHistoryRerender();
+    }
+  }
+
+  function requestHistoryRerender() {
+    try {
+      // Best effort: render bara historik-sektionen
+      if (window.FreezerStore && typeof window.FreezerStore.getState === "function") {
+        const st = window.FreezerStore.getState();
+        renderHistory(st);
+      }
+    } catch {
+      // fail-soft
+    }
+  }
+
+  function applyHistoryFilter(rows, f) {
+    try {
+      const arr = Array.isArray(rows) ? rows : [];
+      const ff = f && typeof f === "object" ? f : _historyUi;
+
+      const type = String(ff.type || "ALL").toUpperCase().trim();
+      const qNorm = normalizeKey(ff.q || "");
+
+      const fromMs = ff.from ? parseTs(ff.from) : 0;
+      const toMs = ff.to ? parseTs(ff.to) : 0;
+
+      // Datumfilter INKLUSIVT
+      const toEnd = toMs ? (startOfLocalDay(toMs) + 86400000 - 1) : 0;
+      const fromStart = fromMs ? startOfLocalDay(fromMs) : 0;
+
+      return arr.filter(r => {
+        if (type === "IN" && r.dir !== "IN") return false;
+        if (type === "OUT" && r.dir !== "OUT") return false;
+
+        if (fromStart && !(r.ts >= fromStart)) return false;
+        if (toEnd && !(r.ts <= toEnd)) return false;
+
+        if (qNorm && qNorm !== "—") {
+          const keyN = normalizeKey(r.key || "");
+          const labelN = normalizeKey(r.label || "");
+          const noteN = normalizeKey(r.note || "");
+          const hit =
+            (keyN && keyN.includes(qNorm)) ||
+            (labelN && labelN.includes(qNorm)) ||
+            (noteN && noteN.includes(qNorm));
+          if (!hit) return false;
+        }
+
+        return true;
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  function extractHistoryLike(state) {
+    try {
+      const s = state && typeof state === "object" ? state : {};
+      const d = s.data && typeof s.data === "object" ? s.data : {};
+
+      const candidates = [
+        d.history,
+        d.moves,
+        d.events,
+        s.history,
+        s.moves,
+        s.events
+      ];
+      for (const c of candidates) if (Array.isArray(c)) return c;
+      return [];
+    } catch {
+      return [];
+    }
+  }
+
+  function normalizeHistoryRows(rawArr) {
+    try {
+      const arr = Array.isArray(rawArr) ? rawArr : [];
+      const out = [];
+
+      for (const mv of arr) {
+        const info = normalizeMoveLike(mv);
+        if (!info) continue;
+        out.push(info);
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  function normalizeMoveLike(mv) {
+    try {
+      if (!mv || typeof mv !== "object") return null;
+
+      const ts = parseTs(mv.ts ?? mv.time ?? mv.createdAt ?? mv.date ?? mv.at ?? mv.timestamp);
+      const day = ts ? formatYmd(startOfLocalDay(ts)) : "—";
+
+      const qtyRaw = mv.qty ?? mv.quantity ?? mv.amount ?? mv.count ?? mv.units ?? null;
+      const deltaRaw = mv.delta ?? mv.diff ?? mv.change ?? mv.deltaQty ?? mv.deltaUnits ?? null;
+
+      let qty = 0;
+      if (qtyRaw != null) qty = Math.abs(safeNum(qtyRaw, 0));
+      else if (deltaRaw != null) qty = Math.abs(safeNum(deltaRaw, 0));
+
+      const dir = inferDirStrict(mv, deltaRaw);
+      if (!dir) return null;
+
+      const key =
+        safeStr(mv.articleNo) ||
+        safeStr(mv.articleNumber) ||
+        safeStr(mv.article) ||
+        safeStr(mv.itemId) ||
+        safeStr(mv.productId) ||
+        safeStr(mv.sku) ||
+        safeStr(mv.id) ||
+        safeStr(mv.itemKey) ||
+        "";
+
+      const label =
+        safeStr(mv.itemName) ||
+        safeStr(mv.productName) ||
+        safeStr(mv.name) ||
+        safeStr(mv.title) ||
+        safeStr(mv.label) ||
+        safeStr(mv.articleNo) ||
+        key ||
+        "—";
+
+      const by = safeStr(mv.by) || safeStr(mv.user) || safeStr(mv.actor) || "—";
+      const note = safeStr(mv.note) || safeStr(mv.message) || "";
+
+      return {
+        ts: ts || 0,
+        day,
+        dir,
+        qty: safeInt(qty, 0),
+        key: safeStr(key),
+        label: safeStr(label),
+        by,
+        note
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function inferDirStrict(mv, deltaRaw) {
+    try {
+      const t = safeStr(mv.type) || safeStr(mv.kind) || safeStr(mv.action) || safeStr(mv.direction) || "";
+      const up = t.toUpperCase().trim();
+
+      if (up === "IN" || up === "ADD" || up === "RESTOCK" || up === "PUT" || up === "RECEIVE") return "IN";
+      if (up === "OUT" || up === "REMOVE" || up === "PICK" || up === "WITHDRAW" || up === "SHIP") return "OUT";
+
+      if (up === "RECEIVED" || up === "RECEIVING") return "IN";
+      if (up === "SHIPPED" || up === "SHIPPING") return "OUT";
+
+      const d = safeNum(deltaRaw, 0);
+      if (d > 0) return "IN";
+      if (d < 0) return "OUT";
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // -----------------------------
+  // DASH
+  // -----------------------------
   function renderDashboard(state) {
     const cards = byId("frzDashCards");
     const notes = byId("frzDashNotes");
@@ -721,26 +1085,19 @@ AUTOPATCH (P0):
 
   function isOkLikeStatus(st) {
     try {
-      // 1) Låst är alltid "inte ok"
       if (st && st.locked === true) return false;
-
-      // 2) Om vi har en tydlig felkod/orsak -> inte ok
       if (st && st.errorCode) return false;
       if (st && st.reason) return false;
 
-      // 3) Tolka status-text tolerant (trim + upper)
       const raw = st && typeof st.status !== "undefined" ? String(st.status) : "";
       const s = raw.trim().toUpperCase();
 
-      // Vanliga ok-lägen
       const okSet = new Set(["OK", "READY", "INIT", "INITIALIZED", "FULL", "RUNNING"]);
       if (okSet.has(s)) return true;
 
-      // Vanliga fel-lägen
       const badSet = new Set(["KORRUPT", "CORRUPT", "ERROR", "FAIL", "FAILED", "BROKEN", "NOT_INIT"]);
       if (badSet.has(s)) return false;
 
-      // 4) Default: om inte låst och ingen felkod/orsak -> ok (fail-soft)
       return true;
     } catch {
       return false;
@@ -753,17 +1110,6 @@ AUTOPATCH (P0):
     } catch {
       return false;
     }
-  }
-
-  function safeHistory(state) {
-    const s = state && typeof state === "object" ? state : null;
-    const arr = s && s.data && Array.isArray(s.data.history) ? s.data.history : [];
-    return arr.map(h => ({
-      ts: safeText(h && h.ts),
-      type: safeText(h && h.type),
-      note: safeText(h && h.note),
-      by: safeText(h && h.by)
-    }));
   }
 
   function safeUsers(state) {
@@ -786,4 +1132,90 @@ AUTOPATCH (P0):
     return document.getElementById(id);
   }
 
+  // -----------------------------
+  // AO-05A helpers aligned with freezer-dashboard.js
+  // -----------------------------
+  function parseTs(v) {
+    try {
+      if (v == null) return 0;
+      if (typeof v === "number" && Number.isFinite(v)) {
+        if (v > 0 && v < 2000000000) return v * 1000;
+        return v;
+      }
+      const s = String(v).trim();
+      if (!s) return 0;
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const parts = s.split("-");
+        const y = Number(parts[0]), m = Number(parts[1]), d = Number(parts[2]);
+        const dt = new Date(y, (m - 1), d);
+        const ms = dt.getTime();
+        return Number.isFinite(ms) ? ms : 0;
+      }
+
+      const ms = Date.parse(s);
+      return Number.isFinite(ms) ? ms : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function startOfLocalDay(ts) {
+    try {
+      const d = new Date(ts);
+      d.setHours(0, 0, 0, 0);
+      const ms = d.getTime();
+      return Number.isFinite(ms) ? ms : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function formatYmd(dayStartMs) {
+    try {
+      const d = new Date(dayStartMs);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const da = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${da}`;
+    } catch {
+      return "—";
+    }
+  }
+
+  function normalizeKey(v) {
+    try {
+      const s = String(v == null ? "" : v).trim();
+      if (!s) return "—";
+      return s.toLowerCase();
+    } catch {
+      return "—";
+    }
+  }
+
+  function safeNum(v, fallback) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  function safeInt(v, fallback) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.trunc(n);
+  }
+
+  function safeStr(v) {
+    try {
+      return String(v == null ? "" : v).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  /* ÄNDRINGSLOGG (≤8)
+  1) P0: Fix listener-läckage i historikfilter via bind-once event delegation på #frzHistoryList (inga per-render listeners).
+  2) P1: Rerender dedupe via requestAnimationFrame (scheduleHistoryRerender) för att undvika storms.
+  3) P2: Items “Redigera” disabled följer locked (inkl readOnly + perm) för konsekvent UX.
+  4) AO-05A: bibehållen fail-soft + XSS-safe + inga nya storage-keys/datamodell.
+  */
 })();
