@@ -1,5 +1,3 @@
-
-
 /* ============================================================
 AO-16/15 (EXTRA) — Modal Shell (JS, window-bridge) | FIL-ID: UI/pages/freezer/05-modal-shell.js
 Projekt: Fryslager (UI-only / localStorage-first)
@@ -9,6 +7,11 @@ POLICY: Ingen storage • XSS-safe (bygger DOM) • Fail-soft • Ingen UX/redes
 P0 TRACE/WRAP FIX (DENNA PATCH):
 - Stäng/overlay/ESC ska anropa window.FreezerModal.close() dynamiskt
   så att en senare wrapper (close-tracer) alltid fångar anropet.
+
+P0 BOOT-LOCK FIX (DENNA PATCH):
+- Förhindra att modalen råkar öppnas under boot/login (race conditions).
+- FreezerModal.open() ignoreras under kort “boot lock”-fönster.
+- Efter boot fungerar open normalt (t.ex. klick på "Skapa användare").
 ============================================================ */
 
 (function () {
@@ -24,11 +27,48 @@ P0 TRACE/WRAP FIX (DENNA PATCH):
     body: null,
     closeBtn: null,
     isOpen: false,
-    onClose: null
+    onClose: null,
+
+    // P0: boot lock
+    bootLocked: true,
+    bootLockUntil: 0
   };
 
   function el(tag) { return document.createElement(tag); }
   function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
+
+  function now() {
+    try { return Date.now(); } catch { return 0; }
+  }
+
+  // P0: Boot lock – blockera open under initial init/route/login
+  (function initBootLock() {
+    // Lås direkt vid load och släpp efter kort tid.
+    // (räcker för att stoppa "auto-open" som sker under boot)
+    STATE.bootLocked = true;
+    STATE.bootLockUntil = now() + 350;
+
+    try {
+      // Släpp efter nästa tick
+      setTimeout(() => { STATE.bootLocked = false; }, 0);
+    } catch {}
+
+    try {
+      // Extra släpp efter liten delay (race med sena scripts)
+      setTimeout(() => { STATE.bootLocked = false; }, 350);
+    } catch {}
+  })();
+
+  function isBootLocked() {
+    if (!STATE.bootLocked) return false;
+    const t = STATE.bootLockUntil || 0;
+    if (!t) return true;
+    if (now() > t) {
+      STATE.bootLocked = false;
+      return false;
+    }
+    return true;
+  }
 
   function safeClose() {
     try {
@@ -133,6 +173,12 @@ P0 TRACE/WRAP FIX (DENNA PATCH):
 
     open: function (opts) {
       try {
+        // P0: blockera auto-open under boot/login init
+        // (tillåter normal öppning efter boot)
+        if (!opts || opts.force !== true) {
+          if (isBootLocked()) return;
+        }
+
         ensureRoot();
         if (!STATE.overlay || !STATE.title || !STATE.body) return;
 
