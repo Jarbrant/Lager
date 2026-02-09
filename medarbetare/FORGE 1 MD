@@ -42,7 +42,8 @@ OBLIGATORISKA TEKNISKA REGLER
 
 6) FELHANTERING: Inga tysta fel.
    - Visa användarvänlig felrad i UI + console.warn för dev.
-7) renare ansvar (render = render, controller = all logik/state/store)
+7) eftersträva renare ansvar som default
+8 ) Inline-styles överallt
 
 LEVERANSFORMAT (MÅSTE FÖLJAS)
 - Leverera endast hel fil (inte diff, inte patch-snuttar).
