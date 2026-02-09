@@ -317,6 +317,100 @@ POLICY (LÅST):
   <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
 
   <script src="./freezer.js"></script>
+<script>
+/* ============================================================
+AO-MODAL-KILLER-01 — Emergency overlay unlock (UI-only)
+Syfte: Om någon modal/overlay fastnar och låser UI -> släck den.
+POLICY: Ingen storage • XSS-safe • Fail-soft
+============================================================ */
+(function () {
+  "use strict";
+
+  function isVisible(el) {
+    try {
+      if (!el) return false;
+      if (el.hidden) return false;
+      const cs = window.getComputedStyle(el);
+      return cs && cs.display !== "none" && cs.visibility !== "hidden" && cs.opacity !== "0";
+    } catch { return false; }
+  }
+
+  function hardHide(el) {
+    try {
+      if (!el) return;
+      el.hidden = true;
+      el.setAttribute("aria-hidden", "true");
+      el.style.display = "none";
+      el.style.pointerEvents = "none";
+    } catch {}
+  }
+
+  function killAllOverlays(reason) {
+    void reason;
+    // 1) Legacy overlay i HTML (id)
+    hardHide(document.getElementById("frzUserModalOverlay"));
+
+    // 2) Modal shell overlay (data attribute)
+    const shell = document.querySelector('[data-frz-modal="overlay"]');
+    if (shell) hardHide(shell);
+
+    // 3) Andra overlays (class)
+    document.querySelectorAll(".modalOverlay").forEach(hardHide);
+  }
+
+  // Försök stänga via API först (om den finns)
+  function tryCloseModalApi() {
+    try {
+      if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
+        window.FreezerModal.close();
+      }
+    } catch {}
+  }
+
+  // Boot: släck allt direkt (om det redan är öppet)
+  tryCloseModalApi();
+  killAllOverlays("boot");
+
+  // Extra: om något öppnar overlay efter boot, släck igen kort stund
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks++;
+    tryCloseModalApi();
+
+    // Om någon overlay faktiskt är synlig -> släck
+    const legacy = document.getElementById("frzUserModalOverlay");
+    const shell = document.querySelector('[data-frz-modal="overlay"]');
+    const anyClass = document.querySelector(".modalOverlay");
+
+    if (isVisible(legacy) || isVisible(shell) || isVisible(anyClass)) {
+      killAllOverlays("watchdog");
+    }
+
+    if (ticks > 60) clearInterval(timer); // ~6 sekunder
+  }, 100);
+
+  // ESC = alltid släck overlays (även om annan kod kraschat)
+  document.addEventListener("keydown", (ev) => {
+    try {
+      if (ev.key !== "Escape") return;
+      tryCloseModalApi();
+      killAllOverlays("esc");
+    } catch {}
+  }, true);
+
+  // Klick på overlay ska inte kunna låsa: om du klickar på overlay -> släck
+  document.addEventListener("click", (ev) => {
+    try {
+      const t = ev.target;
+      if (!(t instanceof HTMLElement)) return;
+      if (t.id === "frzUserModalOverlay") { killAllOverlays("click-legacy"); }
+      if (t.matches && t.matches('[data-frz-modal="overlay"]')) { killAllOverlays("click-shell"); }
+      if (t.classList && t.classList.contains("modalOverlay")) { killAllOverlays("click-class"); }
+    } catch {}
+  }, true);
+
+})();
+</script>
 
   <!-- ÄNDRINGSLOGG (≤8)
   1) AO-LOGIN-03: Topbar-knapp “Skapa användare”.
