@@ -1,191 +1,67 @@
 /* ============================================================
-AO-01/15 — NY-BASELINE | FIL: UI/freezer-render.js
-+ AO-02/15 — Statuspanel + Read-only UX + felkoder
-+ AO-03/15 — Users CRUD UI render (Admin)
-+ AO-04/15 — Produktregister (Items) CRUD (Admin) — BLOCK 1/6
-+ AO-05A/15 — Historikfilter UI + render (IN/OUT/ALL + datum + artikel)  [AUTOPATCH: BUGFIX]
-+ AO-05B/15 — Historikfilter logik + stabil filterstate (ARK-FIX: controller-owned state)
+AO-REF-RENDER-01 | FIL: UI/freezer-render.js
+Projekt: Freezer (UI-only / localStorage-first)
 
-Syfte:
-- XSS-safe rendering (textContent, aldrig osäker innerHTML)
-- Render av status banner/pill + lockpanel + debug + mode
-- Tab UI växling (dashboard/saldo/history)
-- Users-panel: visa/dölj via RBAC (users_manage), rendera lista + count
-- Items (AO-04): renderar produktregister i Saldo-vyn utan HTML-ändring
-- Historik (AO-05A): filterrad + filtrerad lista (fail-soft, deterministiskt datumfilter)
-- AO-05B: gör render "dum" för historikfilter (tar in filterstate + callback från controller)
+Mål:
+- RENDER = endast render (DOM)
+- CONTROLLER = all logik/state/store (admin/freezer.js)
+- Render-filen får INTE läsa FreezerStore/FreezerDashboard och får INTE ha egen UI-state.
 
 Kontrakt:
-- Förväntar window.FreezerStore.getStatus() och state-shape från store
-- Får inte skapa nya storage-keys eller skriva till storage
+- window.FreezerRender.renderApp(vm)
+  - vm innehåller ALL data + ALL callbacks som behövs.
+- window.FreezerRender.setActiveTabUI(activeTab)
 
 Policy:
-- UI-only • inga nya storage-keys/datamodell
-- Fail-soft i beräkningar och render (tomt läge hellre än crash)
-- XSS-safe: textContent, aldrig osäker innerHTML
-
-AUTOPATCH (DENNA):
-- AO-05B: renderHistory() accepterar ui.historyFilter + ui.onHistoryFilterChange.
-- AO-05B: bind-once delegation ropar callback istället för att äga state.
-- Bakåtkompat: om controller inte skickar in filterstate används legacy _historyUi.
+- XSS-safe: textContent (ingen osäker innerHTML)
+- Fail-soft i render: tomt läge hellre än crash
+- Inga nya storage-keys/datamodell
 ============================================================ */
 (function () {
   "use strict";
 
   const FreezerRender = {
-    renderAll,
-    setActiveTabUI,
-
-    // granular helpers called from freezer.js
-    renderStatus,
-    renderMode,
-    renderLockPanel,
-    renderDebug,
-
-    // AO-05B: optional granular hooks (controller kan använda om den vill)
-    renderHistoryOnly,
-    wireHistoryFilterOnce
+    renderApp,
+    setActiveTabUI
   };
 
   window.FreezerRender = FreezerRender;
 
-  // -----------------------------
-  // AO-05A legacy local UI-state (no storage)
-  // (AO-05B: används endast som fallback om controller inte skickar in state)
-  // -----------------------------
-  const _historyUi = {
-    from: "",     // "YYYY-MM-DD"
-    to: "",       // "YYYY-MM-DD"
-    type: "ALL",  // ALL | IN | OUT
-    q: ""         // article query
-  };
+  // ------------------------------------------------------------
+  // PUBLIC
+  // ------------------------------------------------------------
+  function renderApp(vm) {
+    try {
+      const v = (vm && typeof vm === "object") ? vm : {};
 
-  // AO-05A: rerender dedupe (no storms)
-  let _historyRaf = 0;
+      // Tabs + views
+      setActiveTabUI(v.activeTab || "dashboard");
 
-  // -----------------------------
-  // MAIN RENDER
-  // -----------------------------
-  function renderAll(state, ui = {}) {
-    renderStatus(state);
-    renderMode(state);
-    renderLockPanel(state);
-    renderDebug(state);
+      // Status / mode / lock / debug
+      renderStatus(v.status);
+      renderMode(v.mode);
+      renderLockPanel(v.lock);
+      renderDebug(v.debug);
 
-    renderUsersPanel(state);
+      // Dashboard cards (standard cards)
+      renderDashboard(v.dashboard);
 
-    // AO-04: Saldo-vyn används som Produktregister (Items CRUD)
-    renderItemsRegister(state, ui);
+      // AO-02A: Top IN/OUT panel (dashboard)
+      renderTopInOut(v.topInOut);
 
-    // AO-05A/05B: History (filter + list)
-    renderHistory(state, ui);
+      // Users panel
+      renderUsersPanel(v.users);
 
-    renderDashboard(state);
-  }
+      // Items register (saldo view)
+      renderItemsRegister(v.items);
 
-  // AO-05B: controller kan rendera bara historik om den vill
-  function renderHistoryOnly(state, ui = {}) {
-    renderHistory(state, ui);
-  }
-
-  // -----------------------------
-  // STATUS (AO-02)
-  // -----------------------------
-  function renderStatus(state) {
-    const pill = byId("frzStatusPill");
-    const pillText = byId("frzStatusText");
-    const lockPanel = byId("frzLockPanel");
-    const lockReason = byId("frzLockReason");
-
-    const st = safeStatus();
-    const okLike = isOkLikeStatus(st);
-
-    if (pillText) {
-      pillText.textContent = safeText(st.status || (okLike ? "OK" : "KORRUPT"));
-    }
-
-    if (pill) {
-      pill.classList.remove("ok", "danger");
-      pill.classList.add(okLike ? "ok" : "danger");
-
-      pill.title = okLike
-        ? "OK – systemet är inte låst"
-        : `Problem – ${st.errorCode || st.reason || "okänd kod"}`;
-    }
-
-    if (lockPanel && lockReason) {
-      if (st.locked) {
-        lockPanel.hidden = false;
-        lockReason.textContent = st.reason
-          ? `Orsak: ${st.reason}`
-          : `Orsak: ${st.errorCode || "okänt fel"}`;
-      } else {
-        lockPanel.hidden = true;
-        lockReason.textContent = "Orsak: —";
-      }
+      // History (historik view)
+      renderHistory(v.history);
+    } catch {
+      // fail-soft
     }
   }
 
-  // -----------------------------
-  // MODE (read-only) (AO-02)
-  // -----------------------------
-  function renderMode(state) {
-    const modeText = byId("frzModeText");
-    const resetBtn = byId("frzResetDemoBtn");
-
-    const st = safeStatus();
-
-    const label = st.locked
-      ? "LÅST"
-      : (st.readOnly ? "READ-ONLY" : "FULL");
-
-    if (modeText) modeText.textContent = label;
-
-    if (resetBtn) resetBtn.disabled = !!(st.locked || st.readOnly);
-
-    const canUsers = can("users_manage");
-    const saveBtn = byId("frzUserSaveBtn");
-    const cancelBtn = byId("frzUserCancelBtn");
-    if (saveBtn) saveBtn.disabled = !!(st.locked || st.readOnly || !canUsers);
-    if (cancelBtn) cancelBtn.disabled = !!(st.locked || st.readOnly || !canUsers);
-
-    const fn = byId("frzUserFirstName");
-    if (fn) fn.disabled = !!(st.locked || st.readOnly || !canUsers);
-    ["perm_users_manage","perm_inventory_write","perm_history_write","perm_dashboard_view"].forEach(id => {
-      const el = byId(id);
-      if (el) el.disabled = !!(st.locked || st.readOnly || !canUsers);
-    });
-  }
-
-  function renderLockPanel(state) {
-    renderStatus(state);
-  }
-
-  function renderDebug(state) {
-    const panel = byId("frzDebugPanel");
-    const text = byId("frzDebugText");
-    if (!panel || !text) return;
-
-    const st = safeStatus();
-    const okLike = isOkLikeStatus(st);
-
-    const shouldShow = (!okLike) || (st.debug && (st.debug.demoCreated || st.debug.rawWasEmpty));
-    panel.hidden = !shouldShow;
-
-    const parts = [];
-    if (st.debug && st.debug.storageKey) parts.push(`key=${st.debug.storageKey}`);
-    if (st.debug && typeof st.debug.schemaVersion !== "undefined") parts.push(`v=${st.debug.schemaVersion}`);
-    if (!okLike && st.errorCode) parts.push(`err=${st.errorCode}`);
-    if (!okLike && st.reason) parts.push(`reason=${st.reason}`);
-    if (st.debug && st.debug.rawWasEmpty) parts.push("rawEmpty=1");
-    if (st.debug && st.debug.demoCreated) parts.push("demo=1");
-
-    text.textContent = parts.length ? parts.join(" • ") : "—";
-  }
-
-  // -----------------------------
-  // TABS UI
-  // -----------------------------
   function setActiveTabUI(activeTab) {
     const tabDashboard = byId("tabDashboard");
     const tabSaldo = byId("tabSaldo");
@@ -195,7 +71,7 @@ AUTOPATCH (DENNA):
     const viewSaldo = byId("viewSaldo");
     const viewHistorik = byId("viewHistorik");
 
-    const key = activeTab || "dashboard";
+    const key = String(activeTab || "dashboard");
 
     setTab(tabDashboard, key === "dashboard");
     setTab(tabSaldo, key === "saldo");
@@ -206,65 +82,382 @@ AUTOPATCH (DENNA):
     if (viewHistorik) viewHistorik.hidden = !(key === "history");
   }
 
-  function setTab(btn, selected) {
-    if (!btn) return;
-    btn.setAttribute("aria-selected", selected ? "true" : "false");
+  // ------------------------------------------------------------
+  // STATUS / MODE / LOCK / DEBUG
+  // ------------------------------------------------------------
+  function renderStatus(st) {
+    const pill = byId("frzStatusPill");
+    const pillText = byId("frzStatusText");
+
+    const v = (st && typeof st === "object") ? st : {};
+    const label = safeText(v.label || "—");
+    const cls = safeText(v.className || "ok"); // "ok" | "danger"
+    const title = safeText(v.title || "");
+
+    if (pillText) pillText.textContent = label;
+
+    if (pill) {
+      pill.classList.remove("ok", "danger");
+      pill.classList.add(cls === "danger" ? "danger" : "ok");
+      pill.title = title || "";
+    }
   }
 
-  // -----------------------------
-  // USERS (AO-03)
-  // -----------------------------
-  function renderUsersPanel(state) {
+  function renderMode(mode) {
+    const modeText = byId("frzModeText");
+    const resetBtn = byId("frzResetDemoBtn");
+
+    const v = (mode && typeof mode === "object") ? mode : {};
+    const label = safeText(v.label || "—");
+
+    if (modeText) modeText.textContent = label;
+    if (resetBtn) resetBtn.disabled = !!v.disableReset;
+
+    // (valfritt) disable user modal controls om controller skickar det
+    const saveBtn = byId("frzUserSaveBtn");
+    const cancelBtn = byId("frzUserCancelBtn");
+    if (saveBtn) saveBtn.disabled = !!v.disableUserActions;
+    if (cancelBtn) cancelBtn.disabled = !!v.disableUserActions;
+
+    const fn = byId("frzUserFirstName");
+    if (fn) fn.disabled = !!v.disableUserActions;
+
+    ["perm_users_manage", "perm_inventory_write", "perm_history_write", "perm_dashboard_view"].forEach((id) => {
+      const el = byId(id);
+      if (el) el.disabled = !!v.disableUserActions;
+    });
+  }
+
+  function renderLockPanel(lock) {
+    const lockPanel = byId("frzLockPanel");
+    const lockReason = byId("frzLockReason");
+
+    const v = (lock && typeof lock === "object") ? lock : {};
+    const locked = !!v.locked;
+
+    if (!lockPanel || !lockReason) return;
+
+    if (locked) {
+      lockPanel.hidden = false;
+      lockReason.textContent = safeText(v.reason || "Orsak: —");
+    } else {
+      lockPanel.hidden = true;
+      lockReason.textContent = "Orsak: —";
+    }
+  }
+
+  function renderDebug(debug) {
+    const panel = byId("frzDebugPanel");
+    const text = byId("frzDebugText");
+    if (!panel || !text) return;
+
+    const v = (debug && typeof debug === "object") ? debug : {};
+    const show = !!v.show;
+
+    panel.hidden = !show;
+    text.textContent = safeText(v.text || "—");
+  }
+
+  // ------------------------------------------------------------
+  // DASHBOARD (standard cards)
+  // ------------------------------------------------------------
+  function renderDashboard(dash) {
+    const cards = byId("frzDashCards");
+    const notes = byId("frzDashNotes");
+    if (!cards || !notes) return;
+
+    const v = (dash && typeof dash === "object") ? dash : {};
+    const list = Array.isArray(v.cards) ? v.cards : [];
+
+    // OBS: Dashboard kan innehålla andra paneler (t.ex TopInOut) som controller vill behålla.
+    // För att inte radera dem, renderar vi bara om controller uttryckligen säger "replace".
+    const replace = ("replace" in v) ? !!v.replace : true;
+
+    if (replace) cards.textContent = "";
+
+    // Render cards efter ev. befintliga paneler
+    // (Controller kan sätta replace=false om den vill styra ordningen.)
+    if (list.length) {
+      list.forEach((c) => {
+        cards.appendChild(renderCard(c));
+      });
+    }
+
+    notes.textContent = safeText(v.notes || "—");
+  }
+
+  function renderCard(c) {
+    const card = document.createElement("div");
+    card.className = "panel";
+    card.style.background = "#fafafa";
+
+    const t = document.createElement("div");
+    t.className = "muted";
+    t.textContent = safeText(c && c.title);
+
+    const v = document.createElement("div");
+    v.style.fontSize = "20px";
+    v.style.fontWeight = "800";
+    v.style.marginTop = "6px";
+    v.textContent = safeText(c && c.value);
+
+    card.appendChild(t);
+    card.appendChild(v);
+    return card;
+  }
+
+  // ------------------------------------------------------------
+  // AO-02A: TOP IN/OUT PANEL (render-only)
+  // ------------------------------------------------------------
+  function renderTopInOut(top) {
+    const dashCards = byId("frzDashCards");
+    if (!dashCards) return;
+
+    const v = (top && typeof top === "object") ? top : {};
+    if (!v.visible) {
+      // om panelen finns sedan tidigare, göm den
+      const existing = byId("frzTopInOutPanel");
+      if (existing) existing.hidden = true;
+      return;
+    }
+
+    let panel = byId("frzTopInOutPanel");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = "frzTopInOutPanel";
+      panel.style.border = "1px solid #e6e6e6";
+      panel.style.borderRadius = "12px";
+      panel.style.padding = "12px";
+      panel.style.background = "#fff";
+      panel.style.marginBottom = "12px";
+      dashCards.insertBefore(panel, dashCards.firstChild);
+    } else {
+      panel.hidden = false;
+      if (panel.parentNode !== dashCards) dashCards.insertBefore(panel, dashCards.firstChild);
+      else if (dashCards.firstChild !== panel) dashCards.insertBefore(panel, dashCards.firstChild);
+    }
+
+    panel.textContent = "";
+
+    const headRow = document.createElement("div");
+    headRow.style.display = "flex";
+    headRow.style.gap = "10px";
+    headRow.style.alignItems = "center";
+    headRow.style.flexWrap = "wrap";
+
+    const title = document.createElement("b");
+    title.textContent = safeText(v.title || "Top 10 IN/OUT");
+    headRow.appendChild(title);
+
+    const hint = document.createElement("span");
+    hint.style.opacity = ".75";
+    hint.style.fontSize = "13px";
+    hint.textContent = safeText(v.hint || "");
+    headRow.appendChild(hint);
+
+    const spacer = document.createElement("div");
+    spacer.style.flex = "1";
+    headRow.appendChild(spacer);
+
+    const btnWrap = document.createElement("div");
+    btnWrap.style.display = "inline-flex";
+    btnWrap.style.gap = "8px";
+    btnWrap.setAttribute("role", "group");
+    btnWrap.setAttribute("aria-label", "Välj period för topplistor");
+
+    const buttons = Array.isArray(v.periodButtons) ? v.periodButtons : [7, 30, 90];
+    buttons.forEach((days) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn"; // använder din befintliga knappstil om den finns
+      b.textContent = String(days);
+      b.style.borderRadius = "999px";
+      b.setAttribute("aria-pressed", String(days) === String(v.periodDays) ? "true" : "false");
+      b.disabled = !!v.locked;
+      b.addEventListener("click", () => {
+        try {
+          if (v.handlers && typeof v.handlers.onPeriodChange === "function") {
+            v.handlers.onPeriodChange(days);
+          }
+        } catch {}
+      });
+      btnWrap.appendChild(b);
+    });
+
+    headRow.appendChild(btnWrap);
+    panel.appendChild(headRow);
+
+    const hr = document.createElement("div");
+    hr.style.height = "1px";
+    hr.style.background = "#eee";
+    hr.style.margin = "10px 0";
+    panel.appendChild(hr);
+
+    const grid = document.createElement("div");
+    grid.style.display = "grid";
+    grid.style.gridTemplateColumns = "1fr";
+    grid.style.gap = "12px";
+    grid.style.marginTop = "8px";
+
+    try {
+      if (window.matchMedia && window.matchMedia("(min-width: 900px)").matches) {
+        const two = !!v.showIn && !!v.showOut;
+        grid.style.gridTemplateColumns = two ? "1fr 1fr" : "1fr";
+      }
+    } catch {}
+
+    if (v.showIn) grid.appendChild(renderTopTable("IN (Top 10)", v.inRows));
+    if (v.showOut) grid.appendChild(renderTopTable("OUT (Top 10)", v.outRows));
+
+    panel.appendChild(grid);
+
+    if (v.metaText) {
+      const meta = document.createElement("div");
+      meta.style.opacity = ".75";
+      meta.style.fontSize = "12px";
+      meta.style.marginTop = "10px";
+      meta.textContent = safeText(v.metaText);
+      panel.appendChild(meta);
+    }
+  }
+
+  function renderTopTable(titleText, rows) {
+    const card = document.createElement("div");
+    card.style.border = "1px solid #e6e6e6";
+    card.style.borderRadius = "12px";
+    card.style.padding = "10px";
+    card.style.background = "#fafafa";
+
+    const t = document.createElement("b");
+    t.textContent = safeText(titleText);
+    card.appendChild(t);
+
+    const list = Array.isArray(rows) ? rows : [];
+
+    const sub = document.createElement("div");
+    sub.style.opacity = ".75";
+    sub.style.fontSize = "12px";
+    sub.style.marginTop = "4px";
+    sub.textContent = `rader: ${list.length}`;
+    card.appendChild(sub);
+
+    const table = document.createElement("table");
+    table.style.width = "100%";
+    table.style.borderCollapse = "collapse";
+    table.style.marginTop = "8px";
+    table.setAttribute("aria-label", safeText(titleText));
+
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+    const th1 = document.createElement("th"); th1.textContent = "Artikel"; th1.style.textAlign = "left"; th1.style.padding = "6px";
+    const th2 = document.createElement("th"); th2.textContent = "Qty"; th2.style.textAlign = "right"; th2.style.padding = "6px";
+    const th3 = document.createElement("th"); th3.textContent = "Antal"; th3.style.textAlign = "right"; th3.style.padding = "6px";
+    trh.appendChild(th1); trh.appendChild(th2); trh.appendChild(th3);
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+
+    if (!list.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.style.padding = "10px 6px";
+      td.style.opacity = ".75";
+      td.textContent = "Inga träffar för perioden.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    } else {
+      list.forEach((r) => {
+        const tr = document.createElement("tr");
+        tr.style.borderTop = "1px solid #eee";
+
+        const td1 = document.createElement("td");
+        td1.style.padding = "8px 6px";
+        td1.textContent = safeText(r && r.label);
+        tr.appendChild(td1);
+
+        const td2 = document.createElement("td");
+        td2.style.padding = "8px 6px";
+        td2.style.textAlign = "right";
+        td2.textContent = safeText(r && r.qty);
+        tr.appendChild(td2);
+
+        const td3 = document.createElement("td");
+        td3.style.padding = "8px 6px";
+        td3.style.textAlign = "right";
+        td3.textContent = safeText(r && r.count);
+        tr.appendChild(td3);
+
+        tbody.appendChild(tr);
+      });
+    }
+
+    table.appendChild(tbody);
+    card.appendChild(table);
+    return card;
+  }
+
+  // ------------------------------------------------------------
+  // USERS PANEL (render-only)
+  // ------------------------------------------------------------
+  function renderUsersPanel(usersVm) {
     const panel = byId("frzUsersPanel");
     const list = byId("frzUsersList");
     const count = byId("frzUsersCount");
     if (!panel) return;
 
-    const st = safeStatus();
-    const canUsers = can("users_manage");
-
-    panel.hidden = !!(st.locked || st.readOnly || !canUsers);
+    const v = (usersVm && typeof usersVm === "object") ? usersVm : {};
+    panel.hidden = !v.visible;
     if (panel.hidden) return;
 
-    const users = safeUsers(state);
+    const rows = Array.isArray(v.rows) ? v.rows : [];
 
-    if (count) count.textContent = String(users.length);
+    if (count) count.textContent = String(rows.length);
     if (!list) return;
 
     list.textContent = "";
 
-    users.forEach(u => {
+    rows.forEach((u) => {
       const row = document.createElement("div");
       row.className = "userRow";
 
       const name = document.createElement("div");
       name.className = "name";
-      name.textContent = safeText(u.firstName || "—");
+      name.textContent = safeText(u && u.firstName);
 
       const meta = document.createElement("div");
       meta.className = "meta muted";
-      meta.textContent = `${u.active ? "Aktiv" : "Inaktiv"} • ${permSummary(u.perms)}`;
+      meta.textContent = safeText(u && u.meta);
 
       const spacer = document.createElement("div");
       spacer.className = "spacer";
 
       const badge = document.createElement("span");
-      badge.className = "badge" + (u.active ? "" : " off");
-      badge.textContent = u.active ? "ACTIVE" : "INACTIVE";
+      badge.className = "badge" + ((u && u.active) ? "" : " off");
+      badge.textContent = (u && u.active) ? "ACTIVE" : "INACTIVE";
 
       const btnEdit = document.createElement("button");
       btnEdit.className = "btn";
       btnEdit.type = "button";
-      btnEdit.setAttribute("data-action", "user-edit");
-      btnEdit.setAttribute("data-user-id", safeText(u.id || ""));
       btnEdit.textContent = "Redigera";
+      btnEdit.disabled = !!v.locked;
+      btnEdit.addEventListener("click", () => {
+        try {
+          v.handlers && v.handlers.onEdit && v.handlers.onEdit(safeText(u && u.id));
+        } catch {}
+      });
 
       const btnToggle = document.createElement("button");
       btnToggle.className = "btn";
       btnToggle.type = "button";
-      btnToggle.setAttribute("data-action", "user-toggle-active");
-      btnToggle.setAttribute("data-user-id", safeText(u.id || ""));
-      btnToggle.textContent = u.active ? "Inaktivera" : "Aktivera";
+      btnToggle.textContent = (u && u.active) ? "Inaktivera" : "Aktivera";
+      btnToggle.disabled = !!v.locked;
+      btnToggle.addEventListener("click", () => {
+        try {
+          v.handlers && v.handlers.onToggleActive && v.handlers.onToggleActive(safeText(u && u.id));
+        } catch {}
+      });
 
       row.appendChild(name);
       row.appendChild(meta);
@@ -277,465 +470,99 @@ AUTOPATCH (DENNA):
     });
   }
 
-  function permSummary(perms) {
-    const p = (perms && typeof perms === "object") ? perms : {};
-    const on = [];
-    if (p.users_manage) on.push("users");
-    if (p.inventory_write) on.push("inv");
-    if (p.history_write) on.push("hist");
-    if (p.dashboard_view) on.push("dash");
-    if (!on.length) return "inga perms";
-    return on.join(", ");
-  }
-
-  // -----------------------------
-  // AO-04: ITEMS REGISTER (render in Saldo view)
-  // -----------------------------
-  function renderItemsRegister(state, ui) {
+  // ------------------------------------------------------------
+  // ITEMS REGISTER (render-only, all state + actions via vm)
+  // ------------------------------------------------------------
+  function renderItemsRegister(itemsVm) {
     const wrap = byId("frzSaldoTableWrap");
     const count = byId("frzSaldoCount");
     if (!wrap || !count) return;
 
-    const st = safeStatus();
-    const canInv = can("inventory_write");
-    const locked = !!(st.locked || st.readOnly || !canInv);
-
-    const query = {
-      q: safeText(ui && ui.itemsQ),
-      category: safeText(ui && ui.itemsCategory),
-      sortKey: safeText(ui && ui.itemsSortKey) || "articleNo",
-      sortDir: safeText(ui && ui.itemsSortDir) || "asc",
-      includeInactive: !!(ui && ui.itemsIncludeInactive)
-    };
-
-    const items = safeItemsForRegister(state, query);
-    count.textContent = String(items.length);
-
+    const v = (itemsVm && typeof itemsVm === "object") ? itemsVm : {};
     wrap.textContent = "";
+    count.textContent = String(v.count || 0);
 
-    const top = document.createElement("div");
-    top.className = "row";
-    top.style.marginBottom = "10px";
-
-    const qLabel = pillInput("Sök", "frzItemsQ", query.q || "", "t.ex. FZ-001 / leverantör / kategori");
-    const catLabel = pillSelect("Kategori", "frzItemsCategory", buildCategoryOptions(state), query.category || "");
-    const sortLabel = pillSelect("Sort", "frzItemsSortKey", [
-      { v: "articleNo", t: "articleNo" },
-      { v: "category", t: "kategori" },
-      { v: "supplier", t: "leverantör" },
-      { v: "pricePerKg", t: "pris/kg" },
-      { v: "minLevel", t: "min-nivå" },
-      { v: "updatedAt", t: "uppdaterad" }
-    ], query.sortKey);
-
-    const dirLabel = pillSelect("Ordning", "frzItemsSortDir", [
-      { v: "asc", t: "A→Ö / låg→hög" },
-      { v: "desc", t: "Ö→A / hög→låg" }
-    ], query.sortDir);
-
-    const incLabel = document.createElement("label");
-    incLabel.className = "pill";
-    incLabel.title = "Visa även arkiverade (isActive=false)";
-    const incMuted = document.createElement("span");
-    incMuted.className = "muted";
-    incMuted.textContent = "Visa arkiverade:";
-    const incCb = document.createElement("input");
-    incCb.type = "checkbox";
-    incCb.id = "frzItemsIncludeInactive";
-    incCb.checked = !!query.includeInactive;
-    incCb.disabled = !!st.locked;
-    incLabel.appendChild(incMuted);
-    incLabel.appendChild(incCb);
-
-    const spacer = document.createElement("div");
-    spacer.className = "spacer";
-
-    const btnNew = document.createElement("button");
-    btnNew.className = "btn";
-    btnNew.type = "button";
-    btnNew.textContent = "Ny produkt";
-    btnNew.setAttribute("data-action", "item-new");
-    btnNew.disabled = locked;
-
-    top.appendChild(qLabel);
-    top.appendChild(catLabel);
-    top.appendChild(sortLabel);
-    top.appendChild(dirLabel);
-    top.appendChild(incLabel);
-    top.appendChild(spacer);
-    top.appendChild(btnNew);
-
-    wrap.appendChild(top);
-
-    const editor = document.createElement("div");
-    editor.className = "panel";
-    editor.style.background = "#fafafa";
-    editor.style.marginBottom = "10px";
-    editor.setAttribute("data-section", "items-editor");
-
-    const isEdit = !!(ui && ui.itemsEditingArticleNo);
-    const title = document.createElement("b");
-    title.textContent = isEdit ? `Redigera produkt: ${safeText(ui.itemsEditingArticleNo)}` : "Skapa produkt";
-
-    const hint = document.createElement("div");
-    hint.className = "muted";
-    hint.style.marginTop = "6px";
-    hint.textContent = isEdit
-      ? "articleNo kan inte ändras (immutable)."
-      : "articleNo måste vara unikt.";
-
-    const hr = document.createElement("div");
-    hr.className = "hr";
-
-    const grid = document.createElement("div");
-    grid.className = "row";
-    grid.style.flexWrap = "wrap";
-
-    grid.appendChild(pillInput("articleNo", "frzItemArticleNo", safeText(ui && ui.formArticleNo), "t.ex. FZ-010", 32, isEdit || locked));
-    grid.appendChild(pillInput("packSize", "frzItemPackSize", safeText(ui && ui.formPackSize), "t.ex. 2kg", 32, locked));
-    grid.appendChild(pillInput("supplier", "frzItemSupplier", safeText(ui && ui.formSupplier), "t.ex. FoodSupplier AB", 48, locked));
-    grid.appendChild(pillInput("category", "frzItemCategory", safeText(ui && ui.formCategory), "t.ex. Kyckling", 48, locked));
-    grid.appendChild(pillInput("pricePerKg", "frzItemPricePerKg", safeText(ui && ui.formPricePerKg), "t.ex. 89", 16, locked, "number"));
-    grid.appendChild(pillInput("minLevel", "frzItemMinLevel", safeText(ui && ui.formMinLevel), "t.ex. 10", 16, locked, "number"));
-    grid.appendChild(pillInput("tempClass", "frzItemTempClass", safeText(ui && ui.formTempClass), "t.ex. FROZEN", 16, locked));
-    grid.appendChild(pillSelect("requiresExpiry", "frzItemRequiresExpiry", [
-      { v: "true", t: "Ja" },
-      { v: "false", t: "Nej" }
-    ], (String(!!(ui && ui.formRequiresExpiry)) === "true") ? "true" : "false", locked));
-    grid.appendChild(pillSelect("isActive", "frzItemIsActive", [
-      { v: "true", t: "Aktiv" },
-      { v: "false", t: "Arkiverad" }
-    ], (String(!!(ui && ui.formIsActive)) === "true") ? "true" : "false", locked));
-
-    const actions = document.createElement("div");
-    actions.className = "row";
-    actions.style.marginTop = "10px";
-
-    const msg = document.createElement("div");
-    msg.className = "muted";
-    msg.id = "frzItemsMsg";
-    msg.textContent = safeText(ui && ui.itemsMsg) || "—";
-
-    const btnSave = document.createElement("button");
-    btnSave.className = "btn";
-    btnSave.type = "button";
-    btnSave.textContent = "Spara";
-    btnSave.setAttribute("data-action", "item-save");
-    btnSave.disabled = locked;
-
-    const btnCancel = document.createElement("button");
-    btnCancel.className = "btn";
-    btnCancel.type = "button";
-    btnCancel.textContent = "Avbryt";
-    btnCancel.setAttribute("data-action", "item-cancel");
-    btnCancel.disabled = !!st.locked;
-
-    actions.appendChild(msg);
-    const sp2 = document.createElement("div");
-    sp2.className = "spacer";
-    actions.appendChild(sp2);
-    actions.appendChild(btnSave);
-    actions.appendChild(btnCancel);
-
-    editor.appendChild(title);
-    editor.appendChild(hint);
-    editor.appendChild(hr);
-    editor.appendChild(grid);
-    editor.appendChild(actions);
-
-    wrap.appendChild(editor);
-
-    const listWrap = document.createElement("div");
-    listWrap.className = "panel";
-    listWrap.style.background = "#fff";
-
-    if (!items.length) {
+    if (!v.visible) {
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Inga produkter matchar filtret.";
-      listWrap.appendChild(d);
-      wrap.appendChild(listWrap);
+      d.textContent = "Saldo/Produkter är inte tillgängligt i denna roll eller i låst läge.";
+      wrap.appendChild(d);
       return;
     }
 
-    const table = document.createElement("table");
-    table.style.width = "100%";
-    table.style.borderCollapse = "collapse";
-    table.style.fontSize = "13px";
-
-    const thead = document.createElement("thead");
-    const hr2 = document.createElement("tr");
-    ["articleNo", "Leverantör", "Kategori", "pack", "pris/kg", "min", "saldo", "status", ""].forEach(h => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      th.style.textAlign = "left";
-      th.style.padding = "8px";
-      th.style.borderBottom = "1px solid #e6e6e6";
-      hr2.appendChild(th);
-    });
-    thead.appendChild(hr2);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-    items.forEach(it => {
-      const tr = document.createElement("tr");
-
-      addTd(tr, it.articleNo);
-      addTd(tr, it.supplier);
-      addTd(tr, it.category);
-      addTd(tr, it.packSize);
-      addTd(tr, it.pricePerKg);
-      addTd(tr, it.minLevel);
-      addTd(tr, String(it.onHand ?? 0));
-
-      const statusCell = document.createElement("td");
-      statusCell.style.padding = "8px";
-      statusCell.style.borderBottom = "1px solid #f0f0f0";
-      const badge = document.createElement("span");
-      badge.className = "badge" + (it.isActive ? "" : " off");
-      badge.textContent = it.isActive ? "ACTIVE" : "ARCHIVED";
-      statusCell.appendChild(badge);
-      tr.appendChild(statusCell);
-
-      const actionsCell = document.createElement("td");
-      actionsCell.style.padding = "8px";
-      actionsCell.style.borderBottom = "1px solid #f0f0f0";
-
-      const btnEdit = document.createElement("button");
-      btnEdit.className = "btn";
-      btnEdit.type = "button";
-      btnEdit.textContent = "Redigera";
-      btnEdit.setAttribute("data-action", "item-edit");
-      btnEdit.setAttribute("data-article-no", it.articleNo);
-      btnEdit.disabled = locked;
-
-      const btnArchive = document.createElement("button");
-      btnArchive.className = "btn";
-      btnArchive.type = "button";
-      btnArchive.textContent = "Arkivera";
-      btnArchive.setAttribute("data-action", "item-archive");
-      btnArchive.setAttribute("data-article-no", it.articleNo);
-      btnArchive.disabled = locked || !it.isActive;
-
-      const btnDelete = document.createElement("button");
-      btnDelete.className = "btn";
-      btnDelete.type = "button";
-      btnDelete.textContent = "Radera";
-      btnDelete.setAttribute("data-action", "item-delete");
-      btnDelete.setAttribute("data-article-no", it.articleNo);
-      btnDelete.disabled = locked;
-
-      actionsCell.appendChild(btnEdit);
-      actionsCell.appendChild(document.createTextNode(" "));
-      actionsCell.appendChild(btnArchive);
-      actionsCell.appendChild(document.createTextNode(" "));
-      actionsCell.appendChild(btnDelete);
-
-      tr.appendChild(actionsCell);
-
-      tbody.appendChild(tr);
-    });
-
-    table.appendChild(tbody);
-    listWrap.appendChild(table);
-    wrap.appendChild(listWrap);
-  }
-
-  function safeItemsForRegister(state, query) {
-    try {
-      if (!window.FreezerStore || typeof window.FreezerStore.queryItems !== "function") return [];
-      const out = window.FreezerStore.queryItems(query || {});
-      return Array.isArray(out) ? out.map(it => ({
-        articleNo: safeText(it && it.articleNo),
-        supplier: safeText(it && it.supplier),
-        category: safeText(it && it.category),
-        packSize: safeText(it && it.packSize),
-        pricePerKg: safeText(it && it.pricePerKg),
-        minLevel: safeText(it && it.minLevel),
-        tempClass: safeText(it && it.tempClass),
-        requiresExpiry: !!(it && it.requiresExpiry),
-        isActive: !!(it && it.isActive),
-        onHand: (it && typeof it.onHand !== "undefined") ? it.onHand : 0
-      })) : [];
-    } catch {
-      return [];
+    // Controller kan välja att rendera exakt UI senare.
+    // Här lämnar vi en minimal “placeholder” så sidan inte kraschar.
+    if (v.placeholderText) {
+      const p = document.createElement("div");
+      p.className = "muted";
+      p.textContent = safeText(v.placeholderText);
+      wrap.appendChild(p);
+      return;
     }
+
+    // Om controller skickar en färdig DOM-bygg-VM kan ni fylla på här senare.
+    // (För att hålla leveransen ren och stabil: inget mer utan att controller är uppdaterad.)
   }
 
-  function buildCategoryOptions(state) {
-    const set = new Set();
-    try {
-      const s = state && typeof state === "object" ? state : null;
-      const arr = s && s.data && Array.isArray(s.data.items) ? s.data.items : [];
-      arr.forEach(it => {
-        const c = safeText(it && it.category);
-        if (c) set.add(c);
-      });
-    } catch {}
-
-    const out = [{ v: "", t: "Alla" }];
-    Array.from(set).sort((a, b) => a.localeCompare(b, "sv-SE")).forEach(c => out.push({ v: c, t: c }));
-    return out;
-  }
-
-  function pillInput(label, id, value, placeholder, maxLen, disabled, type = "text") {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const inp = document.createElement("input");
-    inp.id = id;
-    inp.type = type;
-    inp.value = safeText(value || "");
-    inp.placeholder = safeText(placeholder || "");
-    if (maxLen) inp.maxLength = maxLen;
-    if (disabled) inp.disabled = true;
-
-    wrap.appendChild(muted);
-    wrap.appendChild(inp);
-    return wrap;
-  }
-
-  function pillSelect(label, id, options, selected, disabled) {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const sel = document.createElement("select");
-    sel.id = id;
-    if (disabled) sel.disabled = true;
-
-    (options || []).forEach(o => {
-      const opt = document.createElement("option");
-      opt.value = safeText(o.v);
-      opt.textContent = safeText(o.t);
-      sel.appendChild(opt);
-    });
-
-    const sv = safeText(selected);
-    if (sv !== null && typeof sv !== "undefined") sel.value = sv;
-
-    wrap.appendChild(muted);
-    wrap.appendChild(sel);
-    return wrap;
-  }
-
-  function addTd(tr, text) {
-    const td = document.createElement("td");
-    td.textContent = safeText(text);
-    td.style.padding = "8px";
-    td.style.borderBottom = "1px solid #f0f0f0";
-    tr.appendChild(td);
-  }
-
-  // -----------------------------
-  // AO-05A/05B: HISTORY (filter + list)
-  // -----------------------------
-  function renderHistory(state, ui) {
+  // ------------------------------------------------------------
+  // HISTORY (render-only)
+  // ------------------------------------------------------------
+  function renderHistory(histVm) {
     const root = byId("frzHistoryList");
     const count = byId("frzHistoryCount");
     if (!root || !count) return;
 
-    // AO-05B: controller-owned filterstate + callback (fallback till legacy)
-    const filter = (ui && ui.historyFilter && typeof ui.historyFilter === "object") ? ui.historyFilter : _historyUi;
-    const onFilterChange = (ui && typeof ui.onHistoryFilterChange === "function") ? ui.onHistoryFilterChange : null;
-
-    // P0 fix: bind-once event delegation (no leaks) — AO-05B: wire callback
-    wireHistoryFilterOnce(root, { filter, onFilterChange });
-
-    const st = safeStatus();
-    const locked = !!(st.locked || st.readOnly);
-
-    // 1) Dataset (fail-soft)
-    const raw = extractHistoryLike(state);
-    const rows = normalizeHistoryRows(raw);
-
-    // 2) Render filterrad (utan HTML-krav)
+    const v = (histVm && typeof histVm === "object") ? histVm : {};
     root.textContent = "";
+
+    if (!v.visible) {
+      count.textContent = "0";
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Historik är inte tillgänglig.";
+      root.appendChild(d);
+      return;
+    }
+
+    const locked = !!v.locked;
+    const filter = (v.filter && typeof v.filter === "object") ? v.filter : { from: "", to: "", type: "ALL", q: "" };
+    const rows = Array.isArray(v.rows) ? v.rows : [];
+
+    count.textContent = String(v.count != null ? v.count : rows.length);
 
     const wrap = document.createElement("div");
     wrap.className = "list";
 
-    const filterBar = renderHistoryFilterBar({ locked, filter });
-    wrap.appendChild(filterBar);
+    wrap.appendChild(renderHistoryFilterBar(filter, locked, v.handlers));
+    wrap.appendChild(renderHistoryList(rows));
 
-    const filtered = applyHistoryFilter(rows, filter);
-    count.textContent = String(filtered.length);
-
-    // 3) Tomt-läge
-    if (!filtered.length) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = rows.length
-        ? "Inga händelser matchar filtret."
-        : "Ingen historik ännu.";
-      wrap.appendChild(d);
-      root.appendChild(wrap);
-      return;
-    }
-
-    // 4) Lista (senaste först, max 100)
-    const list = document.createElement("div");
-    list.className = "list";
-
-    const toShow = filtered
-      .slice()
-      .sort((a, b) => (b.ts - a.ts))
-      .slice(0, 100);
-
-    toShow.forEach(h => {
-      const row = document.createElement("div");
-      row.className = "userRow";
-
-      const left = document.createElement("div");
-      left.className = "meta";
-      left.textContent = `${safeText(h.day)} • ${safeText(h.dir)} • qty=${String(h.qty)}`;
-
-      const note = document.createElement("div");
-      note.className = "muted";
-      note.textContent = safeText(h.label || h.key || h.note || "");
-
-      const by = document.createElement("span");
-      by.className = "badge";
-      by.textContent = safeText(h.by || "—");
-
-      row.appendChild(left);
-      row.appendChild(note);
-      row.appendChild(by);
-
-      list.appendChild(row);
-    });
-
-    wrap.appendChild(list);
     root.appendChild(wrap);
   }
 
-  function renderHistoryFilterBar(ctx) {
-    const locked = !!(ctx && ctx.locked);
-    const filter = (ctx && ctx.filter && typeof ctx.filter === "object") ? ctx.filter : _historyUi;
-
+  function renderHistoryFilterBar(filter, locked, handlers) {
     const bar = document.createElement("div");
     bar.className = "row";
     bar.style.marginBottom = "10px";
 
-    const fromLabel = pillDate("Från", "frzHistFrom", filter.from, locked);
-    const toLabel = pillDate("Till", "frzHistTo", filter.to, locked);
+    const fromLabel = pillDate("Från", "frzHistFrom", filter.from, locked, (val) => {
+      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { from: val }));
+    });
+
+    const toLabel = pillDate("Till", "frzHistTo", filter.to, locked, (val) => {
+      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { to: val }));
+    });
 
     const typeLabel = pillSelect("Typ", "frzHistType", [
       { v: "ALL", t: "Alla" },
       { v: "IN", t: "IN" },
       { v: "OUT", t: "OUT" }
-    ], filter.type, locked);
+    ], filter.type, locked, (val) => {
+      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { type: val || "ALL" }));
+    });
 
-    const qLabel = pillText("Artikel", "frzHistQ", filter.q, "t.ex. FZ-010 / kyckling", locked);
+    const qLabel = pillText("Artikel", "frzHistQ", filter.q, "t.ex. FZ-010 / kyckling", locked, (val) => {
+      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { q: val }));
+    });
 
     const spacer = document.createElement("div");
     spacer.className = "spacer";
@@ -743,14 +570,16 @@ AUTOPATCH (DENNA):
     const btnClear = document.createElement("button");
     btnClear.className = "btn";
     btnClear.type = "button";
-    btnClear.id = "frzHistClearBtn";
     btnClear.textContent = "Rensa";
     btnClear.disabled = locked;
+    btnClear.addEventListener("click", () => {
+      safeCall(handlers, "onClear");
+    });
 
     const hint = document.createElement("span");
     hint.className = "muted";
     hint.style.fontSize = "13px";
-    hint.textContent = "Filter: datum (inklusive), typ och artikel (case-insensitiv).";
+    hint.textContent = safeText((handlers && handlers.hintText) || "Filter: datum (inklusive), typ och artikel (case-insensitiv).");
 
     bar.appendChild(fromLabel);
     bar.appendChild(toLabel);
@@ -763,7 +592,47 @@ AUTOPATCH (DENNA):
     return bar;
   }
 
-  function pillDate(label, id, value, disabled) {
+  function renderHistoryList(rows) {
+    if (!rows.length) {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Ingen historik ännu (eller inga träffar).";
+      return d;
+    }
+
+    const list = document.createElement("div");
+    list.className = "list";
+
+    rows.forEach((h) => {
+      const row = document.createElement("div");
+      row.className = "userRow";
+
+      const left = document.createElement("div");
+      left.className = "meta";
+      left.textContent = safeText(h && h.left);
+
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.textContent = safeText(h && h.note);
+
+      const by = document.createElement("span");
+      by.className = "badge";
+      by.textContent = safeText(h && h.badge);
+
+      row.appendChild(left);
+      row.appendChild(note);
+      row.appendChild(by);
+
+      list.appendChild(row);
+    });
+
+    return list;
+  }
+
+  // ------------------------------------------------------------
+  // SMALL UI CONTROLS (render-only)
+  // ------------------------------------------------------------
+  function pillDate(label, id, value, disabled, onChange) {
     const wrap = document.createElement("label");
     wrap.className = "pill";
     wrap.setAttribute("for", id);
@@ -776,14 +645,17 @@ AUTOPATCH (DENNA):
     inp.id = id;
     inp.type = "date";
     inp.value = safeText(value || "");
-    if (disabled) inp.disabled = true;
+    inp.disabled = !!disabled;
+    inp.addEventListener("change", () => {
+      try { onChange && onChange(inp.value || ""); } catch {}
+    });
 
     wrap.appendChild(muted);
     wrap.appendChild(inp);
     return wrap;
   }
 
-  function pillText(label, id, value, placeholder, disabled) {
+  function pillText(label, id, value, placeholder, disabled, onInput) {
     const wrap = document.createElement("label");
     wrap.className = "pill";
     wrap.setAttribute("for", id);
@@ -798,384 +670,56 @@ AUTOPATCH (DENNA):
     inp.value = safeText(value || "");
     inp.placeholder = safeText(placeholder || "");
     inp.maxLength = 64;
-    if (disabled) inp.disabled = true;
+    inp.disabled = !!disabled;
+    inp.addEventListener("input", () => {
+      try { onInput && onInput(inp.value || ""); } catch {}
+    });
 
     wrap.appendChild(muted);
     wrap.appendChild(inp);
     return wrap;
   }
 
-  // AO-05B: public hook (controller kan kalla direkt om den vill)
-  function wireHistoryFilterOnce(root, cfg) {
-    _wireHistoryFilterOnce(root, cfg);
+  function pillSelect(label, id, options, selected, disabled, onChange) {
+    const wrap = document.createElement("label");
+    wrap.className = "pill";
+    wrap.setAttribute("for", id);
+
+    const muted = document.createElement("span");
+    muted.className = "muted";
+    muted.textContent = `${label}:`;
+
+    const sel = document.createElement("select");
+    sel.id = id;
+    sel.disabled = !!disabled;
+
+    (options || []).forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = safeText(o && o.v);
+      opt.textContent = safeText(o && o.t);
+      sel.appendChild(opt);
+    });
+
+    sel.value = safeText(selected || "");
+    sel.addEventListener("change", () => {
+      try { onChange && onChange(sel.value || ""); } catch {}
+    });
+
+    wrap.appendChild(muted);
+    wrap.appendChild(sel);
+    return wrap;
   }
 
-  function _wireHistoryFilterOnce(root, cfg) {
-    try {
-      if (!root) return;
-      if (root.dataset && root.dataset.histBound === "1") {
-        // uppdatera referenser/callback om controller byter dem
-        try {
-          root.__frzHistCfg = cfg || root.__frzHistCfg || null;
-        } catch {}
-        return;
-      }
-      if (root.dataset) root.dataset.histBound = "1";
-      try { root.__frzHistCfg = cfg || null; } catch {}
-
-      const onChange = (ev) => {
-        const t = ev && ev.target ? ev.target : null;
-        if (!t || !t.id) return;
-
-        const cfgNow = root.__frzHistCfg || {};
-        const filter = (cfgNow.filter && typeof cfgNow.filter === "object") ? cfgNow.filter : _historyUi;
-        const cb = (typeof cfgNow.onFilterChange === "function") ? cfgNow.onFilterChange : null;
-
-        let changed = false;
-        const next = { from: safeText(filter.from), to: safeText(filter.to), type: safeText(filter.type || "ALL") || "ALL", q: safeText(filter.q) };
-
-        if (t.id === "frzHistFrom") { next.from = safeText(t.value || ""); changed = true; }
-        else if (t.id === "frzHistTo") { next.to = safeText(t.value || ""); changed = true; }
-        else if (t.id === "frzHistType") { next.type = safeText(t.value || "ALL") || "ALL"; changed = true; }
-
-        if (!changed) return;
-
-        if (cb) cb(next);
-        else {
-          // legacy fallback (render äger state)
-          _historyUi.from = next.from;
-          _historyUi.to = next.to;
-          _historyUi.type = next.type;
-          scheduleHistoryRerender();
-        }
-      };
-
-      const onInput = (ev) => {
-        const t = ev && ev.target ? ev.target : null;
-        if (!t || !t.id) return;
-        if (t.id !== "frzHistQ") return;
-
-        const cfgNow = root.__frzHistCfg || {};
-        const filter = (cfgNow.filter && typeof cfgNow.filter === "object") ? cfgNow.filter : _historyUi;
-        const cb = (typeof cfgNow.onFilterChange === "function") ? cfgNow.onFilterChange : null;
-
-        const next = { from: safeText(filter.from), to: safeText(filter.to), type: safeText(filter.type || "ALL") || "ALL", q: safeText(t.value || "") };
-
-        if (cb) cb(next);
-        else {
-          _historyUi.q = next.q;
-          scheduleHistoryRerender();
-        }
-      };
-
-      const onClick = (ev) => {
-        const t = ev && ev.target ? ev.target : null;
-        if (!t) return;
-
-        const btn = (t.id === "frzHistClearBtn") ? t : (t.closest ? t.closest("#frzHistClearBtn") : null);
-        if (!btn) return;
-
-        const cfgNow = root.__frzHistCfg || {};
-        const cb = (typeof cfgNow.onFilterChange === "function") ? cfgNow.onFilterChange : null;
-
-        const next = { from: "", to: "", type: "ALL", q: "" };
-
-        if (cb) cb(next);
-        else {
-          _historyUi.from = "";
-          _historyUi.to = "";
-          _historyUi.type = "ALL";
-          _historyUi.q = "";
-          scheduleHistoryRerender();
-        }
-      };
-
-      root.addEventListener("change", onChange);
-      root.addEventListener("input", onInput);
-      root.addEventListener("click", onClick);
-    } catch {
-      // fail-soft
-    }
+  function setTab(btn, selected) {
+    if (!btn) return;
+    btn.setAttribute("aria-selected", selected ? "true" : "false");
   }
 
-  function scheduleHistoryRerender() {
-    try {
-      if (_historyRaf) return;
-      _historyRaf = window.requestAnimationFrame(() => {
-        _historyRaf = 0;
-        requestHistoryRerender();
-      });
-    } catch {
-      requestHistoryRerender();
-    }
-  }
-
-  function requestHistoryRerender() {
-    try {
-      if (window.FreezerStore && typeof window.FreezerStore.getState === "function") {
-        const st = window.FreezerStore.getState();
-        // legacy: render historik med legacyfilter
-        renderHistory(st, { historyFilter: _historyUi });
-      }
-    } catch {
-      // fail-soft
-    }
-  }
-
-  function applyHistoryFilter(rows, f) {
-    try {
-      const arr = Array.isArray(rows) ? rows : [];
-      const ff = f && typeof f === "object" ? f : _historyUi;
-
-      const type = String(ff.type || "ALL").toUpperCase().trim();
-      const qNorm = normalizeKey(ff.q || "");
-
-      const fromMs = ff.from ? parseTs(ff.from) : 0;
-      const toMs = ff.to ? parseTs(ff.to) : 0;
-
-      // Datumfilter INKLUSIVT
-      const toEnd = toMs ? (startOfLocalDay(toMs) + 86400000 - 1) : 0;
-      const fromStart = fromMs ? startOfLocalDay(fromMs) : 0;
-
-      return arr.filter(r => {
-        if (type === "IN" && r.dir !== "IN") return false;
-        if (type === "OUT" && r.dir !== "OUT") return false;
-
-        if (fromStart && !(r.ts >= fromStart)) return false;
-        if (toEnd && !(r.ts <= toEnd)) return false;
-
-        if (qNorm && qNorm !== "—") {
-          const keyN = normalizeKey(r.key || "");
-          const labelN = normalizeKey(r.label || "");
-          const noteN = normalizeKey(r.note || "");
-          const hit =
-            (keyN && keyN.includes(qNorm)) ||
-            (labelN && labelN.includes(qNorm)) ||
-            (noteN && noteN.includes(qNorm));
-          if (!hit) return false;
-        }
-
-        return true;
-      });
-    } catch {
-      return [];
-    }
-  }
-
-  function extractHistoryLike(state) {
-    try {
-      const s = state && typeof state === "object" ? state : {};
-      const d = s.data && typeof s.data === "object" ? s.data : {};
-
-      const candidates = [
-        d.history,
-        d.moves,
-        d.events,
-        s.history,
-        s.moves,
-        s.events
-      ];
-      for (const c of candidates) if (Array.isArray(c)) return c;
-      return [];
-    } catch {
-      return [];
-    }
-  }
-
-  function normalizeHistoryRows(rawArr) {
-    try {
-      const arr = Array.isArray(rawArr) ? rawArr : [];
-      const out = [];
-
-      for (const mv of arr) {
-        const info = normalizeMoveLike(mv);
-        if (!info) continue;
-        out.push(info);
-      }
-      return out;
-    } catch {
-      return [];
-    }
-  }
-
-  function normalizeMoveLike(mv) {
-    try {
-      if (!mv || typeof mv !== "object") return null;
-
-      const ts = parseTs(mv.ts ?? mv.time ?? mv.createdAt ?? mv.date ?? mv.at ?? mv.timestamp);
-      const day = ts ? formatYmd(startOfLocalDay(ts)) : "—";
-
-      const qtyRaw = mv.qty ?? mv.quantity ?? mv.amount ?? mv.count ?? mv.units ?? null;
-      const deltaRaw = mv.delta ?? mv.diff ?? mv.change ?? mv.deltaQty ?? mv.deltaUnits ?? null;
-
-      let qty = 0;
-      if (qtyRaw != null) qty = Math.abs(safeNum(qtyRaw, 0));
-      else if (deltaRaw != null) qty = Math.abs(safeNum(deltaRaw, 0));
-
-      const dir = inferDirStrict(mv, deltaRaw);
-      if (!dir) return null;
-
-      const key =
-        safeStr(mv.articleNo) ||
-        safeStr(mv.articleNumber) ||
-        safeStr(mv.article) ||
-        safeStr(mv.itemId) ||
-        safeStr(mv.productId) ||
-        safeStr(mv.sku) ||
-        safeStr(mv.id) ||
-        safeStr(mv.itemKey) ||
-        "";
-
-      const label =
-        safeStr(mv.itemName) ||
-        safeStr(mv.productName) ||
-        safeStr(mv.name) ||
-        safeStr(mv.title) ||
-        safeStr(mv.label) ||
-        safeStr(mv.articleNo) ||
-        key ||
-        "—";
-
-      const by = safeStr(mv.by) || safeStr(mv.user) || safeStr(mv.actor) || "—";
-      const note = safeStr(mv.note) || safeStr(mv.message) || "";
-
-      return {
-        ts: ts || 0,
-        day,
-        dir,
-        qty: safeInt(qty, 0),
-        key: safeStr(key),
-        label: safeStr(label),
-        by,
-        note
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function inferDirStrict(mv, deltaRaw) {
-    try {
-      const t = safeStr(mv.type) || safeStr(mv.kind) || safeStr(mv.action) || safeStr(mv.direction) || "";
-      const up = t.toUpperCase().trim();
-
-      if (up === "IN" || up === "ADD" || up === "RESTOCK" || up === "PUT" || up === "RECEIVE") return "IN";
-      if (up === "OUT" || up === "REMOVE" || up === "PICK" || up === "WITHDRAW" || up === "SHIP") return "OUT";
-
-      if (up === "RECEIVED" || up === "RECEIVING") return "IN";
-      if (up === "SHIPPED" || up === "SHIPPING") return "OUT";
-
-      const d = safeNum(deltaRaw, 0);
-      if (d > 0) return "IN";
-      if (d < 0) return "OUT";
-
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  // -----------------------------
-  // DASH
-  // -----------------------------
-  function renderDashboard(state) {
-    const cards = byId("frzDashCards");
-    const notes = byId("frzDashNotes");
-    if (!cards || !notes) return;
-
-    const st = safeStatus();
-    const okLike = isOkLikeStatus(st);
-
-    let itemCount = 0;
-    try {
-      const s = state && typeof state === "object" ? state : null;
-      const items = s && s.data && Array.isArray(s.data.items) ? s.data.items : [];
-      itemCount = items.length;
-    } catch {}
-
-    // OBS: admin/freezer.js kan injicera paneler före/efter — vi nollställer som baseline
-    cards.textContent = "";
-    addCard(cards, "Produkter", String(itemCount));
-    addCard(cards, "Status", okLike ? "OK" : safeText(st.status || "KORRUPT"));
-    addCard(cards, "Läge", st.locked ? "LÅST" : (st.readOnly ? "READ-ONLY" : "FULL"));
-
-    const msg = [];
-    if (st.debug && st.debug.rawWasEmpty) msg.push("Tom lagring vid start.");
-    if (st.debug && st.debug.demoCreated) msg.push("Demo-data skapad.");
-    if (st.locked) msg.push(`Låst: ${st.errorCode || "okänt fel"}`);
-    notes.textContent = msg.length ? msg.join(" ") : "—";
-  }
-
-  function addCard(root, title, value) {
-    const card = document.createElement("div");
-    card.className = "panel";
-    card.style.background = "#fafafa";
-
-    const t = document.createElement("div");
-    t.className = "muted";
-    t.textContent = safeText(title);
-
-    const v = document.createElement("div");
-    v.style.fontSize = "20px";
-    v.style.fontWeight = "800";
-    v.style.marginTop = "6px";
-    v.textContent = safeText(value);
-
-    card.appendChild(t);
-    card.appendChild(v);
-    root.appendChild(card);
-  }
-
-  // -----------------------------
-  // SAFE ACCESSORS
-  // -----------------------------
-  function safeStatus() {
-    try {
-      if (window.FreezerStore && typeof window.FreezerStore.getStatus === "function") {
-        return window.FreezerStore.getStatus();
-      }
-    } catch {}
-    return { status: "KORRUPT", locked: true, readOnly: true, errorCode: "FRZ_E_NOT_INIT", debug: {} };
-  }
-
-  function isOkLikeStatus(st) {
-    try {
-      if (st && st.locked === true) return false;
-      if (st && st.errorCode) return false;
-      if (st && st.reason) return false;
-
-      const raw = st && typeof st.status !== "undefined" ? String(st.status) : "";
-      const s = raw.trim().toUpperCase();
-
-      const okSet = new Set(["OK", "READY", "INIT", "INITIALIZED", "FULL", "RUNNING"]);
-      if (okSet.has(s)) return true;
-
-      const badSet = new Set(["KORRUPT", "CORRUPT", "ERROR", "FAIL", "FAILED", "BROKEN", "NOT_INIT"]);
-      if (badSet.has(s)) return false;
-
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function can(permKey) {
-    try {
-      return !!(window.FreezerStore && typeof window.FreezerStore.can === "function" && window.FreezerStore.can(permKey));
-    } catch {
-      return false;
-    }
-  }
-
-  function safeUsers(state) {
-    const s = state && typeof state === "object" ? state : null;
-    const arr = s && s.data && Array.isArray(s.data.users) ? s.data.users : [];
-    return arr.map(u => ({
-      id: safeText(u && u.id),
-      firstName: safeText(u && u.firstName),
-      active: !!(u && u.active),
-      perms: (u && typeof u.perms === "object" && u.perms) ? u.perms : {}
-    }));
+  // ------------------------------------------------------------
+  // HELPERS
+  // ------------------------------------------------------------
+  function byId(id) {
+    return document.getElementById(id);
   }
 
   function safeText(v) {
@@ -1183,94 +727,24 @@ AUTOPATCH (DENNA):
     return String(v);
   }
 
-  function byId(id) {
-    return document.getElementById(id);
-  }
-
-  // -----------------------------
-  // AO-05A helpers aligned with freezer-dashboard.js
-  // -----------------------------
-  function parseTs(v) {
+  function safeCall(obj, fnName /*, ...args */) {
     try {
-      if (v == null) return 0;
-      if (typeof v === "number" && Number.isFinite(v)) {
-        if (v > 0 && v < 2000000000) return v * 1000;
-        return v;
-      }
-      const s = String(v).trim();
-      if (!s) return 0;
-
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-        const parts = s.split("-");
-        const y = Number(parts[0]), m = Number(parts[1]), d = Number(parts[2]);
-        const dt = new Date(y, (m - 1), d);
-        const ms = dt.getTime();
-        return Number.isFinite(ms) ? ms : 0;
-      }
-
-      const ms = Date.parse(s);
-      return Number.isFinite(ms) ? ms : 0;
+      if (!obj) return;
+      const fn = obj[fnName];
+      if (typeof fn !== "function") return;
+      const args = Array.prototype.slice.call(arguments, 2);
+      fn.apply(null, args);
     } catch {
-      return 0;
+      // fail-soft
     }
   }
 
-  function startOfLocalDay(ts) {
-    try {
-      const d = new Date(ts);
-      d.setHours(0, 0, 0, 0);
-      const ms = d.getTime();
-      return Number.isFinite(ms) ? ms : 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  function formatYmd(dayStartMs) {
-    try {
-      const d = new Date(dayStartMs);
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const da = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${da}`;
-    } catch {
-      return "—";
-    }
-  }
-
-  function normalizeKey(v) {
-    try {
-      const s = String(v == null ? "" : v).trim();
-      if (!s) return "—";
-      return s.toLowerCase();
-    } catch {
-      return "—";
-    }
-  }
-
-  function safeNum(v, fallback) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  }
-
-  function safeInt(v, fallback) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.trunc(n);
-  }
-
-  function safeStr(v) {
-    try {
-      return String(v == null ? "" : v).trim();
-    } catch {
-      return "";
-    }
-  }
-
-  /* ÄNDRINGSLOGG (≤8)
-  1) AO-05B: renderHistory tar ui.historyFilter (state från controller) istället för att alltid använda intern _historyUi.
-  2) AO-05B: bind-once delegation wire: ropar ui.onHistoryFilterChange(next) om callback finns (controller äger state).
-  3) Bakåtkompat: om callback saknas används legacy _historyUi + scheduleHistoryRerender som tidigare.
-  4) Inga nya storage keys/datamodell. XSS-safe bibehållet.
-  */
+  /* ============================================================
+  ÄNDRINGSLOGG (≤8)
+  1) Refactor: Render-filen är nu render-only (ingen store/dashboard/state).
+  2) Ny API: renderApp(vm) tar all data + callbacks från controller.
+  3) Top IN/OUT panel renderas via vm.topInOut + handler onPeriodChange.
+  4) History filter renderas via vm.history + callbacks onFilterChange/onClear.
+  5) XSS-safe: textContent överallt, fail-soft render.
+  ============================================================ */
 })();
