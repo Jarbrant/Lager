@@ -28,6 +28,16 @@ POLICY (LÅST):
   "use strict";
 
   // ------------------------------------------------------------
+  // P0: INIT-GUARD (idempotent vid dubbel script-load)
+  // ------------------------------------------------------------
+  const __FRZ_STORE_BUILD_ID__ = "AO-02/15:03-store@v1.4.1";
+  try {
+    if (window.FreezerStore && window.FreezerStore.__buildId === __FRZ_STORE_BUILD_ID__) {
+      return;
+    }
+  } catch {}
+
+  // ------------------------------------------------------------
   // Storage (lokal persistens för demo)
   // ------------------------------------------------------------
   const STORAGE_KEY_HISTORY = "FRZ_DEMO_HISTORY_V1"; // history-array (supplier + stock events)
@@ -526,6 +536,9 @@ POLICY (LÅST):
   // Public API
   // ------------------------------------------------------------
   const FreezerStore = {
+    // P0: build id for init-guard
+    __buildId: __FRZ_STORE_BUILD_ID__,
+
     init(opts) {
       try {
         const role = opts && opts.role ? String(opts.role) : "ADMIN";
@@ -1049,7 +1062,7 @@ POLICY (LÅST):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Store startar LOCKED (FRZ_E_NOT_INIT) tills init() körs → controller kan inte felaktigt hoppa över init/hydrate.
+1) P0: Init-guard (idempotent): om samma build av store redan laddats -> return utan att skapa ny state.
 2) Inga nya storage keys, inga nya top-level state-nycklar.
 ============================================================ */
 
@@ -1057,5 +1070,6 @@ POLICY (LÅST):
 TESTNOTERINGAR (3–10)
 - Öppna buyer/freezer.html → kör: window.FreezerStore.getStatus() före init (ska visa locked:true).
 - Efter att sidan laddat: window.FreezerStore.getStatus() (ska visa locked:false).
+- Ladda om sidan flera gånger / säkerställ att dubbel script-load inte återinitierar state oväntat.
 - Skapa leverantör → reload → window.FreezerStore.listSuppliers() ska visa leverantören.
 ============================================================ */
