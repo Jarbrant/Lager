@@ -196,15 +196,27 @@ Demo-konton (tills AO-LOGIN-02 gör admin-skapade users persistenta):
         return null;
       }
 
+      // GUARD: skriv till BÅDE sessionStorage + localStorage (best-effort)
+      // Varför: robust på GitHub Pages/redirects. Admin-sidan läser sessionStorage först men kan falla tillbaka.
       function writeSession(obj){
         const payload = JSON.stringify(obj);
+        let wrote = false;
+
         try {
-          if (window.sessionStorage) { window.sessionStorage.setItem(KEY, payload); return true; }
+          if (window.sessionStorage) {
+            window.sessionStorage.setItem(KEY, payload);
+            wrote = true;
+          }
         } catch {}
+
         try {
-          if (window.localStorage) { window.localStorage.setItem(KEY, payload); return true; }
+          if (window.localStorage) {
+            window.localStorage.setItem(KEY, payload);
+            wrote = true;
+          }
         } catch {}
-        return false;
+
+        return wrote;
       }
 
       function clearSession(){
@@ -349,17 +361,15 @@ Demo-konton (tills AO-LOGIN-02 gör admin-skapade users persistenta):
 
   <!-- ==========================================================
   ÄNDRINGSLOGG (≤8)
-  1) Root index.html är nu login-sida (förnamn + PIN).
-  2) Skapar session FRZ_SESSION_V1 (sessionStorage-first, localStorage fallback).
-  3) Rutar till ADMIN/BUYER/PICKER-sidor efter login.
+  1) GUARD: writeSession skriver nu best-effort till både sessionStorage + localStorage.
+  2) Robustare redirect-flöde: admin-sidan kan alltid läsa FRZ_SESSION_V1 via fallback.
   =========================================================== -->
 
   <!-- ==========================================================
   TESTNOTERINGAR (klicktest)
-  - Öppna / (repo-root) -> logga in Admin/1111 -> ska hamna i /admin/freezer.html
+  - Öppna /Lager/index.html -> logga in Admin/1111 -> ska hamna i /Lager/admin/freezer.html
+  - Om admin kickar tillbaka: Application -> Local Storage ska fortfarande ha FRZ_SESSION_V1
   - Logga ut -> session pill ska visa "Ingen"
-  - Logga in Inköp/2222 -> ska hamna i /buyer/freezer.html
-  - Logga in Plock/3333 -> ska hamna i /picker/freezer.html
   =========================================================== -->
 </body>
 </html>
