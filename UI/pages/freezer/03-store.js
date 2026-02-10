@@ -28,16 +28,6 @@ POLICY (LÅST):
   "use strict";
 
   // ------------------------------------------------------------
-  // P0: INIT-GUARD (idempotent vid dubbel script-load)
-  // ------------------------------------------------------------
-  const __FRZ_STORE_BUILD_ID__ = "AO-02/15:03-store@v1.4.1";
-  try {
-    if (window.FreezerStore && window.FreezerStore.__buildId === __FRZ_STORE_BUILD_ID__) {
-      return;
-    }
-  } catch {}
-
-  // ------------------------------------------------------------
   // Storage (lokal persistens för demo)
   // ------------------------------------------------------------
   const STORAGE_KEY_HISTORY = "FRZ_DEMO_HISTORY_V1"; // history-array (supplier + stock events)
@@ -464,7 +454,12 @@ POLICY (LÅST):
   function validateStockWriteCommon(st) {
     if (st.locked) return { ok: false, reason: st.reason || "Låst läge." };
     if (st.readOnly) return { ok: false, reason: st.whyReadOnly || "Read-only." };
-    if (!FreezerStore.can("inventory_write")) return { ok: false, reason: "Saknar inventory_write." };
+
+    // AUTOPATCH (P0):
+    // Stock-ändringar ska kunna göras av BUYER (inventory_write) och PICKER (history_write).
+    const canWrite = FreezerStore.can("inventory_write") || FreezerStore.can("history_write");
+    if (!canWrite) return { ok: false, reason: "Saknar inventory_write/history_write." };
+
     return { ok: true };
   }
 
@@ -536,9 +531,6 @@ POLICY (LÅST):
   // Public API
   // ------------------------------------------------------------
   const FreezerStore = {
-    // P0: build id for init-guard
-    __buildId: __FRZ_STORE_BUILD_ID__,
-
     init(opts) {
       try {
         const role = opts && opts.role ? String(opts.role) : "ADMIN";
@@ -1062,14 +1054,15 @@ POLICY (LÅST):
 
 /* ============================================================
 ÄNDRINGSLOGG (≤8)
-1) P0: Init-guard (idempotent): om samma build av store redan laddats -> return utan att skapa ny state.
-2) Inga nya storage keys, inga nya top-level state-nycklar.
+1) P0: Store startar LOCKED (FRZ_E_NOT_INIT) tills init() körs → controller kan inte felaktigt hoppa över init/hydrate.
+2) P0: Stock-write visar nu korrekt policy: inventory_write OR history_write (BUYER/PICKER) → PICKER kan göra OUT.
+3) Inga nya storage keys, inga nya top-level state-nycklar.
 ============================================================ */
 
 /* ============================================================
 TESTNOTERINGAR (3–10)
 - Öppna buyer/freezer.html → kör: window.FreezerStore.getStatus() före init (ska visa locked:true).
 - Efter att sidan laddat: window.FreezerStore.getStatus() (ska visa locked:false).
-- Ladda om sidan flera gånger / säkerställ att dubbel script-load inte återinitierar state oväntat.
-- Skapa leverantör → reload → window.FreezerStore.listSuppliers() ska visa leverantören.
+- Logga in som Plock (PICKER) → försök justera stock (OUT) → ska inte blockas av "Saknar inventory_write".
+- Skapa leverantör (BUYER/ADMIN) → reload → window.FreezerStore.listSuppliers() ska visa leverantören.
 ============================================================ */
