@@ -10,13 +10,13 @@ Syfte:
 - Fallback: UI-only auth via FRZ_SESSION_V1 (sessionStorage/localStorage)
 - Fail-closed: om varken API-auth eller UI-session är OK -> redirect ../index.html
 
-Fix (UI-demo):
-- Skapa användare-knappen ska inte låsas av store-status i UI-läge.
-  (Store kan stå i readOnly/laddar → annars blir knappen alltid disabled.)
+Fix (P0 crash):
+- Om FreezerStore eller FreezerRender saknas (pga 404/syntax/module mismatch) → INGEN redirect-loop.
+  Visa istället fail-closed “Tekniskt fel” i UI (read-only) så sidan inte “blinkar och dör”.
 
 Kontrakt:
 - Inga nya storage keys i UI
-- Inga console errors
+- Inga console errors (ingen obligatorisk logging)
 - Render ska inte innehålla businesslogik (controller styr)
 ============================================================ */
 
@@ -92,6 +92,12 @@ Kontrakt:
       userNameText: byId("frzUserName"),
       viewHint: byId("frzViewHint"),
 
+      statusPill: byId("frzStatusPill"),
+      statusText: byId("frzStatusText"),
+
+      lockPanel: byId("frzLockPanel"),
+      lockReason: byId("frzLockReason"),
+
       resetBtn: byId("frzResetDemoBtn"),
       openCreateUserBtn: byId("frzOpenCreateUserBtn"),
 
@@ -101,6 +107,10 @@ Kontrakt:
       tabSaldo: byId("tabSaldo"),
       tabHistorik: byId("tabHistorik"),
 
+      viewDashboard: byId("viewDashboard"),
+      viewSaldo: byId("viewSaldo"),
+      viewHistorik: byId("viewHistorik"),
+
       legacyClose: byId("frzUserModalCloseBtn"),
       legacyCancel: byId("frzUserCancelBtn"),
       legacyOverlay: byId("frzUserModalOverlay")
@@ -109,6 +119,21 @@ Kontrakt:
     function setTopbarIdentity(role, name) {
       if (els.roleText) els.roleText.textContent = String(role || "—");
       if (els.userNameText) els.userNameText.textContent = String(name || "—");
+    }
+
+    function setStatus(text, isOk) {
+      if (els.statusText) els.statusText.textContent = String(text || "—");
+      if (els.statusPill) {
+        els.statusPill.classList.remove("ok");
+        els.statusPill.classList.remove("danger");
+        els.statusPill.classList.add(isOk ? "ok" : "danger");
+      }
+    }
+
+    function setLockPanel(visible, reasonText) {
+      if (!els.lockPanel) return;
+      els.lockPanel.hidden = !visible;
+      if (els.lockReason) els.lockReason.textContent = String(reasonText || "Orsak: okänd");
     }
 
     function setViewHint(text) {
@@ -167,12 +192,16 @@ Kontrakt:
         if (ticks > 50) clearInterval(t);
       }, 100);
 
-      document.addEventListener("keydown", (ev) => {
-        if (ev && ev.key === "Escape") {
-          tryCloseShell();
-          killAllOverlays();
-        }
-      }, true);
+      document.addEventListener(
+        "keydown",
+        (ev) => {
+          if (ev && ev.key === "Escape") {
+            tryCloseShell();
+            killAllOverlays();
+          }
+        },
+        true
+      );
     }
 
     function wireModalClose() {
@@ -208,6 +237,12 @@ Kontrakt:
       if (!els.openCreateUserBtn) return;
       els.openCreateUserBtn.disabled = !!disabled;
       if (typeof title === "string") els.openCreateUserBtn.title = title;
+    }
+
+    function setResetDisabled(disabled, title) {
+      if (!els.resetBtn) return;
+      els.resetBtn.disabled = !!disabled;
+      if (typeof title === "string") els.resetBtn.title = title;
     }
 
     // AO-02A panel render (pure DOM render)
@@ -292,9 +327,10 @@ Kontrakt:
         hr.style.margin = "10px 0";
         panel.appendChild(hr);
 
-        const dash = (window.FreezerDashboard && typeof window.FreezerDashboard.computeTopInOut === "function")
-          ? window.FreezerDashboard
-          : null;
+        const dash =
+          window.FreezerDashboard && typeof window.FreezerDashboard.computeTopInOut === "function"
+            ? window.FreezerDashboard
+            : null;
 
         if (!dash) {
           const warn = document.createElement("div");
@@ -305,8 +341,8 @@ Kontrakt:
         }
 
         const res = dash.computeTopInOut(state, topPeriodDays) || { in: [], out: [], meta: {}, days: topPeriodDays };
-        const showIn = (role !== "PICKER");
-        const showOut = (role !== "BUYER");
+        const showIn = role !== "PICKER";
+        const showOut = role !== "BUYER";
 
         const grid = document.createElement("div");
         grid.style.display = "grid";
@@ -314,7 +350,7 @@ Kontrakt:
         grid.style.gap = "12px";
         grid.style.marginTop = "8px";
         if (window.matchMedia && window.matchMedia("(min-width: 900px)").matches) {
-          grid.style.gridTemplateColumns = (showIn && showOut) ? "1fr 1fr" : "1fr";
+          grid.style.gridTemplateColumns = showIn && showOut ? "1fr 1fr" : "1fr";
         }
 
         function renderTable(titleText, rows) {
@@ -343,10 +379,21 @@ Kontrakt:
 
           const thead = document.createElement("thead");
           const trh = document.createElement("tr");
-          const th1 = document.createElement("th"); th1.textContent = "Artikel"; th1.style.textAlign = "left"; th1.style.padding = "6px";
-          const th2 = document.createElement("th"); th2.textContent = "Qty"; th2.style.textAlign = "right"; th2.style.padding = "6px";
-          const th3 = document.createElement("th"); th3.textContent = "Antal"; th3.style.textAlign = "right"; th3.style.padding = "6px";
-          trh.appendChild(th1); trh.appendChild(th2); trh.appendChild(th3);
+          const th1 = document.createElement("th");
+          th1.textContent = "Artikel";
+          th1.style.textAlign = "left";
+          th1.style.padding = "6px";
+          const th2 = document.createElement("th");
+          th2.textContent = "Qty";
+          th2.style.textAlign = "right";
+          th2.style.padding = "6px";
+          const th3 = document.createElement("th");
+          th3.textContent = "Antal";
+          th3.style.textAlign = "right";
+          th3.style.padding = "6px";
+          trh.appendChild(th1);
+          trh.appendChild(th2);
+          trh.appendChild(th3);
           thead.appendChild(trh);
           table.appendChild(thead);
 
@@ -403,17 +450,40 @@ Kontrakt:
         meta.style.fontSize = "12px";
         meta.style.marginTop = "10px";
         const m = res.meta || {};
-        meta.textContent =
-          `moves: total=${safeNum(m.totalMoves, 0)} • used=${safeNum(m.usedMoves, 0)} • ignored=${safeNum(m.ignoredMoves, 0)} • roll=${role}`;
+        meta.textContent = `moves: total=${safeNum(m.totalMoves, 0)} • used=${safeNum(m.usedMoves, 0)} • ignored=${safeNum(
+          m.ignoredMoves,
+          0
+        )} • roll=${role}`;
         panel.appendChild(meta);
       } catch {
         // fail-soft
       }
     }
 
+    function showBootError(code, detail) {
+      const msg = code === "MISSING_RENDER"
+        ? "Tekniskt fel: FreezerRender saknas (script laddades ej / fel typ)."
+        : "Tekniskt fel: FreezerStore saknas (script laddades ej / fel typ).";
+
+      setStatus("Tekniskt fel", false);
+      setLockPanel(true, msg + (detail ? ` (${detail})` : ""));
+      setViewHint("Read-only: kan inte starta UI.");
+      setCreateUserDisabled(true, "Read-only: tekniskt fel.");
+      setResetDisabled(true, "Read-only: tekniskt fel.");
+
+      // Lås vyer deterministiskt (fail-closed)
+      try {
+        if (els.viewDashboard) els.viewDashboard.hidden = false;
+        if (els.viewSaldo) els.viewSaldo.hidden = true;
+        if (els.viewHistorik) els.viewHistorik.hidden = true;
+      } catch {}
+    }
+
     return {
       els,
       setTopbarIdentity,
+      setStatus,
+      setLockPanel,
       setViewHint,
       setHintForTab,
       bootUnlock,
@@ -422,6 +492,8 @@ Kontrakt:
       wireTabs,
       wireButtons,
       setCreateUserDisabled,
+      setResetDisabled,
+      showBootError,
       renderTopInOutPanel
     };
   })();
@@ -457,7 +529,7 @@ Kontrakt:
     headers.set("Accept", "application/json");
 
     const method = String(o.method || "GET").toUpperCase();
-    const isWrite = (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE");
+    const isWrite = method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE";
 
     if (isWrite) {
       if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json; charset=utf-8");
@@ -496,13 +568,10 @@ Kontrakt:
   // -----------------------------
   // STORE GUARDS (controller)
   // -----------------------------
-  if (!window.FreezerRender) {
-    redirectToLogin();
-    return;
-  }
-
   let store = window.FreezerStore || null;
   let storeCorrupt = false;
+  let renderMissing = false;
+  let storeMissing = false;
 
   const storeShim = {
     init: function () { return { ok: false, reason: "Read-only: storage error." }; },
@@ -510,7 +579,13 @@ Kontrakt:
     subscribe: function () { return function () {}; },
     getState: function () { return {}; },
     getStatus: function () {
-      return { role: auth.role || "—", locked: false, readOnly: true, whyReadOnly: "Read-only: init-fel.", reason: "Storage error" };
+      return {
+        role: auth.role || "—",
+        locked: true,
+        readOnly: true,
+        whyReadOnly: "Read-only: init-fel.",
+        reason: "Storage error"
+      };
     },
     can: function () { return false; },
     hasPerm: function () { return false; },
@@ -522,17 +597,33 @@ Kontrakt:
     listItems: function () { return []; }
   };
 
-  function getStore() { return storeCorrupt ? storeShim : store; }
+  function getStore() { return storeCorrupt || storeMissing ? storeShim : store; }
 
   function markStoreCorrupt() {
     storeCorrupt = true;
     View.setViewHint("Read-only: storage fel.");
+    View.setLockPanel(true, "Orsak: storage fel (read-only).");
+    View.setStatus("Read-only", false);
+    View.setCreateUserDisabled(true, "Read-only: storage fel.");
+    View.setResetDisabled(true, "Read-only: storage fel.");
+  }
+
+  function markBootMissing(which) {
+    if (which === "render") {
+      renderMissing = true;
+      View.showBootError("MISSING_RENDER");
+      View.closeAnyModal();
+      return;
+    }
+    storeMissing = true;
+    View.showBootError("MISSING_STORE");
+    View.closeAnyModal();
   }
 
   function safeGetState() {
     try {
       const s = getStore();
-      return (s && typeof s.getState === "function") ? s.getState() : {};
+      return s && typeof s.getState === "function" ? s.getState() : {};
     } catch {
       markStoreCorrupt();
       return {};
@@ -542,7 +633,7 @@ Kontrakt:
   function safeGetStatus() {
     try {
       const s = getStore();
-      return (s && typeof s.getStatus === "function") ? s.getStatus() : storeShim.getStatus();
+      return s && typeof s.getStatus === "function" ? s.getStatus() : storeShim.getStatus();
     } catch {
       markStoreCorrupt();
       return storeShim.getStatus();
@@ -553,18 +644,18 @@ Kontrakt:
   // CONTROLLER -> VIEW
   // -----------------------------
   function syncCreateUserTopbarBtn() {
-    // UI-läge: lås INTE knappen p.g.a. store-status (den kan stå i "laddar/readOnly").
-    // API-läge: strikt (locked/readOnly låser).
     const status = safeGetStatus();
 
     const hasUsersManage = hasPerm("users_manage");
-    const blockedByStore = (auth.mode === "api") ? (!!status.locked || !!status.readOnly) : false;
+    const blockedByStore = auth.mode === "api" ? !!status.locked || !!status.readOnly : false;
 
-    const disabled = !hasUsersManage || storeCorrupt || blockedByStore;
+    const disabled = !hasUsersManage || storeCorrupt || storeMissing || renderMissing || blockedByStore;
 
     let title = "Skapa ny användare";
     if (disabled) {
-      if (!hasUsersManage) title = "Saknar behörighet (users_manage).";
+      if (renderMissing) title = "Tekniskt fel: render saknas.";
+      else if (storeMissing) title = "Tekniskt fel: store saknas.";
+      else if (!hasUsersManage) title = "Saknar behörighet (users_manage).";
       else if (storeCorrupt) title = "Read-only: storage fel.";
       else if (blockedByStore) {
         if (status.locked) title = status.reason ? `Låst: ${status.reason}` : "Låst läge.";
@@ -573,6 +664,20 @@ Kontrakt:
     }
 
     View.setCreateUserDisabled(disabled, title);
+  }
+
+  function syncResetBtn() {
+    const status = safeGetStatus();
+    const disabled = !!status.locked || !!status.readOnly || storeCorrupt || storeMissing || renderMissing;
+    let title = "Återställ demo-data";
+    if (disabled) {
+      if (renderMissing) title = "Tekniskt fel: render saknas.";
+      else if (storeMissing) title = "Tekniskt fel: store saknas.";
+      else if (storeCorrupt) title = "Read-only: storage fel.";
+      else if (status.locked) title = status.reason ? `Låst: ${status.reason}` : "Låst läge.";
+      else title = status.whyReadOnly || "Read-only.";
+    }
+    View.setResetDisabled(disabled, title);
   }
 
   function effectiveRoleForDashboard() {
@@ -595,12 +700,40 @@ Kontrakt:
   }
 
   function renderNow() {
+    // P0: om render saknas -> stanna fail-closed, ingen redirect-loop
+    if (!window.FreezerRender) {
+      markBootMissing("render");
+      return;
+    }
+
     const st = safeGetState();
-    window.FreezerRender.renderAll(st, { itemsMsg: "—" });
-    window.FreezerRender.setActiveTabUI(activeTab);
+
+    try {
+      window.FreezerRender.renderAll(st, { itemsMsg: "—" });
+      window.FreezerRender.setActiveTabUI(activeTab);
+    } catch {
+      // Om render finns men kraschar: fail-closed UI
+      markBootMissing("render");
+      return;
+    }
+
     syncCreateUserTopbarBtn();
+    syncResetBtn();
     View.setHintForTab(activeTab);
     renderTopInOutIfDashboard(st);
+
+    // Status indikering (fail-soft)
+    const status = safeGetStatus();
+    if (storeMissing) View.setStatus("Tekniskt fel", false);
+    else if (status && (status.locked || status.readOnly)) View.setStatus("Read-only", false);
+    else View.setStatus("OK", true);
+
+    if (status && (status.locked || status.readOnly)) {
+      const why = status.locked ? (status.reason || "Låst läge.") : (status.whyReadOnly || "Read-only.");
+      View.setLockPanel(true, `Orsak: ${why}`);
+    } else {
+      View.setLockPanel(false, "");
+    }
   }
 
   // -----------------------------
@@ -608,6 +741,7 @@ Kontrakt:
   // -----------------------------
   function openCreateUser() {
     if (!hasPerm("users_manage")) return;
+    if (renderMissing || storeMissing || storeCorrupt) return;
 
     // API-läge: respektera store lock/readOnly
     if (auth.mode === "api") {
@@ -616,8 +750,6 @@ Kontrakt:
     }
 
     // UI-läge: tillåt öppning även om store "laddar/readOnly"
-    if (storeCorrupt) return;
-
     if (window.FreezerModal && typeof window.FreezerModal.open === "function") {
       window.FreezerModal.open({
         title: "Skapa användare",
@@ -660,7 +792,7 @@ Kontrakt:
       }
     }
 
-    // 2) UI mode (FRZ_SESSION_V1) — matches index.html demo-login
+    // 2) UI mode (FRZ_SESSION_V1)
     const sess = readUiSession();
     const v = isUiSessionValid(sess);
     if (!v.ok) {
@@ -674,7 +806,7 @@ Kontrakt:
     auth.role = String(v.role || "—");
 
     // Admin gets demo perms
-    auth.perms = (String(v.role).toUpperCase() === "ADMIN")
+    auth.perms = String(v.role).toUpperCase() === "ADMIN"
       ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
       : ["view_dashboard"];
 
@@ -688,10 +820,13 @@ Kontrakt:
   // STORE INIT/SUBSCRIBE
   // -----------------------------
   function initStore() {
+    // P0: om store saknas -> stanna på sidan med fail-closed UI (ingen redirect-loop)
+    store = window.FreezerStore || null;
     if (!store || typeof store.init !== "function") {
-      redirectToLogin();
-      return false;
+      markBootMissing("store");
+      return true;
     }
+
     try {
       store.init({ role: auth.role || "ADMIN" });
       if (typeof store.setRole === "function") store.setRole(auth.role || "ADMIN");
@@ -707,9 +842,20 @@ Kontrakt:
       const s = getStore();
       if (s && typeof s.subscribe === "function") {
         s.subscribe((state) => {
-          window.FreezerRender.renderAll(state || {}, { itemsMsg: "—" });
-          window.FreezerRender.setActiveTabUI(activeTab);
+          if (!window.FreezerRender) {
+            markBootMissing("render");
+            return;
+          }
+          try {
+            window.FreezerRender.renderAll(state || {}, { itemsMsg: "—" });
+            window.FreezerRender.setActiveTabUI(activeTab);
+          } catch {
+            markBootMissing("render");
+            return;
+          }
+
           syncCreateUserTopbarBtn();
+          syncResetBtn();
           View.setHintForTab(activeTab);
           renderTopInOutIfDashboard(state || {});
         });
@@ -728,6 +874,8 @@ Kontrakt:
   }
 
   function onResetDemo() {
+    if (renderMissing || storeMissing || storeCorrupt) return;
+
     const status = safeGetStatus();
     if (status.locked || status.readOnly) return;
 
@@ -754,20 +902,29 @@ Kontrakt:
     const ok = await bootAuth();
     if (!ok) return;
 
-    const okStore = initStore();
-    if (!okStore) return;
+    // Tidig status
+    View.setStatus("Laddar…", true);
 
+    // Init store (fail-closed UI om den saknas)
+    initStore();
+
+    // Subscribe om möjligt
     subscribeStore();
+
+    // Render deterministiskt (eller fail-closed om render saknas)
     renderNow();
 
-    // Ensure button state is correct even if store never updates
+    // Säkra knappar även om store aldrig uppdaterar
     syncCreateUserTopbarBtn();
+    syncResetBtn();
   })();
 
   /* ÄNDRINGSLOGG (≤8)
-  1) UI-demo: "Skapa användare" låses inte av store-status (readOnly/laddar) i UI-läge.
-  2) API-läge: fortsatt strikt låsning via store-status + CSRF.
-  3) openCreateUser: UI-läge tillåter modal även om store säger readOnly (så länge store ej är korrupt).
-  4) Renare ansvar bibehållet: View=DOM, Controller=logik/state/events.
+  1) P0: Ingen redirect-loop om FreezerStore saknas → visa “Tekniskt fel” + read-only lockpanel.
+  2) P0: Ingen redirect-loop om FreezerRender saknas/krashar → visa “Tekniskt fel” + lås actions.
+  3) Fail-closed: disable reset/create vid boot-fel (store/render) och vid storage-corrupt.
+  4) Statuspill uppdateras (OK/Read-only/Tekniskt fel) utan console-loggning.
+  5) Beteende i normal drift oförändrat: auth + store + render + tabs + dashboard panel.
   */
 })();
+
