@@ -155,7 +155,8 @@ Taggar:
         firstName: "Plock",
         active: true,
         roleKey: "PICKER",
-        perms: { users_manage: false, inventory_write: true, history_write: true, dashboard_view: true },
+        // AUTOPATCH: synk mot store (PICKER = history_write, inte inventory_write)
+        perms: { users_manage: false, inventory_write: false, history_write: true, dashboard_view: true },
         audit: { createdAt: now, updatedAt: now, createdBy: "system", updatedBy: "system" }
       },
       {
