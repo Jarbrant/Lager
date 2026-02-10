@@ -243,27 +243,95 @@
     </div>
   </div>
 
-  <!-- Bas: core/contract/store måste in före render + controller -->
-  <script src="../UI/pages/freezer/02-core.js"></script>
-  <script src="../UI/pages/freezer/04-contract.js"></script>
-  <script src="../UI/pages/freezer/03-store.js"></script>
+  <!-- =========================================================
+       AO-P0-PATHFIX — Bootloader (fail-closed UI istället för blank sida)
+       - Provar ../, ../../, ../../../ för att hitta UI/...
+       - Laddar i deterministisk ordning
+  ========================================================== -->
+  <script>
+    (function () {
+      "use strict";
 
-  <!-- Render + dashboard helpers (måste finnas => annars redirectar controller) -->
-  <script src="../UI/freezer-render.js"></script>
-  <script src="../UI/freezer-dashboard.js"></script>
+      function byId(id) { try { return document.getElementById(id); } catch { return null; } }
 
-  <!-- Modal shell (om du har den) -->
-  <script src="../UI/pages/freezer/05-modal-shell.js"></script>
+      function showBootFail(msg) {
+        try {
+          var pill = byId("frzStatusText");
+          if (pill) pill.textContent = "Tekniskt fel";
+          var lp = byId("frzLockPanel");
+          var lr = byId("frzLockReason");
+          if (lp) lp.hidden = false;
+          if (lr) lr.textContent = String(msg || "Tekniskt fel: script kunde inte laddas.");
+        } catch {}
+      }
 
-  <!-- View-registry (moduler) -->
-  <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
-  <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
+      function loadScript(src, isModule) {
+        return new Promise(function (resolve, reject) {
+          var s = document.createElement("script");
+          s.src = src;
+          if (isModule) s.type = "module";
+          s.async = false; // viktigt för ordning
+          s.onload = function () { resolve(src); };
+          s.onerror = function () { reject(new Error("LOAD_FAIL: " + src)); };
+          document.head.appendChild(s);
+        });
+      }
 
-  <!-- Admin-vyer (moduler) -->
-  <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
-  <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
+      async function tryBase(base) {
+        // base är "", "../", "../../" etc.
+        var steps = [
+          { p: base + "UI/pages/freezer/02-core.js", m: false },
+          { p: base + "UI/pages/freezer/04-contract.js", m: false },
+          { p: base + "UI/pages/freezer/03-store.js", m: false },
 
-  <!-- Controller sist -->
-  <script src="./freezer.js"></script>
+          { p: base + "UI/freezer-render.js", m: false },
+          { p: base + "UI/freezer-dashboard.js", m: false },
+
+          { p: base + "UI/pages/freezer/05-modal-shell.js", m: false },
+
+          { p: base + "UI/pages/freezer/00-view-interface.js", m: true },
+          { p: base + "UI/pages/freezer/01-view-registry.js", m: true },
+
+          { p: base + "UI/pages/freezer/admin/admin-dashboard.js", m: true },
+          { p: base + "UI/pages/freezer/admin/admin-items.js", m: true }
+        ];
+
+        for (var i = 0; i < steps.length; i++) {
+          await loadScript(steps[i].p, steps[i].m);
+        }
+        return true;
+      }
+
+      (async function boot() {
+        // Snabb status
+        try {
+          var st = byId("frzStatusText");
+          if (st) st.textContent = "Laddar…";
+        } catch {}
+
+        var bases = ["../", "../../", "../../../", "./", ""];
+        var lastErr = null;
+
+        for (var i = 0; i < bases.length; i++) {
+          try {
+            await tryBase(bases[i]);
+            // När UI-libs finns, ladda controller (samma folder som html)
+            await loadScript("./freezer.js", false);
+            return;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+
+        showBootFail("Kunde inte ladda UI-scripts. " + (lastErr && lastErr.message ? lastErr.message : ""));
+      })();
+    })();
+  </script>
+
+  <!-- ÄNDRINGSLOGG (≤8)
+    1) P0: Ersatte hårdkodade ../UI-paths med bootloader som provar flera bas-paths (../, ../../, ../../../).
+    2) P0: Deterministisk script-ordning: core→contract→store→render/dashboard→modal→view-moduler→admin-moduler→controller.
+    3) P0: Fail-closed vid load-fel: visar “Tekniskt fel” i lockpanel istället för blank sida.
+  -->
 </body>
 </html>
