@@ -1,750 +1,773 @@
 /* ============================================================
-AO-REF-RENDER-01 | FIL: UI/freezer-render.js
-Projekt: Freezer (UI-only / localStorage-first)
+AO-SEC-01B (HYBRID) — UI koppling mot API (auth/me + CSRF + felkoder)
++ Fallback: UI-demo-session (FRZ_SESSION_V1) om API_BASE saknas
++ Renare ansvar: controller = logik/state, view(render) = DOM/render
+FIL: admin/freezer.js  (HEL FIL)
+Projekt: Freezer (UI GitHub Pages -> API Worker)
 
-Mål:
-- RENDER = endast render (DOM)
-- CONTROLLER = all logik/state/store (admin/freezer.js)
-- Render-filen får INTE läsa FreezerStore/FreezerDashboard och får INTE ha egen UI-state.
+Syfte:
+- Primärt: API-auth via /auth/me (cookie-session), CSRF i minne
+- Fallback: UI-only auth via FRZ_SESSION_V1 (sessionStorage/localStorage)
+- Fail-closed: om varken API-auth eller UI-session är OK -> redirect ../index.html
+
+Fix (UI-demo):
+- Skapa användare-knappen ska inte låsas av store-status i UI-läge.
+  (Store kan stå i readOnly/laddar → annars blir knappen alltid disabled.)
 
 Kontrakt:
-- window.FreezerRender.renderApp(vm)
-  - vm innehåller ALL data + ALL callbacks som behövs.
-- window.FreezerRender.setActiveTabUI(activeTab)
-
-Policy:
-- XSS-safe: textContent (ingen osäker innerHTML)
-- Fail-soft i render: tomt läge hellre än crash
-- Inga nya storage-keys/datamodell
+- Inga nya storage keys i UI
+- Inga console errors
+- Render ska inte innehålla businesslogik (controller styr)
 ============================================================ */
+
 (function () {
   "use strict";
 
-  const FreezerRender = {
-    renderApp,
-    setActiveTabUI
+  // -----------------------------
+  // CONFIG
+  // -----------------------------
+  const API_BASE =
+    (window.HR_CONFIG && window.HR_CONFIG.API_BASE) ||
+    (window.FREEZER_CONFIG && window.FREEZER_CONFIG.API_BASE) ||
+    "";
+
+  const PATH_LOGIN = "../index.html";
+  const UI_SESSION_KEY = "FRZ_SESSION_V1";
+
+  // -----------------------------
+  // INIT-GUARD
+  // -----------------------------
+  if (window.__FRZ_ADMIN_PAGE_INIT__) return;
+  window.__FRZ_ADMIN_PAGE_INIT__ = true;
+
+  // -----------------------------
+  // TINY HELPERS (no console)
+  // -----------------------------
+  function byId(id) { return document.getElementById(id); }
+  function safeNum(v, fallback) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
+  function safeJsonParse(raw) { try { return JSON.parse(raw); } catch { return null; } }
+
+  function redirectToLogin() {
+    try { window.location.replace(PATH_LOGIN); } catch {
+      try { window.location.href = PATH_LOGIN; } catch {}
+    }
+  }
+
+  function readUiSession() {
+    try {
+      const sRaw = (window.sessionStorage && window.sessionStorage.getItem(UI_SESSION_KEY)) || null;
+      if (sRaw) return safeJsonParse(sRaw);
+    } catch {}
+    try {
+      const lRaw = (window.localStorage && window.localStorage.getItem(UI_SESSION_KEY)) || null;
+      if (lRaw) return safeJsonParse(lRaw);
+    } catch {}
+    return null;
+  }
+
+  function isUiSessionValid(sess) {
+    try {
+      if (!sess || typeof sess !== "object") return { ok: false, reason: "NO_SESSION" };
+      const role = String(sess.role || "").toUpperCase().trim();
+      if (!role) return { ok: false, reason: "BAD_SESSION" };
+
+      const exp = Number(sess.exp || 0);
+      if (exp && Date.now() > exp) return { ok: false, reason: "EXPIRED" };
+
+      const firstName = String(sess.firstName || "").trim();
+      if (!firstName) return { ok: false, reason: "BAD_SESSION" };
+
+      return { ok: true, role, firstName };
+    } catch {
+      return { ok: false, reason: "BAD_SESSION" };
+    }
+  }
+
+  // -----------------------------
+  // VIEW (render-only)
+  // -----------------------------
+  const View = (function () {
+    const els = {
+      roleText: byId("frzRoleText"),
+      userNameText: byId("frzUserName"),
+      viewHint: byId("frzViewHint"),
+
+      resetBtn: byId("frzResetDemoBtn"),
+      openCreateUserBtn: byId("frzOpenCreateUserBtn"),
+
+      dashCards: byId("frzDashCards"),
+
+      tabDashboard: byId("tabDashboard"),
+      tabSaldo: byId("tabSaldo"),
+      tabHistorik: byId("tabHistorik"),
+
+      legacyClose: byId("frzUserModalCloseBtn"),
+      legacyCancel: byId("frzUserCancelBtn"),
+      legacyOverlay: byId("frzUserModalOverlay")
+    };
+
+    function setTopbarIdentity(role, name) {
+      if (els.roleText) els.roleText.textContent = String(role || "—");
+      if (els.userNameText) els.userNameText.textContent = String(name || "—");
+    }
+
+    function setViewHint(text) {
+      if (!els.viewHint) return;
+      els.viewHint.textContent = String(text || "—");
+    }
+
+    function setHintForTab(tabKey) {
+      const map = { dashboard: "Vy: Dashboard", saldo: "Vy: Saldo", history: "Vy: Historik" };
+      setViewHint(map[String(tabKey || "")] || "Vy: —");
+    }
+
+    function hardHide(node) {
+      try {
+        if (!node) return;
+        node.hidden = true;
+        node.setAttribute("aria-hidden", "true");
+        node.style.display = "none";
+        node.style.pointerEvents = "none";
+      } catch {}
+    }
+
+    function killAllOverlays() {
+      hardHide(els.legacyOverlay);
+      try {
+        const shell = document.querySelector('[data-frz-modal="overlay"]');
+        if (shell) hardHide(shell);
+      } catch {}
+      try {
+        document.querySelectorAll(".modalOverlay").forEach(hardHide);
+      } catch {}
+    }
+
+    function tryCloseShell() {
+      try {
+        if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
+          window.FreezerModal.close();
+        }
+      } catch {}
+    }
+
+    function closeAnyModal() {
+      tryCloseShell();
+      killAllOverlays();
+    }
+
+    function bootUnlock() {
+      tryCloseShell();
+      killAllOverlays();
+
+      let ticks = 0;
+      const t = setInterval(() => {
+        ticks++;
+        tryCloseShell();
+        killAllOverlays();
+        if (ticks > 50) clearInterval(t);
+      }, 100);
+
+      document.addEventListener("keydown", (ev) => {
+        if (ev && ev.key === "Escape") {
+          tryCloseShell();
+          killAllOverlays();
+        }
+      }, true);
+    }
+
+    function wireModalClose() {
+      if (els.legacyClose) els.legacyClose.addEventListener("click", closeAnyModal);
+      if (els.legacyCancel) els.legacyCancel.addEventListener("click", closeAnyModal);
+      if (els.legacyOverlay) {
+        els.legacyOverlay.addEventListener("click", (ev) => {
+          try { if (ev.target === els.legacyOverlay) closeAnyModal(); } catch {}
+        });
+      }
+    }
+
+    function wireTabs(onTab) {
+      function bind(btn, key) {
+        if (!btn) return;
+        btn.addEventListener("click", () => onTab(key));
+      }
+      bind(els.tabDashboard, "dashboard");
+      bind(els.tabSaldo, "saldo");
+      bind(els.tabHistorik, "history");
+    }
+
+    function wireButtons(handlers) {
+      if (els.openCreateUserBtn && handlers && handlers.onOpenCreateUser) {
+        els.openCreateUserBtn.addEventListener("click", handlers.onOpenCreateUser);
+      }
+      if (els.resetBtn && handlers && handlers.onResetDemo) {
+        els.resetBtn.addEventListener("click", handlers.onResetDemo);
+      }
+    }
+
+    function setCreateUserDisabled(disabled, title) {
+      if (!els.openCreateUserBtn) return;
+      els.openCreateUserBtn.disabled = !!disabled;
+      if (typeof title === "string") els.openCreateUserBtn.title = title;
+    }
+
+    // AO-02A panel render (pure DOM render)
+    function renderTopInOutPanel(args) {
+      try {
+        const dashCards = els.dashCards;
+        if (!dashCards) return;
+
+        const state = args.state || {};
+        const role = String(args.role || "ADMIN").toUpperCase().trim() || "ADMIN";
+        const topPeriodDays = safeNum(args.topPeriodDays, 30);
+        const onPickPeriod = typeof args.onPickPeriod === "function" ? args.onPickPeriod : function () {};
+
+        let panel = byId("frzTopInOutPanel");
+        if (!panel) {
+          panel = document.createElement("div");
+          panel.id = "frzTopInOutPanel";
+          panel.style.border = "1px solid #e6e6e6";
+          panel.style.borderRadius = "12px";
+          panel.style.padding = "12px";
+          panel.style.background = "#fff";
+          panel.style.marginBottom = "12px";
+          dashCards.insertBefore(panel, dashCards.firstChild);
+        } else {
+          if (panel.parentNode !== dashCards) dashCards.insertBefore(panel, dashCards.firstChild);
+          else if (dashCards.firstChild !== panel) dashCards.insertBefore(panel, dashCards.firstChild);
+        }
+
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+
+        const headRow = document.createElement("div");
+        headRow.style.display = "flex";
+        headRow.style.gap = "10px";
+        headRow.style.alignItems = "center";
+        headRow.style.flexWrap = "wrap";
+
+        const title = document.createElement("b");
+        title.textContent = "Top 10 IN/OUT";
+        headRow.appendChild(title);
+
+        const hint = document.createElement("span");
+        hint.style.opacity = ".75";
+        hint.style.fontSize = "13px";
+        hint.textContent = `Period: ${topPeriodDays} dagar`;
+        headRow.appendChild(hint);
+
+        const spacer = document.createElement("div");
+        spacer.style.flex = "1";
+        headRow.appendChild(spacer);
+
+        const btnWrap = document.createElement("div");
+        btnWrap.style.display = "inline-flex";
+        btnWrap.style.gap = "8px";
+        btnWrap.setAttribute("role", "group");
+        btnWrap.setAttribute("aria-label", "Välj period för topplistor");
+
+        function mkBtn(days) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = String(days);
+          b.style.border = "1px solid #e6e6e6";
+          b.style.background = "#fff";
+          b.style.borderRadius = "999px";
+          b.style.padding = "8px 12px";
+          b.style.cursor = "pointer";
+          b.style.fontSize = "14px";
+          b.setAttribute("aria-pressed", days === topPeriodDays ? "true" : "false");
+          if (days === topPeriodDays) b.style.fontWeight = "800";
+          b.addEventListener("click", () => onPickPeriod(days));
+          return b;
+        }
+
+        btnWrap.appendChild(mkBtn(7));
+        btnWrap.appendChild(mkBtn(30));
+        btnWrap.appendChild(mkBtn(90));
+        headRow.appendChild(btnWrap);
+        panel.appendChild(headRow);
+
+        const hr = document.createElement("div");
+        hr.style.height = "1px";
+        hr.style.background = "#eee";
+        hr.style.margin = "10px 0";
+        panel.appendChild(hr);
+
+        const dash = (window.FreezerDashboard && typeof window.FreezerDashboard.computeTopInOut === "function")
+          ? window.FreezerDashboard
+          : null;
+
+        if (!dash) {
+          const warn = document.createElement("div");
+          warn.style.opacity = ".75";
+          warn.textContent = "Top IN/OUT: FreezerDashboard saknas (ingen beräkning).";
+          panel.appendChild(warn);
+          return;
+        }
+
+        const res = dash.computeTopInOut(state, topPeriodDays) || { in: [], out: [], meta: {}, days: topPeriodDays };
+        const showIn = (role !== "PICKER");
+        const showOut = (role !== "BUYER");
+
+        const grid = document.createElement("div");
+        grid.style.display = "grid";
+        grid.style.gridTemplateColumns = "1fr";
+        grid.style.gap = "12px";
+        grid.style.marginTop = "8px";
+        if (window.matchMedia && window.matchMedia("(min-width: 900px)").matches) {
+          grid.style.gridTemplateColumns = (showIn && showOut) ? "1fr 1fr" : "1fr";
+        }
+
+        function renderTable(titleText, rows) {
+          const card = document.createElement("div");
+          card.style.border = "1px solid #e6e6e6";
+          card.style.borderRadius = "12px";
+          card.style.padding = "10px";
+          card.style.background = "#fafafa";
+
+          const t = document.createElement("b");
+          t.textContent = titleText;
+          card.appendChild(t);
+
+          const sub = document.createElement("div");
+          sub.style.opacity = ".75";
+          sub.style.fontSize = "12px";
+          sub.style.marginTop = "4px";
+          sub.textContent = `rader: ${Array.isArray(rows) ? rows.length : 0}`;
+          card.appendChild(sub);
+
+          const table = document.createElement("table");
+          table.style.width = "100%";
+          table.style.borderCollapse = "collapse";
+          table.style.marginTop = "8px";
+          table.setAttribute("aria-label", titleText);
+
+          const thead = document.createElement("thead");
+          const trh = document.createElement("tr");
+          const th1 = document.createElement("th"); th1.textContent = "Artikel"; th1.style.textAlign = "left"; th1.style.padding = "6px";
+          const th2 = document.createElement("th"); th2.textContent = "Qty"; th2.style.textAlign = "right"; th2.style.padding = "6px";
+          const th3 = document.createElement("th"); th3.textContent = "Antal"; th3.style.textAlign = "right"; th3.style.padding = "6px";
+          trh.appendChild(th1); trh.appendChild(th2); trh.appendChild(th3);
+          thead.appendChild(trh);
+          table.appendChild(thead);
+
+          const tbody = document.createElement("tbody");
+          const list = Array.isArray(rows) ? rows : [];
+
+          if (list.length === 0) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = 3;
+            td.style.padding = "10px 6px";
+            td.style.opacity = ".75";
+            td.textContent = "Inga träffar för perioden.";
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+          } else {
+            for (const r of list) {
+              const tr = document.createElement("tr");
+              tr.style.borderTop = "1px solid #eee";
+
+              const td1 = document.createElement("td");
+              td1.style.padding = "8px 6px";
+              td1.textContent = String((r && r.label) || "—");
+              tr.appendChild(td1);
+
+              const td2 = document.createElement("td");
+              td2.style.padding = "8px 6px";
+              td2.style.textAlign = "right";
+              td2.textContent = String(safeNum(r && r.qty, 0));
+              tr.appendChild(td2);
+
+              const td3 = document.createElement("td");
+              td3.style.padding = "8px 6px";
+              td3.style.textAlign = "right";
+              td3.textContent = String(safeNum(r && r.count, 0));
+              tr.appendChild(td3);
+
+              tbody.appendChild(tr);
+            }
+          }
+
+          table.appendChild(tbody);
+          card.appendChild(table);
+          return card;
+        }
+
+        if (showIn) grid.appendChild(renderTable("IN (Top 10)", res.in || []));
+        if (showOut) grid.appendChild(renderTable("OUT (Top 10)", res.out || []));
+
+        panel.appendChild(grid);
+
+        const meta = document.createElement("div");
+        meta.style.opacity = ".75";
+        meta.style.fontSize = "12px";
+        meta.style.marginTop = "10px";
+        const m = res.meta || {};
+        meta.textContent =
+          `moves: total=${safeNum(m.totalMoves, 0)} • used=${safeNum(m.usedMoves, 0)} • ignored=${safeNum(m.ignoredMoves, 0)} • roll=${role}`;
+        panel.appendChild(meta);
+      } catch {
+        // fail-soft
+      }
+    }
+
+    return {
+      els,
+      setTopbarIdentity,
+      setViewHint,
+      setHintForTab,
+      bootUnlock,
+      closeAnyModal,
+      wireModalClose,
+      wireTabs,
+      wireButtons,
+      setCreateUserDisabled,
+      renderTopInOutPanel
+    };
+  })();
+
+  // -----------------------------
+  // CONTROLLER STATE
+  // -----------------------------
+  let activeTab = "dashboard";
+  let topPeriodDays = 30;
+
+  const auth = {
+    ok: false,
+    userId: "",
+    role: "",
+    perms: [],
+    csrfToken: "",
+    mode: "none" // "api" | "ui"
   };
 
-  window.FreezerRender = FreezerRender;
-
-  // ------------------------------------------------------------
-  // PUBLIC
-  // ------------------------------------------------------------
-  function renderApp(vm) {
-    try {
-      const v = (vm && typeof vm === "object") ? vm : {};
-
-      // Tabs + views
-      setActiveTabUI(v.activeTab || "dashboard");
-
-      // Status / mode / lock / debug
-      renderStatus(v.status);
-      renderMode(v.mode);
-      renderLockPanel(v.lock);
-      renderDebug(v.debug);
-
-      // Dashboard cards (standard cards)
-      renderDashboard(v.dashboard);
-
-      // AO-02A: Top IN/OUT panel (dashboard)
-      renderTopInOut(v.topInOut);
-
-      // Users panel
-      renderUsersPanel(v.users);
-
-      // Items register (saldo view)
-      renderItemsRegister(v.items);
-
-      // History (historik view)
-      renderHistory(v.history);
-    } catch {
-      // fail-soft
-    }
+  function hasPerm(perm) {
+    const list = Array.isArray(auth.perms) ? auth.perms : [];
+    return list.includes(perm);
   }
 
-  function setActiveTabUI(activeTab) {
-    const tabDashboard = byId("tabDashboard");
-    const tabSaldo = byId("tabSaldo");
-    const tabHistorik = byId("tabHistorik");
+  // -----------------------------
+  // API CLIENT (controller)
+  // -----------------------------
+  async function apiFetch(path, opts) {
+    const base = (API_BASE || "").replace(/\/+$/, "");
+    const url = base + String(path || "");
+    const o = opts || {};
+    const headers = new Headers(o.headers || {});
+    headers.set("Accept", "application/json");
 
-    const viewDashboard = byId("viewDashboard");
-    const viewSaldo = byId("viewSaldo");
-    const viewHistorik = byId("viewHistorik");
+    const method = String(o.method || "GET").toUpperCase();
+    const isWrite = (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE");
 
-    const key = String(activeTab || "dashboard");
-
-    setTab(tabDashboard, key === "dashboard");
-    setTab(tabSaldo, key === "saldo");
-    setTab(tabHistorik, key === "history");
-
-    if (viewDashboard) viewDashboard.hidden = !(key === "dashboard");
-    if (viewSaldo) viewSaldo.hidden = !(key === "saldo");
-    if (viewHistorik) viewHistorik.hidden = !(key === "history");
-  }
-
-  // ------------------------------------------------------------
-  // STATUS / MODE / LOCK / DEBUG
-  // ------------------------------------------------------------
-  function renderStatus(st) {
-    const pill = byId("frzStatusPill");
-    const pillText = byId("frzStatusText");
-
-    const v = (st && typeof st === "object") ? st : {};
-    const label = safeText(v.label || "—");
-    const cls = safeText(v.className || "ok"); // "ok" | "danger"
-    const title = safeText(v.title || "");
-
-    if (pillText) pillText.textContent = label;
-
-    if (pill) {
-      pill.classList.remove("ok", "danger");
-      pill.classList.add(cls === "danger" ? "danger" : "ok");
-      pill.title = title || "";
-    }
-  }
-
-  function renderMode(mode) {
-    const modeText = byId("frzModeText");
-    const resetBtn = byId("frzResetDemoBtn");
-
-    const v = (mode && typeof mode === "object") ? mode : {};
-    const label = safeText(v.label || "—");
-
-    if (modeText) modeText.textContent = label;
-    if (resetBtn) resetBtn.disabled = !!v.disableReset;
-
-    // (valfritt) disable user modal controls om controller skickar det
-    const saveBtn = byId("frzUserSaveBtn");
-    const cancelBtn = byId("frzUserCancelBtn");
-    if (saveBtn) saveBtn.disabled = !!v.disableUserActions;
-    if (cancelBtn) cancelBtn.disabled = !!v.disableUserActions;
-
-    const fn = byId("frzUserFirstName");
-    if (fn) fn.disabled = !!v.disableUserActions;
-
-    ["perm_users_manage", "perm_inventory_write", "perm_history_write", "perm_dashboard_view"].forEach((id) => {
-      const el = byId(id);
-      if (el) el.disabled = !!v.disableUserActions;
-    });
-  }
-
-  function renderLockPanel(lock) {
-    const lockPanel = byId("frzLockPanel");
-    const lockReason = byId("frzLockReason");
-
-    const v = (lock && typeof lock === "object") ? lock : {};
-    const locked = !!v.locked;
-
-    if (!lockPanel || !lockReason) return;
-
-    if (locked) {
-      lockPanel.hidden = false;
-      lockReason.textContent = safeText(v.reason || "Orsak: —");
-    } else {
-      lockPanel.hidden = true;
-      lockReason.textContent = "Orsak: —";
-    }
-  }
-
-  function renderDebug(debug) {
-    const panel = byId("frzDebugPanel");
-    const text = byId("frzDebugText");
-    if (!panel || !text) return;
-
-    const v = (debug && typeof debug === "object") ? debug : {};
-    const show = !!v.show;
-
-    panel.hidden = !show;
-    text.textContent = safeText(v.text || "—");
-  }
-
-  // ------------------------------------------------------------
-  // DASHBOARD (standard cards)
-  // ------------------------------------------------------------
-  function renderDashboard(dash) {
-    const cards = byId("frzDashCards");
-    const notes = byId("frzDashNotes");
-    if (!cards || !notes) return;
-
-    const v = (dash && typeof dash === "object") ? dash : {};
-    const list = Array.isArray(v.cards) ? v.cards : [];
-
-    // OBS: Dashboard kan innehålla andra paneler (t.ex TopInOut) som controller vill behålla.
-    // För att inte radera dem, renderar vi bara om controller uttryckligen säger "replace".
-    const replace = ("replace" in v) ? !!v.replace : true;
-
-    if (replace) cards.textContent = "";
-
-    // Render cards efter ev. befintliga paneler
-    // (Controller kan sätta replace=false om den vill styra ordningen.)
-    if (list.length) {
-      list.forEach((c) => {
-        cards.appendChild(renderCard(c));
-      });
+    if (isWrite) {
+      if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json; charset=utf-8");
+      if (auth.csrfToken) headers.set("X-CSRF", auth.csrfToken);
     }
 
-    notes.textContent = safeText(v.notes || "—");
-  }
-
-  function renderCard(c) {
-    const card = document.createElement("div");
-    card.className = "panel";
-    card.style.background = "#fafafa";
-
-    const t = document.createElement("div");
-    t.className = "muted";
-    t.textContent = safeText(c && c.title);
-
-    const v = document.createElement("div");
-    v.style.fontSize = "20px";
-    v.style.fontWeight = "800";
-    v.style.marginTop = "6px";
-    v.textContent = safeText(c && c.value);
-
-    card.appendChild(t);
-    card.appendChild(v);
-    return card;
-  }
-
-  // ------------------------------------------------------------
-  // AO-02A: TOP IN/OUT PANEL (render-only)
-  // ------------------------------------------------------------
-  function renderTopInOut(top) {
-    const dashCards = byId("frzDashCards");
-    if (!dashCards) return;
-
-    const v = (top && typeof top === "object") ? top : {};
-    if (!v.visible) {
-      // om panelen finns sedan tidigare, göm den
-      const existing = byId("frzTopInOutPanel");
-      if (existing) existing.hidden = true;
-      return;
-    }
-
-    let panel = byId("frzTopInOutPanel");
-    if (!panel) {
-      panel = document.createElement("div");
-      panel.id = "frzTopInOutPanel";
-      panel.style.border = "1px solid #e6e6e6";
-      panel.style.borderRadius = "12px";
-      panel.style.padding = "12px";
-      panel.style.background = "#fff";
-      panel.style.marginBottom = "12px";
-      dashCards.insertBefore(panel, dashCards.firstChild);
-    } else {
-      panel.hidden = false;
-      if (panel.parentNode !== dashCards) dashCards.insertBefore(panel, dashCards.firstChild);
-      else if (dashCards.firstChild !== panel) dashCards.insertBefore(panel, dashCards.firstChild);
-    }
-
-    panel.textContent = "";
-
-    const headRow = document.createElement("div");
-    headRow.style.display = "flex";
-    headRow.style.gap = "10px";
-    headRow.style.alignItems = "center";
-    headRow.style.flexWrap = "wrap";
-
-    const title = document.createElement("b");
-    title.textContent = safeText(v.title || "Top 10 IN/OUT");
-    headRow.appendChild(title);
-
-    const hint = document.createElement("span");
-    hint.style.opacity = ".75";
-    hint.style.fontSize = "13px";
-    hint.textContent = safeText(v.hint || "");
-    headRow.appendChild(hint);
-
-    const spacer = document.createElement("div");
-    spacer.style.flex = "1";
-    headRow.appendChild(spacer);
-
-    const btnWrap = document.createElement("div");
-    btnWrap.style.display = "inline-flex";
-    btnWrap.style.gap = "8px";
-    btnWrap.setAttribute("role", "group");
-    btnWrap.setAttribute("aria-label", "Välj period för topplistor");
-
-    const buttons = Array.isArray(v.periodButtons) ? v.periodButtons : [7, 30, 90];
-    buttons.forEach((days) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "btn"; // använder din befintliga knappstil om den finns
-      b.textContent = String(days);
-      b.style.borderRadius = "999px";
-      b.setAttribute("aria-pressed", String(days) === String(v.periodDays) ? "true" : "false");
-      b.disabled = !!v.locked;
-      b.addEventListener("click", () => {
-        try {
-          if (v.handlers && typeof v.handlers.onPeriodChange === "function") {
-            v.handlers.onPeriodChange(days);
-          }
-        } catch {}
-      });
-      btnWrap.appendChild(b);
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: o.body,
+      credentials: "include"
     });
 
-    headRow.appendChild(btnWrap);
-    panel.appendChild(headRow);
-
-    const hr = document.createElement("div");
-    hr.style.height = "1px";
-    hr.style.background = "#eee";
-    hr.style.margin = "10px 0";
-    panel.appendChild(hr);
-
-    const grid = document.createElement("div");
-    grid.style.display = "grid";
-    grid.style.gridTemplateColumns = "1fr";
-    grid.style.gap = "12px";
-    grid.style.marginTop = "8px";
+    const requestId = res.headers.get("X-Request-Id") || "";
+    let data = null;
 
     try {
-      if (window.matchMedia && window.matchMedia("(min-width: 900px)").matches) {
-        const two = !!v.showIn && !!v.showOut;
-        grid.style.gridTemplateColumns = two ? "1fr 1fr" : "1fr";
-      }
+      const txt = await res.text();
+      data = txt ? safeJsonParse(txt) : null;
     } catch {}
 
-    if (v.showIn) grid.appendChild(renderTopTable("IN (Top 10)", v.inRows));
-    if (v.showOut) grid.appendChild(renderTopTable("OUT (Top 10)", v.outRows));
-
-    panel.appendChild(grid);
-
-    if (v.metaText) {
-      const meta = document.createElement("div");
-      meta.style.opacity = ".75";
-      meta.style.fontSize = "12px";
-      meta.style.marginTop = "10px";
-      meta.textContent = safeText(v.metaText);
-      panel.appendChild(meta);
-    }
-  }
-
-  function renderTopTable(titleText, rows) {
-    const card = document.createElement("div");
-    card.style.border = "1px solid #e6e6e6";
-    card.style.borderRadius = "12px";
-    card.style.padding = "10px";
-    card.style.background = "#fafafa";
-
-    const t = document.createElement("b");
-    t.textContent = safeText(titleText);
-    card.appendChild(t);
-
-    const list = Array.isArray(rows) ? rows : [];
-
-    const sub = document.createElement("div");
-    sub.style.opacity = ".75";
-    sub.style.fontSize = "12px";
-    sub.style.marginTop = "4px";
-    sub.textContent = `rader: ${list.length}`;
-    card.appendChild(sub);
-
-    const table = document.createElement("table");
-    table.style.width = "100%";
-    table.style.borderCollapse = "collapse";
-    table.style.marginTop = "8px";
-    table.setAttribute("aria-label", safeText(titleText));
-
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    const th1 = document.createElement("th"); th1.textContent = "Artikel"; th1.style.textAlign = "left"; th1.style.padding = "6px";
-    const th2 = document.createElement("th"); th2.textContent = "Qty"; th2.style.textAlign = "right"; th2.style.padding = "6px";
-    const th3 = document.createElement("th"); th3.textContent = "Antal"; th3.style.textAlign = "right"; th3.style.padding = "6px";
-    trh.appendChild(th1); trh.appendChild(th2); trh.appendChild(th3);
-    thead.appendChild(trh);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-
-    if (!list.length) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 3;
-      td.style.padding = "10px 6px";
-      td.style.opacity = ".75";
-      td.textContent = "Inga träffar för perioden.";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    } else {
-      list.forEach((r) => {
-        const tr = document.createElement("tr");
-        tr.style.borderTop = "1px solid #eee";
-
-        const td1 = document.createElement("td");
-        td1.style.padding = "8px 6px";
-        td1.textContent = safeText(r && r.label);
-        tr.appendChild(td1);
-
-        const td2 = document.createElement("td");
-        td2.style.padding = "8px 6px";
-        td2.style.textAlign = "right";
-        td2.textContent = safeText(r && r.qty);
-        tr.appendChild(td2);
-
-        const td3 = document.createElement("td");
-        td3.style.padding = "8px 6px";
-        td3.style.textAlign = "right";
-        td3.textContent = safeText(r && r.count);
-        tr.appendChild(td3);
-
-        tbody.appendChild(tr);
-      });
+    if (!res.ok) {
+      throw {
+        status: res.status,
+        errorCode: (data && data.errorCode) || "API_ERROR",
+        message: (data && (data.message || data.error)) || "API error",
+        requestId: (data && data.requestId) || requestId || ""
+      };
     }
 
-    table.appendChild(tbody);
-    card.appendChild(table);
-    return card;
+    return { data: data || {}, requestId };
   }
 
-  // ------------------------------------------------------------
-  // USERS PANEL (render-only)
-  // ------------------------------------------------------------
-  function renderUsersPanel(usersVm) {
-    const panel = byId("frzUsersPanel");
-    const list = byId("frzUsersList");
-    const count = byId("frzUsersCount");
-    if (!panel) return;
+  function apiMe() { return apiFetch("/auth/me", { method: "GET" }); }
 
-    const v = (usersVm && typeof usersVm === "object") ? usersVm : {};
-    panel.hidden = !v.visible;
-    if (panel.hidden) return;
-
-    const rows = Array.isArray(v.rows) ? v.rows : [];
-
-    if (count) count.textContent = String(rows.length);
-    if (!list) return;
-
-    list.textContent = "";
-
-    rows.forEach((u) => {
-      const row = document.createElement("div");
-      row.className = "userRow";
-
-      const name = document.createElement("div");
-      name.className = "name";
-      name.textContent = safeText(u && u.firstName);
-
-      const meta = document.createElement("div");
-      meta.className = "meta muted";
-      meta.textContent = safeText(u && u.meta);
-
-      const spacer = document.createElement("div");
-      spacer.className = "spacer";
-
-      const badge = document.createElement("span");
-      badge.className = "badge" + ((u && u.active) ? "" : " off");
-      badge.textContent = (u && u.active) ? "ACTIVE" : "INACTIVE";
-
-      const btnEdit = document.createElement("button");
-      btnEdit.className = "btn";
-      btnEdit.type = "button";
-      btnEdit.textContent = "Redigera";
-      btnEdit.disabled = !!v.locked;
-      btnEdit.addEventListener("click", () => {
-        try {
-          v.handlers && v.handlers.onEdit && v.handlers.onEdit(safeText(u && u.id));
-        } catch {}
-      });
-
-      const btnToggle = document.createElement("button");
-      btnToggle.className = "btn";
-      btnToggle.type = "button";
-      btnToggle.textContent = (u && u.active) ? "Inaktivera" : "Aktivera";
-      btnToggle.disabled = !!v.locked;
-      btnToggle.addEventListener("click", () => {
-        try {
-          v.handlers && v.handlers.onToggleActive && v.handlers.onToggleActive(safeText(u && u.id));
-        } catch {}
-      });
-
-      row.appendChild(name);
-      row.appendChild(meta);
-      row.appendChild(spacer);
-      row.appendChild(badge);
-      row.appendChild(btnEdit);
-      row.appendChild(btnToggle);
-
-      list.appendChild(row);
-    });
+  // -----------------------------
+  // STORE GUARDS (controller)
+  // -----------------------------
+  if (!window.FreezerRender) {
+    redirectToLogin();
+    return;
   }
 
-  // ------------------------------------------------------------
-  // ITEMS REGISTER (render-only, all state + actions via vm)
-  // ------------------------------------------------------------
-  function renderItemsRegister(itemsVm) {
-    const wrap = byId("frzSaldoTableWrap");
-    const count = byId("frzSaldoCount");
-    if (!wrap || !count) return;
+  let store = window.FreezerStore || null;
+  let storeCorrupt = false;
 
-    const v = (itemsVm && typeof itemsVm === "object") ? itemsVm : {};
-    wrap.textContent = "";
-    count.textContent = String(v.count || 0);
+  const storeShim = {
+    init: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    setRole: function () {},
+    subscribe: function () { return function () {}; },
+    getState: function () { return {}; },
+    getStatus: function () {
+      return { role: auth.role || "—", locked: false, readOnly: true, whyReadOnly: "Read-only: init-fel.", reason: "Storage error" };
+    },
+    can: function () { return false; },
+    hasPerm: function () { return false; },
+    resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    listUsers: function () { return []; },
+    createUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    updateUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    setUserActive: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    listItems: function () { return []; }
+  };
 
-    if (!v.visible) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Saldo/Produkter är inte tillgängligt i denna roll eller i låst läge.";
-      wrap.appendChild(d);
-      return;
-    }
+  function getStore() { return storeCorrupt ? storeShim : store; }
 
-    // Controller kan välja att rendera exakt UI senare.
-    // Här lämnar vi en minimal “placeholder” så sidan inte kraschar.
-    if (v.placeholderText) {
-      const p = document.createElement("div");
-      p.className = "muted";
-      p.textContent = safeText(v.placeholderText);
-      wrap.appendChild(p);
-      return;
-    }
-
-    // Om controller skickar en färdig DOM-bygg-VM kan ni fylla på här senare.
-    // (För att hålla leveransen ren och stabil: inget mer utan att controller är uppdaterad.)
+  function markStoreCorrupt() {
+    storeCorrupt = true;
+    View.setViewHint("Read-only: storage fel.");
   }
 
-  // ------------------------------------------------------------
-  // HISTORY (render-only)
-  // ------------------------------------------------------------
-  function renderHistory(histVm) {
-    const root = byId("frzHistoryList");
-    const count = byId("frzHistoryCount");
-    if (!root || !count) return;
-
-    const v = (histVm && typeof histVm === "object") ? histVm : {};
-    root.textContent = "";
-
-    if (!v.visible) {
-      count.textContent = "0";
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Historik är inte tillgänglig.";
-      root.appendChild(d);
-      return;
-    }
-
-    const locked = !!v.locked;
-    const filter = (v.filter && typeof v.filter === "object") ? v.filter : { from: "", to: "", type: "ALL", q: "" };
-    const rows = Array.isArray(v.rows) ? v.rows : [];
-
-    count.textContent = String(v.count != null ? v.count : rows.length);
-
-    const wrap = document.createElement("div");
-    wrap.className = "list";
-
-    wrap.appendChild(renderHistoryFilterBar(filter, locked, v.handlers));
-    wrap.appendChild(renderHistoryList(rows));
-
-    root.appendChild(wrap);
-  }
-
-  function renderHistoryFilterBar(filter, locked, handlers) {
-    const bar = document.createElement("div");
-    bar.className = "row";
-    bar.style.marginBottom = "10px";
-
-    const fromLabel = pillDate("Från", "frzHistFrom", filter.from, locked, (val) => {
-      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { from: val }));
-    });
-
-    const toLabel = pillDate("Till", "frzHistTo", filter.to, locked, (val) => {
-      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { to: val }));
-    });
-
-    const typeLabel = pillSelect("Typ", "frzHistType", [
-      { v: "ALL", t: "Alla" },
-      { v: "IN", t: "IN" },
-      { v: "OUT", t: "OUT" }
-    ], filter.type, locked, (val) => {
-      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { type: val || "ALL" }));
-    });
-
-    const qLabel = pillText("Artikel", "frzHistQ", filter.q, "t.ex. FZ-010 / kyckling", locked, (val) => {
-      safeCall(handlers, "onFilterChange", Object.assign({}, filter, { q: val }));
-    });
-
-    const spacer = document.createElement("div");
-    spacer.className = "spacer";
-
-    const btnClear = document.createElement("button");
-    btnClear.className = "btn";
-    btnClear.type = "button";
-    btnClear.textContent = "Rensa";
-    btnClear.disabled = locked;
-    btnClear.addEventListener("click", () => {
-      safeCall(handlers, "onClear");
-    });
-
-    const hint = document.createElement("span");
-    hint.className = "muted";
-    hint.style.fontSize = "13px";
-    hint.textContent = safeText((handlers && handlers.hintText) || "Filter: datum (inklusive), typ och artikel (case-insensitiv).");
-
-    bar.appendChild(fromLabel);
-    bar.appendChild(toLabel);
-    bar.appendChild(typeLabel);
-    bar.appendChild(qLabel);
-    bar.appendChild(spacer);
-    bar.appendChild(btnClear);
-    bar.appendChild(hint);
-
-    return bar;
-  }
-
-  function renderHistoryList(rows) {
-    if (!rows.length) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Ingen historik ännu (eller inga träffar).";
-      return d;
-    }
-
-    const list = document.createElement("div");
-    list.className = "list";
-
-    rows.forEach((h) => {
-      const row = document.createElement("div");
-      row.className = "userRow";
-
-      const left = document.createElement("div");
-      left.className = "meta";
-      left.textContent = safeText(h && h.left);
-
-      const note = document.createElement("div");
-      note.className = "muted";
-      note.textContent = safeText(h && h.note);
-
-      const by = document.createElement("span");
-      by.className = "badge";
-      by.textContent = safeText(h && h.badge);
-
-      row.appendChild(left);
-      row.appendChild(note);
-      row.appendChild(by);
-
-      list.appendChild(row);
-    });
-
-    return list;
-  }
-
-  // ------------------------------------------------------------
-  // SMALL UI CONTROLS (render-only)
-  // ------------------------------------------------------------
-  function pillDate(label, id, value, disabled, onChange) {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const inp = document.createElement("input");
-    inp.id = id;
-    inp.type = "date";
-    inp.value = safeText(value || "");
-    inp.disabled = !!disabled;
-    inp.addEventListener("change", () => {
-      try { onChange && onChange(inp.value || ""); } catch {}
-    });
-
-    wrap.appendChild(muted);
-    wrap.appendChild(inp);
-    return wrap;
-  }
-
-  function pillText(label, id, value, placeholder, disabled, onInput) {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const inp = document.createElement("input");
-    inp.id = id;
-    inp.type = "text";
-    inp.value = safeText(value || "");
-    inp.placeholder = safeText(placeholder || "");
-    inp.maxLength = 64;
-    inp.disabled = !!disabled;
-    inp.addEventListener("input", () => {
-      try { onInput && onInput(inp.value || ""); } catch {}
-    });
-
-    wrap.appendChild(muted);
-    wrap.appendChild(inp);
-    return wrap;
-  }
-
-  function pillSelect(label, id, options, selected, disabled, onChange) {
-    const wrap = document.createElement("label");
-    wrap.className = "pill";
-    wrap.setAttribute("for", id);
-
-    const muted = document.createElement("span");
-    muted.className = "muted";
-    muted.textContent = `${label}:`;
-
-    const sel = document.createElement("select");
-    sel.id = id;
-    sel.disabled = !!disabled;
-
-    (options || []).forEach((o) => {
-      const opt = document.createElement("option");
-      opt.value = safeText(o && o.v);
-      opt.textContent = safeText(o && o.t);
-      sel.appendChild(opt);
-    });
-
-    sel.value = safeText(selected || "");
-    sel.addEventListener("change", () => {
-      try { onChange && onChange(sel.value || ""); } catch {}
-    });
-
-    wrap.appendChild(muted);
-    wrap.appendChild(sel);
-    return wrap;
-  }
-
-  function setTab(btn, selected) {
-    if (!btn) return;
-    btn.setAttribute("aria-selected", selected ? "true" : "false");
-  }
-
-  // ------------------------------------------------------------
-  // HELPERS
-  // ------------------------------------------------------------
-  function byId(id) {
-    return document.getElementById(id);
-  }
-
-  function safeText(v) {
-    if (v === null || typeof v === "undefined") return "";
-    return String(v);
-  }
-
-  function safeCall(obj, fnName /*, ...args */) {
+  function safeGetState() {
     try {
-      if (!obj) return;
-      const fn = obj[fnName];
-      if (typeof fn !== "function") return;
-      const args = Array.prototype.slice.call(arguments, 2);
-      fn.apply(null, args);
+      const s = getStore();
+      return (s && typeof s.getState === "function") ? s.getState() : {};
     } catch {
-      // fail-soft
+      markStoreCorrupt();
+      return {};
     }
   }
 
-  /* ============================================================
-  ÄNDRINGSLOGG (≤8)
-  1) Refactor: Render-filen är nu render-only (ingen store/dashboard/state).
-  2) Ny API: renderApp(vm) tar all data + callbacks från controller.
-  3) Top IN/OUT panel renderas via vm.topInOut + handler onPeriodChange.
-  4) History filter renderas via vm.history + callbacks onFilterChange/onClear.
-  5) XSS-safe: textContent överallt, fail-soft render.
-  ============================================================ */
+  function safeGetStatus() {
+    try {
+      const s = getStore();
+      return (s && typeof s.getStatus === "function") ? s.getStatus() : storeShim.getStatus();
+    } catch {
+      markStoreCorrupt();
+      return storeShim.getStatus();
+    }
+  }
+
+  // -----------------------------
+  // CONTROLLER -> VIEW
+  // -----------------------------
+  function syncCreateUserTopbarBtn() {
+    // UI-läge: lås INTE knappen p.g.a. store-status (den kan stå i "laddar/readOnly").
+    // API-läge: strikt (locked/readOnly låser).
+    const status = safeGetStatus();
+
+    const hasUsersManage = hasPerm("users_manage");
+    const blockedByStore = (auth.mode === "api") ? (!!status.locked || !!status.readOnly) : false;
+
+    const disabled = !hasUsersManage || storeCorrupt || blockedByStore;
+
+    let title = "Skapa ny användare";
+    if (disabled) {
+      if (!hasUsersManage) title = "Saknar behörighet (users_manage).";
+      else if (storeCorrupt) title = "Read-only: storage fel.";
+      else if (blockedByStore) {
+        if (status.locked) title = status.reason ? `Låst: ${status.reason}` : "Låst läge.";
+        else title = status.whyReadOnly || "Read-only.";
+      }
+    }
+
+    View.setCreateUserDisabled(disabled, title);
+  }
+
+  function effectiveRoleForDashboard() {
+    const st = safeGetStatus();
+    const r = String((st && st.role) || auth.role || "ADMIN").toUpperCase().trim();
+    return r || "ADMIN";
+  }
+
+  function renderTopInOutIfDashboard(state) {
+    if (activeTab !== "dashboard") return;
+    View.renderTopInOutPanel({
+      state: state || {},
+      role: effectiveRoleForDashboard(),
+      topPeriodDays,
+      onPickPeriod: (days) => {
+        topPeriodDays = days;
+        renderNow();
+      }
+    });
+  }
+
+  function renderNow() {
+    const st = safeGetState();
+    window.FreezerRender.renderAll(st, { itemsMsg: "—" });
+    window.FreezerRender.setActiveTabUI(activeTab);
+    syncCreateUserTopbarBtn();
+    View.setHintForTab(activeTab);
+    renderTopInOutIfDashboard(st);
+  }
+
+  // -----------------------------
+  // MODAL OPEN (controller)
+  // -----------------------------
+  function openCreateUser() {
+    if (!hasPerm("users_manage")) return;
+
+    // API-läge: respektera store lock/readOnly
+    if (auth.mode === "api") {
+      const status = safeGetStatus();
+      if (status.locked || status.readOnly) return;
+    }
+
+    // UI-läge: tillåt öppning även om store "laddar/readOnly"
+    if (storeCorrupt) return;
+
+    if (window.FreezerModal && typeof window.FreezerModal.open === "function") {
+      window.FreezerModal.open({
+        title: "Skapa användare",
+        text: "Modal-shell är aktiv. Koppla in formulär-render här i nästa steg."
+      });
+      return;
+    }
+
+    const legacy = View.els.legacyOverlay;
+    if (!legacy) return;
+
+    legacy.hidden = false;
+    legacy.style.display = "flex";
+    legacy.style.pointerEvents = "auto";
+    legacy.setAttribute("aria-hidden", "false");
+  }
+
+  // -----------------------------
+  // AUTH BOOT (API first, fallback UI-session)
+  // -----------------------------
+  async function bootAuth() {
+    // 1) API mode if configured
+    if (API_BASE) {
+      try {
+        const { data } = await apiMe();
+        if (data && data.ok && data.user) {
+          const u = data.user || {};
+          auth.ok = true;
+          auth.mode = "api";
+          auth.userId = String(u.userId || "");
+          auth.role = String(u.role || "");
+          auth.perms = Array.isArray(u.perms) ? u.perms : [];
+          auth.csrfToken = String(u.csrfToken || u.csrf || "");
+
+          View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
+          return true;
+        }
+      } catch {
+        // fall through to UI mode
+      }
+    }
+
+    // 2) UI mode (FRZ_SESSION_V1) — matches index.html demo-login
+    const sess = readUiSession();
+    const v = isUiSessionValid(sess);
+    if (!v.ok) {
+      redirectToLogin();
+      return false;
+    }
+
+    auth.ok = true;
+    auth.mode = "ui";
+    auth.userId = String(v.firstName || "—");
+    auth.role = String(v.role || "—");
+
+    // Admin gets demo perms
+    auth.perms = (String(v.role).toUpperCase() === "ADMIN")
+      ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
+      : ["view_dashboard"];
+
+    auth.csrfToken = "";
+
+    View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
+    return true;
+  }
+
+  // -----------------------------
+  // STORE INIT/SUBSCRIBE
+  // -----------------------------
+  function initStore() {
+    if (!store || typeof store.init !== "function") {
+      redirectToLogin();
+      return false;
+    }
+    try {
+      store.init({ role: auth.role || "ADMIN" });
+      if (typeof store.setRole === "function") store.setRole(auth.role || "ADMIN");
+      return true;
+    } catch {
+      markStoreCorrupt();
+      return true;
+    }
+  }
+
+  function subscribeStore() {
+    try {
+      const s = getStore();
+      if (s && typeof s.subscribe === "function") {
+        s.subscribe((state) => {
+          window.FreezerRender.renderAll(state || {}, { itemsMsg: "—" });
+          window.FreezerRender.setActiveTabUI(activeTab);
+          syncCreateUserTopbarBtn();
+          View.setHintForTab(activeTab);
+          renderTopInOutIfDashboard(state || {});
+        });
+      }
+    } catch {
+      markStoreCorrupt();
+    }
+  }
+
+  // -----------------------------
+  // EVENTS (controller)
+  // -----------------------------
+  function onTabChange(key) {
+    activeTab = key;
+    renderNow();
+  }
+
+  function onResetDemo() {
+    const status = safeGetStatus();
+    if (status.locked || status.readOnly) return;
+
+    const s = getStore();
+    try { if (s && typeof s.resetDemo === "function") s.resetDemo(); } catch { markStoreCorrupt(); }
+
+    View.closeAnyModal();
+    renderNow();
+  }
+
+  // -----------------------------
+  // MAIN BOOT
+  // -----------------------------
+  (async function main() {
+    View.bootUnlock();
+    View.wireModalClose();
+
+    View.wireTabs(onTabChange);
+    View.wireButtons({
+      onOpenCreateUser: openCreateUser,
+      onResetDemo: onResetDemo
+    });
+
+    const ok = await bootAuth();
+    if (!ok) return;
+
+    const okStore = initStore();
+    if (!okStore) return;
+
+    subscribeStore();
+    renderNow();
+
+    // Ensure button state is correct even if store never updates
+    syncCreateUserTopbarBtn();
+  })();
+
+  /* ÄNDRINGSLOGG (≤8)
+  1) UI-demo: "Skapa användare" låses inte av store-status (readOnly/laddar) i UI-läge.
+  2) API-läge: fortsatt strikt låsning via store-status + CSRF.
+  3) openCreateUser: UI-läge tillåter modal även om store säger readOnly (så länge store ej är korrupt).
+  4) Renare ansvar bibehållet: View=DOM, Controller=logik/state/events.
+  */
 })();
