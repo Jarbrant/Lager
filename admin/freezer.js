@@ -1,14 +1,23 @@
-
 /* ============================================================
-AO-SEC-01B (HYBRID) — admin/freezer.js (HEL FIL)
-Fixar:
-- Stabil auth-boot: API-mode endast om API_BASE ser ut som riktig URL (http/https).
-- UI-mode (FRZ_SESSION_V1) blir alltid fallback utan “kastas ut”.
-- “Skapa användare” knappen blir klickbar för ADMIN i UI-mode även om store råkar säga readOnly.
-  (Modal kan öppnas; själva save-logik kan kopplas i nästa steg.)
-Policy:
-- Inga nya storage keys
-- XSS-safe (ingen osäker innerHTML)
+AO-SEC-01B (HYBRID) — UI koppling mot API (auth/me + CSRF + felkoder)
++ Fallback: UI-demo-session (FRZ_SESSION_V1) om API_BASE saknas
++ Renare ansvar: controller = logik/state, view(render) = DOM/render
+FIL: admin/freezer.js  (HEL FIL)
+Projekt: Freezer (UI GitHub Pages -> API Worker)
+
+Syfte:
+- Primärt: API-auth via /auth/me (cookie-session), CSRF i minne
+- Fallback: UI-only auth via FRZ_SESSION_V1 (sessionStorage/localStorage)
+- Fail-closed: om varken API-auth eller UI-session är OK -> redirect ../index.html
+
+Fix (UI-demo):
+- Skapa användare-knappen ska inte låsas av store-status i UI-läge.
+  (Store kan stå i readOnly/laddar → annars blir knappen alltid disabled.)
+
+Kontrakt:
+- Inga nya storage keys i UI
+- Inga console errors
+- Render ska inte innehålla businesslogik (controller styr)
 ============================================================ */
 
 (function () {
@@ -17,12 +26,11 @@ Policy:
   // -----------------------------
   // CONFIG
   // -----------------------------
-  const RAW_API_BASE =
+  const API_BASE =
     (window.HR_CONFIG && window.HR_CONFIG.API_BASE) ||
     (window.FREEZER_CONFIG && window.FREEZER_CONFIG.API_BASE) ||
     "";
 
-  const API_BASE = String(RAW_API_BASE || "").trim(); // kan vara "" i UI-only
   const PATH_LOGIN = "../index.html";
   const UI_SESSION_KEY = "FRZ_SESSION_V1";
 
@@ -33,7 +41,7 @@ Policy:
   window.__FRZ_ADMIN_PAGE_INIT__ = true;
 
   // -----------------------------
-  // TINY HELPERS (no console spam)
+  // TINY HELPERS (no console)
   // -----------------------------
   function byId(id) { return document.getElementById(id); }
   function safeNum(v, fallback) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
@@ -73,11 +81,6 @@ Policy:
     } catch {
       return { ok: false, reason: "BAD_SESSION" };
     }
-  }
-
-  function isProbablyHttpUrl(s) {
-    const v = String(s || "").trim();
-    return /^https?:\/\//i.test(v);
   }
 
   // -----------------------------
@@ -134,7 +137,9 @@ Policy:
         const shell = document.querySelector('[data-frz-modal="overlay"]');
         if (shell) hardHide(shell);
       } catch {}
-      try { document.querySelectorAll(".modalOverlay").forEach(hardHide); } catch {}
+      try {
+        document.querySelectorAll(".modalOverlay").forEach(hardHide);
+      } catch {}
     }
 
     function tryCloseShell() {
@@ -445,7 +450,7 @@ Policy:
   // API CLIENT (controller)
   // -----------------------------
   async function apiFetch(path, opts) {
-    const base = String(API_BASE || "").replace(/\/+$/, "");
+    const base = (API_BASE || "").replace(/\/+$/, "");
     const url = base + String(path || "");
     const o = opts || {};
     const headers = new Headers(o.headers || {});
@@ -466,7 +471,9 @@ Policy:
       credentials: "include"
     });
 
+    const requestId = res.headers.get("X-Request-Id") || "";
     let data = null;
+
     try {
       const txt = await res.text();
       data = txt ? safeJsonParse(txt) : null;
@@ -477,11 +484,11 @@ Policy:
         status: res.status,
         errorCode: (data && data.errorCode) || "API_ERROR",
         message: (data && (data.message || data.error)) || "API error",
-        requestId: (data && data.requestId) || (res.headers.get("X-Request-Id") || "")
+        requestId: (data && data.requestId) || requestId || ""
       };
     }
 
-    return { data: data || {} };
+    return { data: data || {}, requestId };
   }
 
   function apiMe() { return apiFetch("/auth/me", { method: "GET" }); }
@@ -546,14 +553,25 @@ Policy:
   // CONTROLLER -> VIEW
   // -----------------------------
   function syncCreateUserTopbarBtn() {
-    // IMPORTANT: knappen ska kunna öppna modal även om store är readOnly,
-    // annars fastnar man i “disabled” (din screenshot).
-    // Själva sparandet kan fortfarande blockeras senare om ni vill.
-    const isAdmin = String(auth.role || "").toUpperCase() === "ADMIN";
-    const canOpen = isAdmin && hasPerm("users_manage");
+    // UI-läge: lås INTE knappen p.g.a. store-status (den kan stå i "laddar/readOnly").
+    // API-läge: strikt (locked/readOnly låser).
+    const status = safeGetStatus();
 
-    const disabled = !canOpen;
-    const title = disabled ? "Saknar behörighet (users_manage) eller ej ADMIN." : "Skapa ny användare";
+    const hasUsersManage = hasPerm("users_manage");
+    const blockedByStore = (auth.mode === "api") ? (!!status.locked || !!status.readOnly) : false;
+
+    const disabled = !hasUsersManage || storeCorrupt || blockedByStore;
+
+    let title = "Skapa ny användare";
+    if (disabled) {
+      if (!hasUsersManage) title = "Saknar behörighet (users_manage).";
+      else if (storeCorrupt) title = "Read-only: storage fel.";
+      else if (blockedByStore) {
+        if (status.locked) title = status.reason ? `Låst: ${status.reason}` : "Låst läge.";
+        else title = status.whyReadOnly || "Read-only.";
+      }
+    }
+
     View.setCreateUserDisabled(disabled, title);
   }
 
@@ -589,14 +607,21 @@ Policy:
   // MODAL OPEN (controller)
   // -----------------------------
   function openCreateUser() {
-    const isAdmin = String(auth.role || "").toUpperCase() === "ADMIN";
-    if (!isAdmin || !hasPerm("users_manage")) return;
+    if (!hasPerm("users_manage")) return;
 
-    // Prefer modal-shell om den finns
+    // API-läge: respektera store lock/readOnly
+    if (auth.mode === "api") {
+      const status = safeGetStatus();
+      if (status.locked || status.readOnly) return;
+    }
+
+    // UI-läge: tillåt öppning även om store "laddar/readOnly"
+    if (storeCorrupt) return;
+
     if (window.FreezerModal && typeof window.FreezerModal.open === "function") {
       window.FreezerModal.open({
         title: "Skapa användare",
-        text: "Modalen är öppen. (Nästa steg: koppla Save-knappen till store.createUser.)"
+        text: "Modal-shell är aktiv. Koppla in formulär-render här i nästa steg."
       });
       return;
     }
@@ -614,8 +639,8 @@ Policy:
   // AUTH BOOT (API first, fallback UI-session)
   // -----------------------------
   async function bootAuth() {
-    // 1) API mode endast om API_BASE ser ut som riktig URL
-    if (isProbablyHttpUrl(API_BASE)) {
+    // 1) API mode if configured
+    if (API_BASE) {
       try {
         const { data } = await apiMe();
         if (data && data.ok && data.user) {
@@ -635,7 +660,7 @@ Policy:
       }
     }
 
-    // 2) UI mode (FRZ_SESSION_V1) — matchar din index.html demo-login
+    // 2) UI mode (FRZ_SESSION_V1) — matches index.html demo-login
     const sess = readUiSession();
     const v = isUiSessionValid(sess);
     if (!v.ok) {
@@ -648,7 +673,7 @@ Policy:
     auth.userId = String(v.firstName || "—");
     auth.role = String(v.role || "—");
 
-    // UI-demo perms
+    // Admin gets demo perms
     auth.perms = (String(v.role).toUpperCase() === "ADMIN")
       ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
       : ["view_dashboard"];
@@ -673,7 +698,6 @@ Policy:
       return true;
     } catch {
       markStoreCorrupt();
-      // Vi stannar ändå på sidan (read-only)
       return true;
     }
   }
@@ -735,12 +759,15 @@ Policy:
 
     subscribeStore();
     renderNow();
+
+    // Ensure button state is correct even if store never updates
+    syncCreateUserTopbarBtn();
   })();
 
   /* ÄNDRINGSLOGG (≤8)
-  1) API-mode körs bara om API_BASE är riktig http/https URL (annars UI-mode).
-  2) UI-mode (FRZ_SESSION_V1) fallback stabil – minskar “kastas ut”.
-  3) “Skapa användare” aktiveras för ADMIN + users_manage även om store råkar vara readOnly.
-  4) Modal öppnas deterministiskt (shell om finns, annars legacy overlay).
+  1) UI-demo: "Skapa användare" låses inte av store-status (readOnly/laddar) i UI-läge.
+  2) API-läge: fortsatt strikt låsning via store-status + CSRF.
+  3) openCreateUser: UI-läge tillåter modal även om store säger readOnly (så länge store ej är korrupt).
+  4) Renare ansvar bibehållet: View=DOM, Controller=logik/state/events.
   */
 })();
