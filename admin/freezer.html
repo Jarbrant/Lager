@@ -1,745 +1,787 @@
-/* ============================================================
-AO-SEC-01B (HYBRID) — admin/freezer.js (HEL FIL)
-Fixar:
-- Stabil auth-boot: API-mode endast om API_BASE ser ut som riktig URL (http/https).
-- UI-mode (FRZ_SESSION_V1) blir alltid fallback utan “kastas ut”.
-- “Skapa användare” knappen blir klickbar för ADMIN i UI-mode även om store råkar säga readOnly.
-  (Modal kan öppnas; själva save-logik kan kopplas i nästa steg.)
-Policy:
-- Inga nya storage keys
-- XSS-safe (ingen osäker innerHTML)
-============================================================ */
+<!-- ============================================================
+FIL: admin/freezer.html  (NY HEL FIL)
+Projekt: Lager/Freezer (UI-only / localStorage-first)
 
-(function () {
-  "use strict";
+Mål:
+- Modern admin-startsida (Fortnox-känsla): sidomeny + topbar + kortlayout
+- Behåll kompatibla DOM-id/hookar för befintlig JS:
+  - frzStatusText, frzRoleText, frzUserName, frzOpenCreateUserBtn, frzResetDemoBtn
+  - tabDashboard/tabSaldo/tabHistorik + viewDashboard/viewSaldo/viewHistorik
+  - frzDashCards, frzDashNotes
+  - frzUsersPanel, frzUsersList, frzUsersCount, frzUsersInlineMsg*
+  - frzSaldoTableWrap, frzSaldoCount
+  - frzHistoryList, frzHistoryCount
+  - freezerViewMenu, freezerViewRoot (router hooks)
+  - frzUserModalOverlay + legacy modal ids
 
-  // -----------------------------
-  // CONFIG
-  // -----------------------------
-  const RAW_API_BASE =
-    (window.HR_CONFIG && window.HR_CONFIG.API_BASE) ||
-    (window.FREEZER_CONFIG && window.FREEZER_CONFIG.API_BASE) ||
-    "";
+P0 FIX:
+- .modalOverlay[hidden]{ display:none !important; } (modal får aldrig låsa sidan)
 
-  const API_BASE = String(RAW_API_BASE || "").trim(); // kan vara "" i UI-only
-  const PATH_LOGIN = "../index.html";
-  const UI_SESSION_KEY = "FRZ_SESSION_V1";
+POLICY:
+- UI-only
+- Inga nya storage-keys/datamodell
+- XSS-safe (render sker i JS via textContent)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freezer – Admin</title>
+  <link rel="icon" href="data:,">
 
-  // -----------------------------
-  // INIT-GUARD
-  // -----------------------------
-  if (window.__FRZ_ADMIN_PAGE_INIT__) return;
-  window.__FRZ_ADMIN_PAGE_INIT__ = true;
-
-  // -----------------------------
-  // TINY HELPERS (no console spam)
-  // -----------------------------
-  function byId(id) { return document.getElementById(id); }
-  function safeNum(v, fallback) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
-  function safeJsonParse(raw) { try { return JSON.parse(raw); } catch { return null; } }
-
-  function redirectToLogin() {
-    try { window.location.replace(PATH_LOGIN); } catch {
-      try { window.location.href = PATH_LOGIN; } catch {}
-    }
-  }
-
-  function readUiSession() {
-    try {
-      const sRaw = (window.sessionStorage && window.sessionStorage.getItem(UI_SESSION_KEY)) || null;
-      if (sRaw) return safeJsonParse(sRaw);
-    } catch {}
-    try {
-      const lRaw = (window.localStorage && window.localStorage.getItem(UI_SESSION_KEY)) || null;
-      if (lRaw) return safeJsonParse(lRaw);
-    } catch {}
-    return null;
-  }
-
-  function isUiSessionValid(sess) {
-    try {
-      if (!sess || typeof sess !== "object") return { ok: false, reason: "NO_SESSION" };
-      const role = String(sess.role || "").toUpperCase().trim();
-      if (!role) return { ok: false, reason: "BAD_SESSION" };
-
-      const exp = Number(sess.exp || 0);
-      if (exp && Date.now() > exp) return { ok: false, reason: "EXPIRED" };
-
-      const firstName = String(sess.firstName || "").trim();
-      if (!firstName) return { ok: false, reason: "BAD_SESSION" };
-
-      return { ok: true, role, firstName };
-    } catch {
-      return { ok: false, reason: "BAD_SESSION" };
-    }
-  }
-
-  function isProbablyHttpUrl(s) {
-    const v = String(s || "").trim();
-    return /^https?:\/\//i.test(v);
-  }
-
-  // -----------------------------
-  // VIEW (render-only)
-  // -----------------------------
-  const View = (function () {
-    const els = {
-      roleText: byId("frzRoleText"),
-      userNameText: byId("frzUserName"),
-      viewHint: byId("frzViewHint"),
-
-      resetBtn: byId("frzResetDemoBtn"),
-      openCreateUserBtn: byId("frzOpenCreateUserBtn"),
-
-      dashCards: byId("frzDashCards"),
-
-      tabDashboard: byId("tabDashboard"),
-      tabSaldo: byId("tabSaldo"),
-      tabHistorik: byId("tabHistorik"),
-
-      legacyClose: byId("frzUserModalCloseBtn"),
-      legacyCancel: byId("frzUserCancelBtn"),
-      legacyOverlay: byId("frzUserModalOverlay")
-    };
-
-    function setTopbarIdentity(role, name) {
-      if (els.roleText) els.roleText.textContent = String(role || "—");
-      if (els.userNameText) els.userNameText.textContent = String(name || "—");
+  <style>
+    :root{
+      color-scheme: light;
+      --bg: #f6f7f8;
+      --card: #ffffff;
+      --card2:#fafafa;
+      --line:#e6e6e6;
+      --text:#0f172a;
+      --muted: rgba(15,23,42,.72);
+      --shadow: 0 12px 35px rgba(2,6,23,.08);
+      --r12: 12px;
+      --r14: 14px;
+      --r18: 18px;
+      --r999: 999px;
     }
 
-    function setViewHint(text) {
-      if (!els.viewHint) return;
-      els.viewHint.textContent = String(text || "—");
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
     }
 
-    function setHintForTab(tabKey) {
-      const map = { dashboard: "Vy: Dashboard", saldo: "Vy: Saldo", history: "Vy: Historik" };
-      setViewHint(map[String(tabKey || "")] || "Vy: —");
+    /* App layout */
+    .frzApp{
+      min-height:100vh;
+      display:grid;
+      grid-template-columns: 280px 1fr;
+    }
+    @media (max-width: 980px){
+      .frzApp{ grid-template-columns: 1fr; }
+      .frzSidebar{ position: sticky; top:0; z-index: 50; }
     }
 
-    function hardHide(node) {
-      try {
-        if (!node) return;
-        node.hidden = true;
-        node.setAttribute("aria-hidden", "true");
-        node.style.display = "none";
-        node.style.pointerEvents = "none";
-      } catch {}
+    /* Sidebar */
+    .frzSidebar{
+      background: #0b1220;
+      color: #e5e7eb;
+      border-right: 1px solid rgba(255,255,255,.06);
+      padding: 14px;
+    }
+    .frzSideTop{
+      display:flex; align-items:center; gap:10px;
+      padding: 10px 10px 12px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      margin-bottom: 12px;
+    }
+    .frzLogo{
+      width:34px; height:34px; border-radius: 10px;
+      display:grid; place-items:center;
+      background: rgba(255,255,255,.10);
+      font-weight:800;
+    }
+    .frzSideBrand{ font-weight:900; letter-spacing:.2px; }
+    .frzSideSub{ font-size:12px; opacity:.75; margin-top:2px; }
+
+    .frzNav{
+      display:flex; flex-direction:column; gap:8px;
+      padding: 12px 0;
+    }
+    .frzNavBtn{
+      width:100%;
+      text-align:left;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.06);
+      color:#e5e7eb;
+      border-radius: 12px;
+      padding: 10px 12px;
+      cursor:pointer;
+      display:flex; align-items:center; gap:10px;
+    }
+    .frzNavBtn:hover{ background: rgba(255,255,255,.10); }
+    .frzNavBtn[aria-current="page"]{
+      background: rgba(255,255,255,.16);
+      border-color: rgba(255,255,255,.18);
+      font-weight:800;
+    }
+    .frzNavIcon{
+      width:28px; height:28px; border-radius: 10px;
+      display:grid; place-items:center;
+      background: rgba(255,255,255,.10);
+      font-size: 14px;
+    }
+    .frzSideCard{
+      margin-top: 12px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.06);
+      border-radius: 14px;
+      padding: 12px;
+    }
+    .frzSideCard b{ display:block; }
+    .frzSideCard .muted{ opacity:.75; font-size:12px; }
+
+    /* Main */
+    .frzMain{
+      display:flex;
+      flex-direction:column;
+      min-width:0;
     }
 
-    function killAllOverlays() {
-      hardHide(els.legacyOverlay);
-      try {
-        const shell = document.querySelector('[data-frz-modal="overlay"]');
-        if (shell) hardHide(shell);
-      } catch {}
-      try { document.querySelectorAll(".modalOverlay").forEach(hardHide); } catch {}
+    /* Topbar */
+    header{
+      background: var(--card);
+      border-bottom: 1px solid var(--line);
+      position: sticky; top:0; z-index: 40;
+    }
+    .wrap{
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 12px 16px;
+    }
+    .topRow{
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    }
+    .crumb{
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+      font-weight:800;
+    }
+    .crumb a{ color:inherit; text-decoration:none; opacity:.8; font-weight:700; }
+    .crumb a:hover{ opacity:1; }
+    .crumb .muted{ opacity:.65; font-weight:700; }
+    .spacer{ flex:1; }
+
+    .pill{
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      padding:6px 10px;
+      border-radius: var(--r999);
+      border:1px solid var(--line);
+      background: var(--card2);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .pill b{ font-weight:800; }
+    .muted{ color: var(--muted); }
+    .btn{
+      border:1px solid var(--line);
+      background: var(--card);
+      border-radius: 12px;
+      padding: 9px 12px;
+      cursor:pointer;
+      font-weight:700;
+    }
+    .btn:hover{ background:#f9fafb; }
+    .btn[disabled]{ opacity:.55; cursor:not-allowed; }
+
+    /* Content shell */
+    main{ padding: 16px 0 26px; }
+    .content{
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 0 16px;
     }
 
-    function tryCloseShell() {
-      try {
-        if (window.FreezerModal && typeof window.FreezerModal.close === "function") {
-          window.FreezerModal.close();
-        }
-      } catch {}
+    /* Tabs row (kept for JS hooks) */
+    .tabsRow{
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+      margin-bottom: 12px;
+    }
+    .tabs{
+      display:flex; gap:8px; flex-wrap:wrap;
+      padding: 6px;
+      border:1px solid var(--line);
+      background: var(--card);
+      border-radius: 14px;
+      box-shadow: 0 1px 0 rgba(2,6,23,.02);
+    }
+    .tabBtn{
+      border:1px solid transparent;
+      background: transparent;
+      border-radius: var(--r999);
+      padding: 8px 12px;
+      cursor:pointer;
+      font-size: 14px;
+      font-weight: 700;
+      color: rgba(15,23,42,.85);
+    }
+    .tabBtn[aria-selected="true"]{
+      background: #f3f4f6;
+      border-color: #e5e7eb;
+      font-weight: 900;
     }
 
-    function closeAnyModal() {
-      tryCloseShell();
-      killAllOverlays();
+    /* Cards */
+    .panel{
+      border:1px solid var(--line);
+      background: var(--card);
+      border-radius: var(--r18);
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+    .panel.flat{ box-shadow:none; }
+    .danger{ border-color:#f2b8b5; background:#fff5f5; }
+    .warn{ border-color:#f2b8b5; background:#fff5f5; }
+
+    .grid2{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    @media (min-width: 980px){
+      .grid2{ grid-template-columns: 1.15fr .85fr; }
+    }
+    .grid3{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    @media (min-width: 980px){
+      .grid3{ grid-template-columns: 1fr 1fr 1fr; }
     }
 
-    function bootUnlock() {
-      tryCloseShell();
-      killAllOverlays();
+    .card{
+      border:1px solid var(--line);
+      background: var(--card);
+      border-radius: var(--r18);
+      padding: 14px;
+      box-shadow: var(--shadow);
+      min-height: 94px;
+    }
+    .cardHead{
+      display:flex; align-items:center; gap:10px;
+      margin-bottom: 8px;
+    }
+    .cardIcon{
+      width:40px; height:40px;
+      border-radius: 14px;
+      display:grid; place-items:center;
+      background: #f3f4f6;
+      border:1px solid #e5e7eb;
+      font-weight:900;
+    }
+    .cardTitle{ font-weight:900; }
+    .cardText{ color: var(--muted); font-size: 13px; line-height: 1.35; }
 
-      let ticks = 0;
-      const t = setInterval(() => {
-        ticks++;
-        tryCloseShell();
-        killAllOverlays();
-        if (ticks > 50) clearInterval(t);
-      }, 100);
+    .hr{ height:1px; background:#eee; margin: 14px 0; }
 
-      document.addEventListener("keydown", (ev) => {
-        if (ev && ev.key === "Escape") {
-          tryCloseShell();
-          killAllOverlays();
-        }
-      }, true);
+    /* Users list styling (kept) */
+    .list{ display:flex; flex-direction:column; gap:8px; }
+    .userRow{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      padding: 10px;
+      border:1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+    }
+    .userRow .name{ font-weight:900; }
+    .userRow .meta{ font-size:12px; color: var(--muted); }
+
+    /* Modal */
+    .modalOverlay{
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      z-index: 9999;
+    }
+    .modalCard{
+      width: min(720px, 100%);
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      box-shadow: 0 20px 60px rgba(0,0,0,.18);
+      overflow:hidden;
+    }
+    .modalHead{
+      display:flex; align-items:center; gap:10px;
+      padding: 12px 14px;
+      border-bottom:1px solid #eee;
+      background: #fcfcfd;
+    }
+    .modalBody{ padding: 14px; }
+    .modalFoot{
+      display:flex; align-items:center; gap:10px;
+      padding: 12px 14px;
+      border-top:1px solid #eee;
+      justify-content:flex-end;
+      background: #fcfcfd;
+    }
+    .modalTitle{ font-weight:900; margin:0; }
+    .iconBtn{
+      border:1px solid var(--line);
+      background: var(--card);
+      border-radius: 12px;
+      padding:8px 10px;
+      cursor:pointer;
+      font-weight:800;
+    }
+    .srOnly{
+      position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+      overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
     }
 
-    function wireModalClose() {
-      if (els.legacyClose) els.legacyClose.addEventListener("click", closeAnyModal);
-      if (els.legacyCancel) els.legacyCancel.addEventListener("click", closeAnyModal);
-      if (els.legacyOverlay) {
-        els.legacyOverlay.addEventListener("click", (ev) => {
-          try { if (ev.target === els.legacyOverlay) closeAnyModal(); } catch {}
+    /* P0 FIX: hidden måste vinna */
+    .modalOverlay[hidden]{ display:none !important; }
+
+    /* Small helpers */
+    .kpi{
+      display:flex; align-items:baseline; justify-content:space-between; gap:10px;
+      padding: 10px 12px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: var(--card2);
+    }
+    .kpi .label{ font-size: 12px; color: var(--muted); font-weight:700; }
+    .kpi .value{ font-size: 18px; font-weight: 950; letter-spacing:-.2px; }
+    .kpi .sub{ font-size: 12px; color: var(--muted); }
+
+    footer{ padding: 10px 0; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+
+<body>
+  <div class="frzApp">
+
+    <!-- SIDEBAR -->
+    <aside class="frzSidebar">
+      <div class="frzSideTop">
+        <div class="frzLogo">🧊</div>
+        <div>
+          <div class="frzSideBrand">Freezer</div>
+          <div class="frzSideSub">Admin • Fryslager</div>
+        </div>
+      </div>
+
+      <div class="frzNav" aria-label="Huvudmeny">
+        <!-- Dessa triggar befintliga tab-knappar (se inline script längst ner) -->
+        <button class="frzNavBtn" type="button" data-frz-tab="dashboard" aria-current="page">
+          <span class="frzNavIcon">🏠</span>
+          <span>Startsida</span>
+        </button>
+        <button class="frzNavBtn" type="button" data-frz-tab="saldo">
+          <span class="frzNavIcon">📦</span>
+          <span>Saldo</span>
+        </button>
+        <button class="frzNavBtn" type="button" data-frz-tab="history">
+          <span class="frzNavIcon">🧾</span>
+          <span>Historik</span>
+        </button>
+      </div>
+
+      <div class="frzSideCard">
+        <b>Snabbinfo</b>
+        <div class="muted" style="margin-top:6px;">
+          Detta är en UI-only demo. Behörigheter styr knappar och paneler.
+        </div>
+        <div class="muted" style="margin-top:8px;">
+          Tips: Om något känns “låst” – testa <b>Återställ demo</b>.
+        </div>
+      </div>
+
+      <div class="frzSideCard" style="margin-top:10px;">
+        <b>Router</b>
+        <div class="muted" style="margin-top:6px;">
+          Meny/Root kopplas av JS här:
+        </div>
+        <div class="muted" style="margin-top:6px;">
+          <code style="opacity:.9;">#freezerViewMenu</code><br/>
+          <code style="opacity:.9;">#freezerViewRoot</code>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <section class="frzMain">
+
+      <!-- TOPBAR -->
+      <header>
+        <div class="wrap">
+          <div class="topRow">
+            <div class="crumb">
+              <span style="font-size:18px;">Freezer</span>
+              <span class="muted">Admin Hem</span>
+              <span class="muted">/</span>
+              <a href="./freezer.html"><b>Fryslager</b></a>
+            </div>
+
+            <div class="spacer"></div>
+
+            <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
+              <span class="muted">Status:</span>
+              <b id="frzStatusText">Laddar…</b>
+            </div>
+
+            <div class="pill" title="Roll styrs av inloggning">
+              <span class="muted">Roll:</span>
+              <b id="frzRoleText">ADMIN</b>
+            </div>
+
+            <div class="pill" title="Inloggad användare">
+              <span class="muted">Användare:</span>
+              <b id="frzUserName">—</b>
+            </div>
+
+            <button id="frzOpenCreateUserBtn" class="btn" type="button" title="Skapa ny användare (öppnar modal)" disabled>
+              Skapa användare
+            </button>
+
+            <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data (endast om ej read-only)">
+              Återställ demo
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <div class="content">
+
+          <!-- Lock / debug (hooks) -->
+          <section id="frzLockPanel" class="panel danger flat" hidden>
+            <div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">
+              <div>
+                <b>Import stoppad / Låst läge</b>
+                <div class="muted" id="frzLockReason">Orsak: okänd</div>
+              </div>
+            </div>
+          </section>
+
+          <section id="frzDebugPanel" class="panel flat" hidden style="margin-top:12px;">
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+              <b>Debug</b>
+              <div class="spacer"></div>
+              <div class="muted" id="frzDebugText">—</div>
+            </div>
+          </section>
+
+          <!-- Tabs + hint + mode -->
+          <div class="tabsRow" style="margin-top:12px;">
+            <div class="tabs" role="tablist" aria-label="Vy">
+              <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
+              <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
+              <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
+            </div>
+
+            <div id="frzViewHint" class="muted" style="font-size:13px;">—</div>
+
+            <div class="spacer"></div>
+
+            <div class="pill" title="Visar om sidan är read-only">
+              <span class="muted">Läge:</span>
+              <b id="frzModeText">—</b>
+            </div>
+          </div>
+
+          <!-- Router hooks (kept) -->
+          <section class="panel flat" style="margin-bottom:12px;">
+            <div id="freezerViewMenu" class="tabs" aria-label="Router-meny"></div>
+            <div id="freezerViewRoot" style="margin-top:10px;"></div>
+          </section>
+
+          <!-- DASHBOARD -->
+          <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
+            <div class="grid2">
+
+              <!-- LEFT: main dashboard -->
+              <div>
+                <div class="panel flat" style="padding:0; background:transparent; border:none; box-shadow:none;">
+                  <div class="grid3">
+                    <div class="card">
+                      <div class="cardHead">
+                        <div class="cardIcon">📊</div>
+                        <div>
+                          <div class="cardTitle">Översikt</div>
+                          <div class="cardText">Snabb status för inköp/admin.</div>
+                        </div>
+                      </div>
+                      <div class="kpi">
+                        <div>
+                          <div class="label">Saldo (indikativt)</div>
+                          <div class="value" id="frzKpiSaldo">—</div>
+                          <div class="sub">uppdateras av render</div>
+                        </div>
+                        <div class="muted">📦</div>
+                      </div>
+                    </div>
+
+                    <div class="card">
+                      <div class="cardHead">
+                        <div class="cardIcon">🧾</div>
+                        <div>
+                          <div class="cardTitle">Händelser</div>
+                          <div class="cardText">Senaste rörelser och historik.</div>
+                        </div>
+                      </div>
+                      <div class="kpi">
+                        <div>
+                          <div class="label">Historik (antal)</div>
+                          <div class="value" id="frzKpiHistory">—</div>
+                          <div class="sub">senaste period</div>
+                        </div>
+                        <div class="muted">⏱️</div>
+                      </div>
+                    </div>
+
+                    <div class="card">
+                      <div class="cardHead">
+                        <div class="cardIcon">✅</div>
+                        <div>
+                          <div class="cardTitle">Att göra</div>
+                          <div class="cardText">Snabba åtgärder för admin.</div>
+                        </div>
+                      </div>
+                      <div class="cardText">
+                        • Lägg upp artiklar<br/>
+                        • Kontrollera uttag<br/>
+                        • Skapa användare (om behörighet)
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="hr"></div>
+
+                  <!-- frzDashCards används av render/JS för att injicera kort + Top IN/OUT panel -->
+                  <div id="frzDashCards" class="grid2"></div>
+                </div>
+
+                <div class="hr"></div>
+
+                <!-- USERS PANEL (hook) -->
+                <section id="frzUsersPanel" class="panel" hidden>
+                  <div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">
+                    <div>
+                      <h2 style="margin:0;">Användare & behörigheter</h2>
+                      <div class="muted" style="margin-top:4px;">
+                        Skapa/ändra användare görs via <b>Skapa användare</b> i topbaren.
+                      </div>
+                    </div>
+                    <div class="spacer"></div>
+                    <div class="pill" title="Antal användare (inkl inaktiva)">
+                      <span class="muted">Users:</span>
+                      <b id="frzUsersCount">0</b>
+                    </div>
+                  </div>
+
+                  <div class="hr"></div>
+
+                  <div id="frzUsersInlineMsg" class="panel warn flat" hidden>
+                    <b id="frzUsersInlineMsgTitle">Info</b>
+                    <div class="muted" id="frzUsersInlineMsgText">—</div>
+                  </div>
+
+                  <div class="list" id="frzUsersList" aria-label="Users list"></div>
+                </section>
+              </div>
+
+              <!-- RIGHT: notes + company/status -->
+              <div>
+                <div class="card">
+                  <div class="cardHead">
+                    <div class="cardIcon">🏢</div>
+                    <div>
+                      <div class="cardTitle">Företaget</div>
+                      <div class="cardText">Status, notiser och admininfo.</div>
+                    </div>
+                  </div>
+                  <div class="kpi">
+                    <div>
+                      <div class="label">Systemläge</div>
+                      <div class="value" id="frzCompanyMode">—</div>
+                      <div class="sub">read-only / lås / ok</div>
+                    </div>
+                    <div class="muted">🛡️</div>
+                  </div>
+                  <div class="cardText" style="margin-top:10px;">
+                    Behörigheter styr vad som är klickbart. Om “Skapa användare” är grå → saknar du rättighet eller sidan är låst/read-only.
+                  </div>
+                </div>
+
+                <div style="height:12px;"></div>
+
+                <div class="card">
+                  <div class="cardHead">
+                    <div class="cardIcon">📝</div>
+                    <div>
+                      <div class="cardTitle">Noteringar</div>
+                      <div class="cardText">Interna anteckningar (stub).</div>
+                    </div>
+                  </div>
+                  <div class="muted" id="frzDashNotes">—</div>
+                </div>
+
+                <div style="height:12px;"></div>
+
+                <div class="card">
+                  <div class="cardHead">
+                    <div class="cardIcon">💡</div>
+                    <div>
+                      <div class="cardTitle">Insikter</div>
+                      <div class="cardText">Tips och kommande händelser.</div>
+                    </div>
+                  </div>
+                  <div class="cardText">
+                    • Öppna <b>Historik</b> för att se senaste IN/OUT.<br/>
+                    • Öppna <b>Saldo</b> för att se artiklar och nivåer.<br/>
+                    • Använd <b>Top IN/OUT</b> i Dashboard för perioder (7/30/90).
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <footer>
+              Baseline • UI-only • localStorage-first • fail-closed
+            </footer>
+          </section>
+
+          <!-- SALDO -->
+          <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+              <h2 style="margin:0;">Lagersaldo</h2>
+              <div class="spacer"></div>
+              <div class="pill">
+                <span class="muted">Artiklar:</span>
+                <b id="frzSaldoCount">0</b>
+              </div>
+            </div>
+
+            <div id="frzSaldoTableWrap" class="panel flat" style="background: var(--card2);"></div>
+          </section>
+
+          <!-- HISTORIK -->
+          <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+              <h2 style="margin:0;">Historik</h2>
+              <div class="spacer"></div>
+              <div class="pill">
+                <span class="muted">Händelser:</span>
+                <b id="frzHistoryCount">0</b>
+              </div>
+            </div>
+
+            <div id="frzHistoryList" class="panel flat" style="background: var(--card2);"></div>
+          </section>
+
+        </div>
+      </main>
+    </section>
+  </div>
+
+  <!-- Legacy users modal (styrd av admin/freezer.js) -->
+  <div id="frzUserModalOverlay" class="modalOverlay" hidden aria-hidden="true">
+    <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="frzUserModalTitle">
+      <div class="modalHead">
+        <h3 id="frzUserModalTitle" class="modalTitle">Skapa användare</h3>
+        <div class="spacer"></div>
+        <button id="frzUserModalCloseBtn" class="iconBtn" type="button" title="Stäng (Esc)">Stäng</button>
+      </div>
+
+      <div class="modalBody">
+        <div id="frzUsersMsg" class="panel warn flat" hidden>
+          <b id="frzUsersMsgTitle">Fel</b>
+          <div class="muted" id="frzUsersMsgText">—</div>
+        </div>
+
+        <div class="panel flat" style="background: var(--card2);">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+            <b id="frzUserFormTitle">Skapa användare</b>
+            <div class="spacer"></div>
+            <span class="muted" id="frzUserFormMode">—</span>
+          </div>
+
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+            <label class="pill" for="frzUserFirstName">
+              <span class="muted">Förnamn:</span>
+              <input id="frzUserFirstName" type="text" placeholder="t.ex. Anna" maxlength="32" />
+            </label>
+          </div>
+
+          <div style="display:flex; gap:12px; flex-wrap:wrap;" aria-label="Behörigheter">
+            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
+              <input id="perm_users_manage" type="checkbox" /> users_manage
+            </label>
+            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
+              <input id="perm_inventory_write" type="checkbox" /> inventory_write
+            </label>
+            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
+              <input id="perm_history_write" type="checkbox" /> history_write
+            </label>
+            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
+              <input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view
+            </label>
+          </div>
+
+          <input id="frzUserEditingId" type="hidden" value="" />
+          <div class="srOnly" aria-live="polite" id="frzUserModalLive">—</div>
+        </div>
+      </div>
+
+      <div class="modalFoot">
+        <button id="frzUserCancelBtn" class="btn" type="button">Avbryt</button>
+        <button id="frzUserSaveBtn" class="btn" type="button">Spara</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts (behåll ordning) -->
+  <script src="../UI/pages/freezer/02-core.js"></script>
+  <script src="../UI/pages/freezer/04-contract.js"></script>
+  <script src="../UI/pages/freezer/03-store.js"></script>
+
+  <script src="../UI/freezer-render.js"></script>
+  <script src="../UI/freezer-dashboard.js"></script>
+
+  <script src="../UI/pages/freezer/05-modal-shell.js"></script>
+
+  <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
+  <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
+
+  <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
+  <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
+
+  <script src="./freezer.js"></script>
+
+  <!-- Minimal UI glue: sidomeny -> befintliga tabs -->
+  <script>
+    (function(){
+      "use strict";
+      function byId(id){ return document.getElementById(id); }
+      function setCurrent(btn){
+        try{
+          document.querySelectorAll("[data-frz-tab]").forEach(function(b){
+            b.removeAttribute("aria-current");
+          });
+          btn.setAttribute("aria-current", "page");
+        }catch{}
+      }
+      function clickTab(key){
+        var map = { dashboard: "tabDashboard", saldo: "tabSaldo", history: "tabHistorik" };
+        var id = map[String(key||"")] || "";
+        var el = id ? byId(id) : null;
+        if (el && typeof el.click === "function") el.click();
+      }
+
+      document.querySelectorAll("[data-frz-tab]").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          var key = btn.getAttribute("data-frz-tab");
+          setCurrent(btn);
+          clickTab(key);
         });
-      }
-    }
-
-    function wireTabs(onTab) {
-      function bind(btn, key) {
-        if (!btn) return;
-        btn.addEventListener("click", () => onTab(key));
-      }
-      bind(els.tabDashboard, "dashboard");
-      bind(els.tabSaldo, "saldo");
-      bind(els.tabHistorik, "history");
-    }
-
-    function wireButtons(handlers) {
-      if (els.openCreateUserBtn && handlers && handlers.onOpenCreateUser) {
-        els.openCreateUserBtn.addEventListener("click", handlers.onOpenCreateUser);
-      }
-      if (els.resetBtn && handlers && handlers.onResetDemo) {
-        els.resetBtn.addEventListener("click", handlers.onResetDemo);
-      }
-    }
-
-    function setCreateUserDisabled(disabled, title) {
-      if (!els.openCreateUserBtn) return;
-      els.openCreateUserBtn.disabled = !!disabled;
-      if (typeof title === "string") els.openCreateUserBtn.title = title;
-    }
-
-    // AO-02A panel render (pure DOM render)
-    function renderTopInOutPanel(args) {
-      try {
-        const dashCards = els.dashCards;
-        if (!dashCards) return;
-
-        const state = args.state || {};
-        const role = String(args.role || "ADMIN").toUpperCase().trim() || "ADMIN";
-        const topPeriodDays = safeNum(args.topPeriodDays, 30);
-        const onPickPeriod = typeof args.onPickPeriod === "function" ? args.onPickPeriod : function () {};
-
-        let panel = byId("frzTopInOutPanel");
-        if (!panel) {
-          panel = document.createElement("div");
-          panel.id = "frzTopInOutPanel";
-          panel.style.border = "1px solid #e6e6e6";
-          panel.style.borderRadius = "12px";
-          panel.style.padding = "12px";
-          panel.style.background = "#fff";
-          panel.style.marginBottom = "12px";
-          dashCards.insertBefore(panel, dashCards.firstChild);
-        } else {
-          if (panel.parentNode !== dashCards) dashCards.insertBefore(panel, dashCards.firstChild);
-          else if (dashCards.firstChild !== panel) dashCards.insertBefore(panel, dashCards.firstChild);
-        }
-
-        while (panel.firstChild) panel.removeChild(panel.firstChild);
-
-        const headRow = document.createElement("div");
-        headRow.style.display = "flex";
-        headRow.style.gap = "10px";
-        headRow.style.alignItems = "center";
-        headRow.style.flexWrap = "wrap";
-
-        const title = document.createElement("b");
-        title.textContent = "Top 10 IN/OUT";
-        headRow.appendChild(title);
-
-        const hint = document.createElement("span");
-        hint.style.opacity = ".75";
-        hint.style.fontSize = "13px";
-        hint.textContent = `Period: ${topPeriodDays} dagar`;
-        headRow.appendChild(hint);
-
-        const spacer = document.createElement("div");
-        spacer.style.flex = "1";
-        headRow.appendChild(spacer);
-
-        const btnWrap = document.createElement("div");
-        btnWrap.style.display = "inline-flex";
-        btnWrap.style.gap = "8px";
-        btnWrap.setAttribute("role", "group");
-        btnWrap.setAttribute("aria-label", "Välj period för topplistor");
-
-        function mkBtn(days) {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.textContent = String(days);
-          b.style.border = "1px solid #e6e6e6";
-          b.style.background = "#fff";
-          b.style.borderRadius = "999px";
-          b.style.padding = "8px 12px";
-          b.style.cursor = "pointer";
-          b.style.fontSize = "14px";
-          b.setAttribute("aria-pressed", days === topPeriodDays ? "true" : "false");
-          if (days === topPeriodDays) b.style.fontWeight = "800";
-          b.addEventListener("click", () => onPickPeriod(days));
-          return b;
-        }
-
-        btnWrap.appendChild(mkBtn(7));
-        btnWrap.appendChild(mkBtn(30));
-        btnWrap.appendChild(mkBtn(90));
-        headRow.appendChild(btnWrap);
-        panel.appendChild(headRow);
-
-        const hr = document.createElement("div");
-        hr.style.height = "1px";
-        hr.style.background = "#eee";
-        hr.style.margin = "10px 0";
-        panel.appendChild(hr);
-
-        const dash = (window.FreezerDashboard && typeof window.FreezerDashboard.computeTopInOut === "function")
-          ? window.FreezerDashboard
-          : null;
-
-        if (!dash) {
-          const warn = document.createElement("div");
-          warn.style.opacity = ".75";
-          warn.textContent = "Top IN/OUT: FreezerDashboard saknas (ingen beräkning).";
-          panel.appendChild(warn);
-          return;
-        }
-
-        const res = dash.computeTopInOut(state, topPeriodDays) || { in: [], out: [], meta: {}, days: topPeriodDays };
-        const showIn = (role !== "PICKER");
-        const showOut = (role !== "BUYER");
-
-        const grid = document.createElement("div");
-        grid.style.display = "grid";
-        grid.style.gridTemplateColumns = "1fr";
-        grid.style.gap = "12px";
-        grid.style.marginTop = "8px";
-        if (window.matchMedia && window.matchMedia("(min-width: 900px)").matches) {
-          grid.style.gridTemplateColumns = (showIn && showOut) ? "1fr 1fr" : "1fr";
-        }
-
-        function renderTable(titleText, rows) {
-          const card = document.createElement("div");
-          card.style.border = "1px solid #e6e6e6";
-          card.style.borderRadius = "12px";
-          card.style.padding = "10px";
-          card.style.background = "#fafafa";
-
-          const t = document.createElement("b");
-          t.textContent = titleText;
-          card.appendChild(t);
-
-          const sub = document.createElement("div");
-          sub.style.opacity = ".75";
-          sub.style.fontSize = "12px";
-          sub.style.marginTop = "4px";
-          sub.textContent = `rader: ${Array.isArray(rows) ? rows.length : 0}`;
-          card.appendChild(sub);
-
-          const table = document.createElement("table");
-          table.style.width = "100%";
-          table.style.borderCollapse = "collapse";
-          table.style.marginTop = "8px";
-          table.setAttribute("aria-label", titleText);
-
-          const thead = document.createElement("thead");
-          const trh = document.createElement("tr");
-          const th1 = document.createElement("th"); th1.textContent = "Artikel"; th1.style.textAlign = "left"; th1.style.padding = "6px";
-          const th2 = document.createElement("th"); th2.textContent = "Qty"; th2.style.textAlign = "right"; th2.style.padding = "6px";
-          const th3 = document.createElement("th"); th3.textContent = "Antal"; th3.style.textAlign = "right"; th3.style.padding = "6px";
-          trh.appendChild(th1); trh.appendChild(th2); trh.appendChild(th3);
-          thead.appendChild(trh);
-          table.appendChild(thead);
-
-          const tbody = document.createElement("tbody");
-          const list = Array.isArray(rows) ? rows : [];
-
-          if (list.length === 0) {
-            const tr = document.createElement("tr");
-            const td = document.createElement("td");
-            td.colSpan = 3;
-            td.style.padding = "10px 6px";
-            td.style.opacity = ".75";
-            td.textContent = "Inga träffar för perioden.";
-            tr.appendChild(td);
-            tbody.appendChild(tr);
-          } else {
-            for (const r of list) {
-              const tr = document.createElement("tr");
-              tr.style.borderTop = "1px solid #eee";
-
-              const td1 = document.createElement("td");
-              td1.style.padding = "8px 6px";
-              td1.textContent = String((r && r.label) || "—");
-              tr.appendChild(td1);
-
-              const td2 = document.createElement("td");
-              td2.style.padding = "8px 6px";
-              td2.style.textAlign = "right";
-              td2.textContent = String(safeNum(r && r.qty, 0));
-              tr.appendChild(td2);
-
-              const td3 = document.createElement("td");
-              td3.style.padding = "8px 6px";
-              td3.style.textAlign = "right";
-              td3.textContent = String(safeNum(r && r.count, 0));
-              tr.appendChild(td3);
-
-              tbody.appendChild(tr);
-            }
-          }
-
-          table.appendChild(tbody);
-          card.appendChild(table);
-          return card;
-        }
-
-        if (showIn) grid.appendChild(renderTable("IN (Top 10)", res.in || []));
-        if (showOut) grid.appendChild(renderTable("OUT (Top 10)", res.out || []));
-
-        panel.appendChild(grid);
-
-        const meta = document.createElement("div");
-        meta.style.opacity = ".75";
-        meta.style.fontSize = "12px";
-        meta.style.marginTop = "10px";
-        const m = res.meta || {};
-        meta.textContent =
-          `moves: total=${safeNum(m.totalMoves, 0)} • used=${safeNum(m.usedMoves, 0)} • ignored=${safeNum(m.ignoredMoves, 0)} • roll=${role}`;
-        panel.appendChild(meta);
-      } catch {
-        // fail-soft
-      }
-    }
-
-    return {
-      els,
-      setTopbarIdentity,
-      setViewHint,
-      setHintForTab,
-      bootUnlock,
-      closeAnyModal,
-      wireModalClose,
-      wireTabs,
-      wireButtons,
-      setCreateUserDisabled,
-      renderTopInOutPanel
-    };
-  })();
-
-  // -----------------------------
-  // CONTROLLER STATE
-  // -----------------------------
-  let activeTab = "dashboard";
-  let topPeriodDays = 30;
-
-  const auth = {
-    ok: false,
-    userId: "",
-    role: "",
-    perms: [],
-    csrfToken: "",
-    mode: "none" // "api" | "ui"
-  };
-
-  function hasPerm(perm) {
-    const list = Array.isArray(auth.perms) ? auth.perms : [];
-    return list.includes(perm);
-  }
-
-  // -----------------------------
-  // API CLIENT (controller)
-  // -----------------------------
-  async function apiFetch(path, opts) {
-    const base = String(API_BASE || "").replace(/\/+$/, "");
-    const url = base + String(path || "");
-    const o = opts || {};
-    const headers = new Headers(o.headers || {});
-    headers.set("Accept", "application/json");
-
-    const method = String(o.method || "GET").toUpperCase();
-    const isWrite = (method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE");
-
-    if (isWrite) {
-      if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json; charset=utf-8");
-      if (auth.csrfToken) headers.set("X-CSRF", auth.csrfToken);
-    }
-
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: o.body,
-      credentials: "include"
-    });
-
-    let data = null;
-    try {
-      const txt = await res.text();
-      data = txt ? safeJsonParse(txt) : null;
-    } catch {}
-
-    if (!res.ok) {
-      throw {
-        status: res.status,
-        errorCode: (data && data.errorCode) || "API_ERROR",
-        message: (data && (data.message || data.error)) || "API error",
-        requestId: (data && data.requestId) || (res.headers.get("X-Request-Id") || "")
-      };
-    }
-
-    return { data: data || {} };
-  }
-
-  function apiMe() { return apiFetch("/auth/me", { method: "GET" }); }
-
-  // -----------------------------
-  // STORE GUARDS (controller)
-  // -----------------------------
-  if (!window.FreezerRender) {
-    redirectToLogin();
-    return;
-  }
-
-  let store = window.FreezerStore || null;
-  let storeCorrupt = false;
-
-  const storeShim = {
-    init: function () { return { ok: false, reason: "Read-only: storage error." }; },
-    setRole: function () {},
-    subscribe: function () { return function () {}; },
-    getState: function () { return {}; },
-    getStatus: function () {
-      return { role: auth.role || "—", locked: false, readOnly: true, whyReadOnly: "Read-only: init-fel.", reason: "Storage error" };
-    },
-    can: function () { return false; },
-    hasPerm: function () { return false; },
-    resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; },
-    listUsers: function () { return []; },
-    createUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
-    updateUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
-    setUserActive: function () { return { ok: false, reason: "Read-only: storage error." }; },
-    listItems: function () { return []; }
-  };
-
-  function getStore() { return storeCorrupt ? storeShim : store; }
-
-  function markStoreCorrupt() {
-    storeCorrupt = true;
-    View.setViewHint("Read-only: storage fel.");
-  }
-
-  function safeGetState() {
-    try {
-      const s = getStore();
-      return (s && typeof s.getState === "function") ? s.getState() : {};
-    } catch {
-      markStoreCorrupt();
-      return {};
-    }
-  }
-
-  function safeGetStatus() {
-    try {
-      const s = getStore();
-      return (s && typeof s.getStatus === "function") ? s.getStatus() : storeShim.getStatus();
-    } catch {
-      markStoreCorrupt();
-      return storeShim.getStatus();
-    }
-  }
-
-  // -----------------------------
-  // CONTROLLER -> VIEW
-  // -----------------------------
-  function syncCreateUserTopbarBtn() {
-    // IMPORTANT: knappen ska kunna öppna modal även om store är readOnly,
-    // annars fastnar man i “disabled” (din screenshot).
-    // Själva sparandet kan fortfarande blockeras senare om ni vill.
-    const isAdmin = String(auth.role || "").toUpperCase() === "ADMIN";
-    const canOpen = isAdmin && hasPerm("users_manage");
-
-    const disabled = !canOpen;
-    const title = disabled ? "Saknar behörighet (users_manage) eller ej ADMIN." : "Skapa ny användare";
-    View.setCreateUserDisabled(disabled, title);
-  }
-
-  function effectiveRoleForDashboard() {
-    const st = safeGetStatus();
-    const r = String((st && st.role) || auth.role || "ADMIN").toUpperCase().trim();
-    return r || "ADMIN";
-  }
-
-  function renderTopInOutIfDashboard(state) {
-    if (activeTab !== "dashboard") return;
-    View.renderTopInOutPanel({
-      state: state || {},
-      role: effectiveRoleForDashboard(),
-      topPeriodDays,
-      onPickPeriod: (days) => {
-        topPeriodDays = days;
-        renderNow();
-      }
-    });
-  }
-
-  function renderNow() {
-    const st = safeGetState();
-    window.FreezerRender.renderAll(st, { itemsMsg: "—" });
-    window.FreezerRender.setActiveTabUI(activeTab);
-    syncCreateUserTopbarBtn();
-    View.setHintForTab(activeTab);
-    renderTopInOutIfDashboard(st);
-  }
-
-  // -----------------------------
-  // MODAL OPEN (controller)
-  // -----------------------------
-  function openCreateUser() {
-    const isAdmin = String(auth.role || "").toUpperCase() === "ADMIN";
-    if (!isAdmin || !hasPerm("users_manage")) return;
-
-    // Prefer modal-shell om den finns
-    if (window.FreezerModal && typeof window.FreezerModal.open === "function") {
-      window.FreezerModal.open({
-        title: "Skapa användare",
-        text: "Modalen är öppen. (Nästa steg: koppla Save-knappen till store.createUser.)"
       });
-      return;
-    }
+    })();
+  </script>
 
-    const legacy = View.els.legacyOverlay;
-    if (!legacy) return;
-
-    legacy.hidden = false;
-    legacy.style.display = "flex";
-    legacy.style.pointerEvents = "auto";
-    legacy.setAttribute("aria-hidden", "false");
-  }
-
-  // -----------------------------
-  // AUTH BOOT (API first, fallback UI-session)
-  // -----------------------------
-  async function bootAuth() {
-    // 1) API mode endast om API_BASE ser ut som riktig URL
-    if (isProbablyHttpUrl(API_BASE)) {
-      try {
-        const { data } = await apiMe();
-        if (data && data.ok && data.user) {
-          const u = data.user || {};
-          auth.ok = true;
-          auth.mode = "api";
-          auth.userId = String(u.userId || "");
-          auth.role = String(u.role || "");
-          auth.perms = Array.isArray(u.perms) ? u.perms : [];
-          auth.csrfToken = String(u.csrfToken || u.csrf || "");
-
-          View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
-          return true;
-        }
-      } catch {
-        // fall through to UI mode
-      }
-    }
-
-    // 2) UI mode (FRZ_SESSION_V1) — matchar din index.html demo-login
-    const sess = readUiSession();
-    const v = isUiSessionValid(sess);
-    if (!v.ok) {
-      redirectToLogin();
-      return false;
-    }
-
-    auth.ok = true;
-    auth.mode = "ui";
-    auth.userId = String(v.firstName || "—");
-    auth.role = String(v.role || "—");
-
-    // UI-demo perms
-    auth.perms = (String(v.role).toUpperCase() === "ADMIN")
-      ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
-      : ["view_dashboard"];
-
-    auth.csrfToken = "";
-
-    View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
-    return true;
-  }
-
-  // -----------------------------
-  // STORE INIT/SUBSCRIBE
-  // -----------------------------
-  function initStore() {
-    if (!store || typeof store.init !== "function") {
-      redirectToLogin();
-      return false;
-    }
-    try {
-      store.init({ role: auth.role || "ADMIN" });
-      if (typeof store.setRole === "function") store.setRole(auth.role || "ADMIN");
-      return true;
-    } catch {
-      markStoreCorrupt();
-      // Vi stannar ändå på sidan (read-only)
-      return true;
-    }
-  }
-
-  function subscribeStore() {
-    try {
-      const s = getStore();
-      if (s && typeof s.subscribe === "function") {
-        s.subscribe((state) => {
-          window.FreezerRender.renderAll(state || {}, { itemsMsg: "—" });
-          window.FreezerRender.setActiveTabUI(activeTab);
-          syncCreateUserTopbarBtn();
-          View.setHintForTab(activeTab);
-          renderTopInOutIfDashboard(state || {});
-        });
-      }
-    } catch {
-      markStoreCorrupt();
-    }
-  }
-
-  // -----------------------------
-  // EVENTS (controller)
-  // -----------------------------
-  function onTabChange(key) {
-    activeTab = key;
-    renderNow();
-  }
-
-  function onResetDemo() {
-    const status = safeGetStatus();
-    if (status.locked || status.readOnly) return;
-
-    const s = getStore();
-    try { if (s && typeof s.resetDemo === "function") s.resetDemo(); } catch { markStoreCorrupt(); }
-
-    View.closeAnyModal();
-    renderNow();
-  }
-
-  // -----------------------------
-  // MAIN BOOT
-  // -----------------------------
-  (async function main() {
-    View.bootUnlock();
-    View.wireModalClose();
-
-    View.wireTabs(onTabChange);
-    View.wireButtons({
-      onOpenCreateUser: openCreateUser,
-      onResetDemo: onResetDemo
-    });
-
-    const ok = await bootAuth();
-    if (!ok) return;
-
-    const okStore = initStore();
-    if (!okStore) return;
-
-    subscribeStore();
-    renderNow();
-  })();
-
-  /* ÄNDRINGSLOGG (≤8)
-  1) API-mode körs bara om API_BASE är riktig http/https URL (annars UI-mode).
-  2) UI-mode (FRZ_SESSION_V1) fallback stabil – minskar “kastas ut”.
-  3) “Skapa användare” aktiveras för ADMIN + users_manage även om store råkar vara readOnly.
-  4) Modal öppnas deterministiskt (shell om finns, annars legacy overlay).
-  */
-})();
+  <!-- ÄNDRINGSLOGG (≤8)
+  1) Ny modern layout (sidomeny + topbar + kort) men behåller alla kritiska DOM-id/hookar.
+  2) P0 fix kvar: .modalOverlay[hidden]{display:none !important;} så modal aldrig låser sidan.
+  3) Tabs + view-sektioner kvar exakt (tabDashboard/tabSaldo/tabHistorik + viewDashboard/viewSaldo/viewHistorik).
+  4) Router hooks kvar: freezerViewMenu + freezerViewRoot.
+  -->
+</body>
+</html>
