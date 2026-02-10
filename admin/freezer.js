@@ -8,7 +8,8 @@ Projekt: Freezer (UI GitHub Pages -> API Worker)
 Syfte:
 - Primärt: API-auth via /auth/me (cookie-session), CSRF i minne
 - Fallback: UI-only auth via FRZ_SESSION_V1 (sessionStorage/localStorage)
-- Fail-closed: om varken API-auth eller UI-session är OK -> redirect ../index.html
+- Fail-closed: om varken API-auth eller UI-session är OK -> INGEN redirect-loop.
+  Visa istället låst läge med tydlig “Logga in”-länk.
 
 Fix (P0 crash):
 - Om FreezerStore eller FreezerRender saknas (pga 404/syntax/module mismatch) → INGEN redirect-loop.
@@ -46,12 +47,6 @@ Kontrakt:
   function byId(id) { return document.getElementById(id); }
   function safeNum(v, fallback) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
   function safeJsonParse(raw) { try { return JSON.parse(raw); } catch { return null; } }
-
-  function redirectToLogin() {
-    try { window.location.replace(PATH_LOGIN); } catch {
-      try { window.location.href = PATH_LOGIN; } catch {}
-    }
-  }
 
   function readUiSession() {
     try {
@@ -471,7 +466,26 @@ Kontrakt:
       setCreateUserDisabled(true, "Read-only: tekniskt fel.");
       setResetDisabled(true, "Read-only: tekniskt fel.");
 
-      // Lås vyer deterministiskt (fail-closed)
+      try {
+        if (els.viewDashboard) els.viewDashboard.hidden = false;
+        if (els.viewSaldo) els.viewSaldo.hidden = true;
+        if (els.viewHistorik) els.viewHistorik.hidden = true;
+      } catch {}
+    }
+
+    function showAuthFail(reasonCode) {
+      const r = String(reasonCode || "AUTH_REQUIRED");
+      setTopbarIdentity("—", "—");
+      setStatus("Ej inloggad", false);
+      setViewHint("Read-only: inloggning krävs.");
+      setCreateUserDisabled(true, "Inloggning krävs.");
+      setResetDisabled(true, "Inloggning krävs.");
+
+      const lockText =
+        `Inloggning krävs (${r}). Öppna Logga in: ${PATH_LOGIN}`;
+
+      setLockPanel(true, lockText);
+
       try {
         if (els.viewDashboard) els.viewDashboard.hidden = false;
         if (els.viewSaldo) els.viewSaldo.hidden = true;
@@ -494,6 +508,7 @@ Kontrakt:
       setCreateUserDisabled,
       setResetDisabled,
       showBootError,
+      showAuthFail,
       renderTopInOutPanel
     };
   })();
@@ -700,7 +715,6 @@ Kontrakt:
   }
 
   function renderNow() {
-    // P0: om render saknas -> stanna fail-closed, ingen redirect-loop
     if (!window.FreezerRender) {
       markBootMissing("render");
       return;
@@ -712,7 +726,6 @@ Kontrakt:
       window.FreezerRender.renderAll(st, { itemsMsg: "—" });
       window.FreezerRender.setActiveTabUI(activeTab);
     } catch {
-      // Om render finns men kraschar: fail-closed UI
       markBootMissing("render");
       return;
     }
@@ -722,7 +735,6 @@ Kontrakt:
     View.setHintForTab(activeTab);
     renderTopInOutIfDashboard(st);
 
-    // Status indikering (fail-soft)
     const status = safeGetStatus();
     if (storeMissing) View.setStatus("Tekniskt fel", false);
     else if (status && (status.locked || status.readOnly)) View.setStatus("Read-only", false);
@@ -743,13 +755,11 @@ Kontrakt:
     if (!hasPerm("users_manage")) return;
     if (renderMissing || storeMissing || storeCorrupt) return;
 
-    // API-läge: respektera store lock/readOnly
     if (auth.mode === "api") {
       const status = safeGetStatus();
       if (status.locked || status.readOnly) return;
     }
 
-    // UI-läge: tillåt öppning även om store "laddar/readOnly"
     if (window.FreezerModal && typeof window.FreezerModal.open === "function") {
       window.FreezerModal.open({
         title: "Skapa användare",
@@ -771,7 +781,6 @@ Kontrakt:
   // AUTH BOOT (API first, fallback UI-session)
   // -----------------------------
   async function bootAuth() {
-    // 1) API mode if configured
     if (API_BASE) {
       try {
         const { data } = await apiMe();
@@ -792,11 +801,10 @@ Kontrakt:
       }
     }
 
-    // 2) UI mode (FRZ_SESSION_V1)
     const sess = readUiSession();
     const v = isUiSessionValid(sess);
     if (!v.ok) {
-      redirectToLogin();
+      View.showAuthFail(v.reason || "AUTH_REQUIRED");
       return false;
     }
 
@@ -805,7 +813,6 @@ Kontrakt:
     auth.userId = String(v.firstName || "—");
     auth.role = String(v.role || "—");
 
-    // Admin gets demo perms
     auth.perms = String(v.role).toUpperCase() === "ADMIN"
       ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
       : ["view_dashboard"];
@@ -820,7 +827,6 @@ Kontrakt:
   // STORE INIT/SUBSCRIBE
   // -----------------------------
   function initStore() {
-    // P0: om store saknas -> stanna på sidan med fail-closed UI (ingen redirect-loop)
     store = window.FreezerStore || null;
     if (!store || typeof store.init !== "function") {
       markBootMissing("store");
@@ -902,29 +908,19 @@ Kontrakt:
     const ok = await bootAuth();
     if (!ok) return;
 
-    // Tidig status
     View.setStatus("Laddar…", true);
 
-    // Init store (fail-closed UI om den saknas)
     initStore();
-
-    // Subscribe om möjligt
     subscribeStore();
-
-    // Render deterministiskt (eller fail-closed om render saknas)
     renderNow();
 
-    // Säkra knappar även om store aldrig uppdaterar
     syncCreateUserTopbarBtn();
     syncResetBtn();
   })();
 
   /* ÄNDRINGSLOGG (≤8)
-  1) P0: Ingen redirect-loop om FreezerStore saknas → visa “Tekniskt fel” + read-only lockpanel.
-  2) P0: Ingen redirect-loop om FreezerRender saknas/krashar → visa “Tekniskt fel” + lås actions.
-  3) Fail-closed: disable reset/create vid boot-fel (store/render) och vid storage-corrupt.
-  4) Statuspill uppdateras (OK/Read-only/Tekniskt fel) utan console-loggning.
-  5) Beteende i normal drift oförändrat: auth + store + render + tabs + dashboard panel.
+  1) P0: Tar bort auto-redirect vid auth-fail → fail-closed på sidan (lockpanel + “Logga in”-hint).
+  2) P0: Behåller ingen redirect-loop vid saknad Store/Render → “Tekniskt fel” read-only.
+  3) Övrigt beteende oförändrat i normal drift: auth + store + render + tabs + dashboard panel.
   */
 })();
-
