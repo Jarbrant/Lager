@@ -1,27 +1,3 @@
-<!-- ============================================================
-FIL: admin/freezer.html  (NY HEL FIL)
-Projekt: Lager/Freezer (UI-only / localStorage-first)
-
-Mål:
-- Modern admin-startsida (Fortnox-känsla): sidomeny + topbar + kortlayout
-- Behåll kompatibla DOM-id/hookar för befintlig JS:
-  - frzStatusText, frzRoleText, frzUserName, frzOpenCreateUserBtn, frzResetDemoBtn
-  - tabDashboard/tabSaldo/tabHistorik + viewDashboard/viewSaldo/viewHistorik
-  - frzDashCards, frzDashNotes
-  - frzUsersPanel, frzUsersList, frzUsersCount, frzUsersInlineMsg*
-  - frzSaldoTableWrap, frzSaldoCount
-  - frzHistoryList, frzHistoryCount
-  - freezerViewMenu, freezerViewRoot (router hooks)
-  - frzUserModalOverlay + legacy modal ids
-
-P0 FIX:
-- .modalOverlay[hidden]{ display:none !important; } (modal får aldrig låsa sidan)
-
-POLICY:
-- UI-only
-- Inga nya storage-keys/datamodell
-- XSS-safe (render sker i JS via textContent)
-============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
@@ -31,258 +7,34 @@ POLICY:
   <link rel="icon" href="data:,">
 
   <style>
-    :root{
-      color-scheme: light;
-      --bg: #f6f7f8;
-      --card: #ffffff;
-      --card2:#fafafa;
-      --line:#e6e6e6;
-      --text:#0f172a;
-      --muted: rgba(15,23,42,.72);
-      --shadow: 0 12px 35px rgba(2,6,23,.08);
-      --r12: 12px;
-      --r14: 14px;
-      --r18: 18px;
-      --r999: 999px;
-    }
+    :root { color-scheme: light; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    header { border-bottom:1px solid #e6e6e6; background:#fff; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .brand { font-weight:800; letter-spacing:.2px; }
+    nav a { text-decoration:none; color:inherit; opacity:.8; }
+    nav a:hover { opacity:1; }
+    .spacer { flex: 1; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid #e6e6e6; background:#fafafa; font-size: 13px; }
+    .pill b { font-weight:700; }
+    .muted { opacity:.75; }
+    .panel { border:1px solid #e6e6e6; border-radius: 12px; padding: 12px; background:#fff; }
+    main { background:#f6f7f8; min-height: calc(100vh - 64px); }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .tabBtn { border:1px solid #e6e6e6; background:#fff; border-radius:999px; padding:8px 12px; cursor:pointer; font-size: 14px; }
+    .tabBtn[aria-selected="true"] { font-weight:800; }
+    .grid2 { display:grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 900px){ .grid2 { grid-template-columns: 1fr 1fr; } }
+    .danger { border-color:#f2b8b5; background:#fff5f5; }
+    .ok { border-color:#cfe9cf; background:#f4fff4; }
+    .btn { border:1px solid #e6e6e6; background:#fff; border-radius: 10px; padding:8px 10px; cursor:pointer; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    select, input[type="text"] { padding:7px 10px; border-radius: 10px; border:1px solid #e6e6e6; background:#fff; }
+    footer { padding: 16px 0; }
+    .hr { height:1px; background:#eee; margin:10px 0; }
 
-    *{ box-sizing:border-box; }
-    body{
-      margin:0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-
-    /* App layout */
-    .frzApp{
-      min-height:100vh;
-      display:grid;
-      grid-template-columns: 280px 1fr;
-    }
-    @media (max-width: 980px){
-      .frzApp{ grid-template-columns: 1fr; }
-      .frzSidebar{ position: sticky; top:0; z-index: 50; }
-    }
-
-    /* Sidebar */
-    .frzSidebar{
-      background: #0b1220;
-      color: #e5e7eb;
-      border-right: 1px solid rgba(255,255,255,.06);
-      padding: 14px;
-    }
-    .frzSideTop{
-      display:flex; align-items:center; gap:10px;
-      padding: 10px 10px 12px 10px;
-      border-bottom: 1px solid rgba(255,255,255,.08);
-      margin-bottom: 12px;
-    }
-    .frzLogo{
-      width:34px; height:34px; border-radius: 10px;
-      display:grid; place-items:center;
-      background: rgba(255,255,255,.10);
-      font-weight:800;
-    }
-    .frzSideBrand{ font-weight:900; letter-spacing:.2px; }
-    .frzSideSub{ font-size:12px; opacity:.75; margin-top:2px; }
-
-    .frzNav{
-      display:flex; flex-direction:column; gap:8px;
-      padding: 12px 0;
-    }
-    .frzNavBtn{
-      width:100%;
-      text-align:left;
-      border:1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.06);
-      color:#e5e7eb;
-      border-radius: 12px;
-      padding: 10px 12px;
-      cursor:pointer;
-      display:flex; align-items:center; gap:10px;
-    }
-    .frzNavBtn:hover{ background: rgba(255,255,255,.10); }
-    .frzNavBtn[aria-current="page"]{
-      background: rgba(255,255,255,.16);
-      border-color: rgba(255,255,255,.18);
-      font-weight:800;
-    }
-    .frzNavIcon{
-      width:28px; height:28px; border-radius: 10px;
-      display:grid; place-items:center;
-      background: rgba(255,255,255,.10);
-      font-size: 14px;
-    }
-    .frzSideCard{
-      margin-top: 12px;
-      border:1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.06);
-      border-radius: 14px;
-      padding: 12px;
-    }
-    .frzSideCard b{ display:block; }
-    .frzSideCard .muted{ opacity:.75; font-size:12px; }
-
-    /* Main */
-    .frzMain{
-      display:flex;
-      flex-direction:column;
-      min-width:0;
-    }
-
-    /* Topbar */
-    header{
-      background: var(--card);
-      border-bottom: 1px solid var(--line);
-      position: sticky; top:0; z-index: 40;
-    }
-    .wrap{
-      max-width: 1220px;
-      margin: 0 auto;
-      padding: 12px 16px;
-    }
-    .topRow{
-      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-    }
-    .crumb{
-      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-      font-weight:800;
-    }
-    .crumb a{ color:inherit; text-decoration:none; opacity:.8; font-weight:700; }
-    .crumb a:hover{ opacity:1; }
-    .crumb .muted{ opacity:.65; font-weight:700; }
-    .spacer{ flex:1; }
-
-    .pill{
-      display:inline-flex;
-      gap:8px;
-      align-items:center;
-      padding:6px 10px;
-      border-radius: var(--r999);
-      border:1px solid var(--line);
-      background: var(--card2);
-      font-size: 13px;
-      white-space: nowrap;
-    }
-    .pill b{ font-weight:800; }
-    .muted{ color: var(--muted); }
-    .btn{
-      border:1px solid var(--line);
-      background: var(--card);
-      border-radius: 12px;
-      padding: 9px 12px;
-      cursor:pointer;
-      font-weight:700;
-    }
-    .btn:hover{ background:#f9fafb; }
-    .btn[disabled]{ opacity:.55; cursor:not-allowed; }
-
-    /* Content shell */
-    main{ padding: 16px 0 26px; }
-    .content{
-      max-width: 1220px;
-      margin: 0 auto;
-      padding: 0 16px;
-    }
-
-    /* Tabs row (kept for JS hooks) */
-    .tabsRow{
-      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-      margin-bottom: 12px;
-    }
-    .tabs{
-      display:flex; gap:8px; flex-wrap:wrap;
-      padding: 6px;
-      border:1px solid var(--line);
-      background: var(--card);
-      border-radius: 14px;
-      box-shadow: 0 1px 0 rgba(2,6,23,.02);
-    }
-    .tabBtn{
-      border:1px solid transparent;
-      background: transparent;
-      border-radius: var(--r999);
-      padding: 8px 12px;
-      cursor:pointer;
-      font-size: 14px;
-      font-weight: 700;
-      color: rgba(15,23,42,.85);
-    }
-    .tabBtn[aria-selected="true"]{
-      background: #f3f4f6;
-      border-color: #e5e7eb;
-      font-weight: 900;
-    }
-
-    /* Cards */
-    .panel{
-      border:1px solid var(--line);
-      background: var(--card);
-      border-radius: var(--r18);
-      padding: 14px;
-      box-shadow: var(--shadow);
-    }
-    .panel.flat{ box-shadow:none; }
-    .danger{ border-color:#f2b8b5; background:#fff5f5; }
-    .warn{ border-color:#f2b8b5; background:#fff5f5; }
-
-    .grid2{
-      display:grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-    }
-    @media (min-width: 980px){
-      .grid2{ grid-template-columns: 1.15fr .85fr; }
-    }
-    .grid3{
-      display:grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-    }
-    @media (min-width: 980px){
-      .grid3{ grid-template-columns: 1fr 1fr 1fr; }
-    }
-
-    .card{
-      border:1px solid var(--line);
-      background: var(--card);
-      border-radius: var(--r18);
-      padding: 14px;
-      box-shadow: var(--shadow);
-      min-height: 94px;
-    }
-    .cardHead{
-      display:flex; align-items:center; gap:10px;
-      margin-bottom: 8px;
-    }
-    .cardIcon{
-      width:40px; height:40px;
-      border-radius: 14px;
-      display:grid; place-items:center;
-      background: #f3f4f6;
-      border:1px solid #e5e7eb;
-      font-weight:900;
-    }
-    .cardTitle{ font-weight:900; }
-    .cardText{ color: var(--muted); font-size: 13px; line-height: 1.35; }
-
-    .hr{ height:1px; background:#eee; margin: 14px 0; }
-
-    /* Users list styling (kept) */
-    .list{ display:flex; flex-direction:column; gap:8px; }
-    .userRow{
-      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
-      padding: 10px;
-      border:1px solid var(--line);
-      border-radius: 14px;
-      background: var(--card);
-    }
-    .userRow .name{ font-weight:900; }
-    .userRow .meta{ font-size:12px; color: var(--muted); }
-
-    /* Modal */
-    .modalOverlay{
+    .modalOverlay {
       position: fixed; inset: 0;
       background: rgba(0,0,0,.35);
       display: flex;
@@ -291,389 +43,159 @@ POLICY:
       padding: 18px;
       z-index: 9999;
     }
-    .modalCard{
+    .modalCard {
       width: min(720px, 100%);
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: var(--card);
+      border-radius: 14px;
+      border: 1px solid #e6e6e6;
+      background: #fff;
       box-shadow: 0 20px 60px rgba(0,0,0,.18);
-      overflow:hidden;
     }
-    .modalHead{
+    .modalHead {
       display:flex; align-items:center; gap:10px;
       padding: 12px 14px;
       border-bottom:1px solid #eee;
-      background: #fcfcfd;
     }
-    .modalBody{ padding: 14px; }
-    .modalFoot{
+    .modalBody { padding: 14px; }
+    .modalFoot {
       display:flex; align-items:center; gap:10px;
       padding: 12px 14px;
       border-top:1px solid #eee;
       justify-content:flex-end;
-      background: #fcfcfd;
     }
-    .modalTitle{ font-weight:900; margin:0; }
-    .iconBtn{
-      border:1px solid var(--line);
-      background: var(--card);
-      border-radius: 12px;
-      padding:8px 10px;
-      cursor:pointer;
-      font-weight:800;
+    .modalTitle { font-weight:900; margin:0; }
+    .iconBtn {
+      border:1px solid #e6e6e6; background:#fff;
+      border-radius: 10px; padding:8px 10px; cursor:pointer;
     }
-    .srOnly{
+    .srOnly {
       position:absolute; width:1px; height:1px; padding:0; margin:-1px;
       overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
     }
 
-    /* P0 FIX: hidden måste vinna */
-    .modalOverlay[hidden]{ display:none !important; }
-
-    /* Small helpers */
-    .kpi{
-      display:flex; align-items:baseline; justify-content:space-between; gap:10px;
-      padding: 10px 12px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      background: var(--card2);
-    }
-    .kpi .label{ font-size: 12px; color: var(--muted); font-weight:700; }
-    .kpi .value{ font-size: 18px; font-weight: 950; letter-spacing:-.2px; }
-    .kpi .sub{ font-size: 12px; color: var(--muted); }
-
-    footer{ padding: 10px 0; color: var(--muted); font-size: 12px; }
+    /* P0: hidden måste vinna så overlay aldrig “låser” sidan */
+    .modalOverlay[hidden] { display:none !important; }
   </style>
 </head>
 
 <body>
-  <div class="frzApp">
+  <header>
+    <div class="wrap">
+      <div class="row">
+        <div class="brand">🧊 Freezer</div>
 
-    <!-- SIDEBAR -->
-    <aside class="frzSidebar">
-      <div class="frzSideTop">
-        <div class="frzLogo">🧊</div>
-        <div>
-          <div class="frzSideBrand">Freezer</div>
-          <div class="frzSideSub">Admin • Fryslager</div>
+        <nav class="row" aria-label="Admin navigation">
+          <a href="../index.html" class="muted">Logga in</a>
+          <span class="muted">/</span>
+          <a href="./freezer.html"><b>Admin</b></a>
+        </nav>
+
+        <div class="spacer"></div>
+
+        <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
+          <span class="muted">Status:</span>
+          <b id="frzStatusText">Laddar…</b>
         </div>
-      </div>
 
-      <div class="frzNav" aria-label="Huvudmeny">
-        <!-- Dessa triggar befintliga tab-knappar (se inline script längst ner) -->
-        <button class="frzNavBtn" type="button" data-frz-tab="dashboard" aria-current="page">
-          <span class="frzNavIcon">🏠</span>
-          <span>Startsida</span>
+        <div class="pill" title="Roll från session/API">
+          <span class="muted">Roll:</span>
+          <b id="frzRoleText">—</b>
+        </div>
+
+        <div class="pill" title="Inloggad användare">
+          <span class="muted">Användare:</span>
+          <b id="frzUserName">—</b>
+        </div>
+
+        <button id="frzOpenCreateUserBtn" class="btn" type="button" title="Skapa ny användare" disabled>
+          Skapa användare
         </button>
-        <button class="frzNavBtn" type="button" data-frz-tab="saldo">
-          <span class="frzNavIcon">📦</span>
-          <span>Saldo</span>
-        </button>
-        <button class="frzNavBtn" type="button" data-frz-tab="history">
-          <span class="frzNavIcon">🧾</span>
-          <span>Historik</span>
+
+        <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data">
+          Återställ demo
         </button>
       </div>
+    </div>
+  </header>
 
-      <div class="frzSideCard">
-        <b>Snabbinfo</b>
-        <div class="muted" style="margin-top:6px;">
-          Detta är en UI-only demo. Behörigheter styr knappar och paneler.
-        </div>
-        <div class="muted" style="margin-top:8px;">
-          Tips: Om något känns “låst” – testa <b>Återställ demo</b>.
-        </div>
-      </div>
-
-      <div class="frzSideCard" style="margin-top:10px;">
-        <b>Router</b>
-        <div class="muted" style="margin-top:6px;">
-          Meny/Root kopplas av JS här:
-        </div>
-        <div class="muted" style="margin-top:6px;">
-          <code style="opacity:.9;">#freezerViewMenu</code><br/>
-          <code style="opacity:.9;">#freezerViewRoot</code>
-        </div>
-      </div>
-    </aside>
-
-    <!-- MAIN -->
-    <section class="frzMain">
-
-      <!-- TOPBAR -->
-      <header>
-        <div class="wrap">
-          <div class="topRow">
-            <div class="crumb">
-              <span style="font-size:18px;">Freezer</span>
-              <span class="muted">Admin Hem</span>
-              <span class="muted">/</span>
-              <a href="./freezer.html"><b>Fryslager</b></a>
-            </div>
-
-            <div class="spacer"></div>
-
-            <div id="frzStatusPill" class="pill" role="status" aria-live="polite">
-              <span class="muted">Status:</span>
-              <b id="frzStatusText">Laddar…</b>
-            </div>
-
-            <div class="pill" title="Roll styrs av inloggning">
-              <span class="muted">Roll:</span>
-              <b id="frzRoleText">ADMIN</b>
-            </div>
-
-            <div class="pill" title="Inloggad användare">
-              <span class="muted">Användare:</span>
-              <b id="frzUserName">—</b>
-            </div>
-
-            <button id="frzOpenCreateUserBtn" class="btn" type="button" title="Skapa ny användare (öppnar modal)" disabled>
-              Skapa användare
-            </button>
-
-            <button id="frzResetDemoBtn" class="btn" type="button" title="Återställ demo-data (endast om ej read-only)">
-              Återställ demo
-            </button>
+  <main>
+    <div class="wrap">
+      <section id="frzLockPanel" class="panel danger" hidden>
+        <div class="row">
+          <div>
+            <b>Import stoppad / Låst läge</b>
+            <div class="muted" id="frzLockReason">Orsak: okänd</div>
           </div>
         </div>
-      </header>
+      </section>
 
-      <main>
-        <div class="content">
+      <section id="frzDebugPanel" class="panel" hidden>
+        <div class="row">
+          <b>Debug</b>
+          <div class="spacer"></div>
+          <div class="muted" id="frzDebugText">—</div>
+        </div>
+      </section>
 
-          <!-- Lock / debug (hooks) -->
-          <section id="frzLockPanel" class="panel danger flat" hidden>
-            <div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">
-              <div>
-                <b>Import stoppad / Låst läge</b>
-                <div class="muted" id="frzLockReason">Orsak: okänd</div>
-              </div>
-            </div>
-          </section>
-
-          <section id="frzDebugPanel" class="panel flat" hidden style="margin-top:12px;">
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-              <b>Debug</b>
-              <div class="spacer"></div>
-              <div class="muted" id="frzDebugText">—</div>
-            </div>
-          </section>
-
-          <!-- Tabs + hint + mode -->
-          <div class="tabsRow" style="margin-top:12px;">
-            <div class="tabs" role="tablist" aria-label="Vy">
-              <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
-              <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
-              <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
-            </div>
-
-            <div id="frzViewHint" class="muted" style="font-size:13px;">—</div>
-
-            <div class="spacer"></div>
-
-            <div class="pill" title="Visar om sidan är read-only">
-              <span class="muted">Läge:</span>
-              <b id="frzModeText">—</b>
-            </div>
+      <section class="panel">
+        <div class="row">
+          <div class="tabs" role="tablist" aria-label="Vy">
+            <button id="tabDashboard" class="tabBtn" type="button" role="tab" aria-selected="true" aria-controls="viewDashboard">Dashboard</button>
+            <button id="tabSaldo" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewSaldo">Saldo</button>
+            <button id="tabHistorik" class="tabBtn" type="button" role="tab" aria-selected="false" aria-controls="viewHistorik">Historik</button>
           </div>
 
-          <!-- Router hooks (kept) -->
-          <section class="panel flat" style="margin-bottom:12px;">
-            <div id="freezerViewMenu" class="tabs" aria-label="Router-meny"></div>
-            <div id="freezerViewRoot" style="margin-top:10px;"></div>
-          </section>
+          <div id="frzViewHint" class="muted" style="font-size:13px;">—</div>
 
-          <!-- DASHBOARD -->
-          <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
-            <div class="grid2">
+          <div class="spacer"></div>
 
-              <!-- LEFT: main dashboard -->
-              <div>
-                <div class="panel flat" style="padding:0; background:transparent; border:none; box-shadow:none;">
-                  <div class="grid3">
-                    <div class="card">
-                      <div class="cardHead">
-                        <div class="cardIcon">📊</div>
-                        <div>
-                          <div class="cardTitle">Översikt</div>
-                          <div class="cardText">Snabb status för inköp/admin.</div>
-                        </div>
-                      </div>
-                      <div class="kpi">
-                        <div>
-                          <div class="label">Saldo (indikativt)</div>
-                          <div class="value" id="frzKpiSaldo">—</div>
-                          <div class="sub">uppdateras av render</div>
-                        </div>
-                        <div class="muted">📦</div>
-                      </div>
-                    </div>
-
-                    <div class="card">
-                      <div class="cardHead">
-                        <div class="cardIcon">🧾</div>
-                        <div>
-                          <div class="cardTitle">Händelser</div>
-                          <div class="cardText">Senaste rörelser och historik.</div>
-                        </div>
-                      </div>
-                      <div class="kpi">
-                        <div>
-                          <div class="label">Historik (antal)</div>
-                          <div class="value" id="frzKpiHistory">—</div>
-                          <div class="sub">senaste period</div>
-                        </div>
-                        <div class="muted">⏱️</div>
-                      </div>
-                    </div>
-
-                    <div class="card">
-                      <div class="cardHead">
-                        <div class="cardIcon">✅</div>
-                        <div>
-                          <div class="cardTitle">Att göra</div>
-                          <div class="cardText">Snabba åtgärder för admin.</div>
-                        </div>
-                      </div>
-                      <div class="cardText">
-                        • Lägg upp artiklar<br/>
-                        • Kontrollera uttag<br/>
-                        • Skapa användare (om behörighet)
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="hr"></div>
-
-                  <!-- frzDashCards används av render/JS för att injicera kort + Top IN/OUT panel -->
-                  <div id="frzDashCards" class="grid2"></div>
-                </div>
-
-                <div class="hr"></div>
-
-                <!-- USERS PANEL (hook) -->
-                <section id="frzUsersPanel" class="panel" hidden>
-                  <div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">
-                    <div>
-                      <h2 style="margin:0;">Användare & behörigheter</h2>
-                      <div class="muted" style="margin-top:4px;">
-                        Skapa/ändra användare görs via <b>Skapa användare</b> i topbaren.
-                      </div>
-                    </div>
-                    <div class="spacer"></div>
-                    <div class="pill" title="Antal användare (inkl inaktiva)">
-                      <span class="muted">Users:</span>
-                      <b id="frzUsersCount">0</b>
-                    </div>
-                  </div>
-
-                  <div class="hr"></div>
-
-                  <div id="frzUsersInlineMsg" class="panel warn flat" hidden>
-                    <b id="frzUsersInlineMsgTitle">Info</b>
-                    <div class="muted" id="frzUsersInlineMsgText">—</div>
-                  </div>
-
-                  <div class="list" id="frzUsersList" aria-label="Users list"></div>
-                </section>
-              </div>
-
-              <!-- RIGHT: notes + company/status -->
-              <div>
-                <div class="card">
-                  <div class="cardHead">
-                    <div class="cardIcon">🏢</div>
-                    <div>
-                      <div class="cardTitle">Företaget</div>
-                      <div class="cardText">Status, notiser och admininfo.</div>
-                    </div>
-                  </div>
-                  <div class="kpi">
-                    <div>
-                      <div class="label">Systemläge</div>
-                      <div class="value" id="frzCompanyMode">—</div>
-                      <div class="sub">read-only / lås / ok</div>
-                    </div>
-                    <div class="muted">🛡️</div>
-                  </div>
-                  <div class="cardText" style="margin-top:10px;">
-                    Behörigheter styr vad som är klickbart. Om “Skapa användare” är grå → saknar du rättighet eller sidan är låst/read-only.
-                  </div>
-                </div>
-
-                <div style="height:12px;"></div>
-
-                <div class="card">
-                  <div class="cardHead">
-                    <div class="cardIcon">📝</div>
-                    <div>
-                      <div class="cardTitle">Noteringar</div>
-                      <div class="cardText">Interna anteckningar (stub).</div>
-                    </div>
-                  </div>
-                  <div class="muted" id="frzDashNotes">—</div>
-                </div>
-
-                <div style="height:12px;"></div>
-
-                <div class="card">
-                  <div class="cardHead">
-                    <div class="cardIcon">💡</div>
-                    <div>
-                      <div class="cardTitle">Insikter</div>
-                      <div class="cardText">Tips och kommande händelser.</div>
-                    </div>
-                  </div>
-                  <div class="cardText">
-                    • Öppna <b>Historik</b> för att se senaste IN/OUT.<br/>
-                    • Öppna <b>Saldo</b> för att se artiklar och nivåer.<br/>
-                    • Använd <b>Top IN/OUT</b> i Dashboard för perioder (7/30/90).
-                  </div>
-                </div>
-              </div>
-
-            </div>
-
-            <footer>
-              Baseline • UI-only • localStorage-first • fail-closed
-            </footer>
-          </section>
-
-          <!-- SALDO -->
-          <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
-              <h2 style="margin:0;">Lagersaldo</h2>
-              <div class="spacer"></div>
-              <div class="pill">
-                <span class="muted">Artiklar:</span>
-                <b id="frzSaldoCount">0</b>
-              </div>
-            </div>
-
-            <div id="frzSaldoTableWrap" class="panel flat" style="background: var(--card2);"></div>
-          </section>
-
-          <!-- HISTORIK -->
-          <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
-              <h2 style="margin:0;">Historik</h2>
-              <div class="spacer"></div>
-              <div class="pill">
-                <span class="muted">Händelser:</span>
-                <b id="frzHistoryCount">0</b>
-              </div>
-            </div>
-
-            <div id="frzHistoryList" class="panel flat" style="background: var(--card2);"></div>
-          </section>
-
+          <div class="pill" title="UI/API-läge">
+            <span class="muted">Läge:</span>
+            <b id="frzModeText">—</b>
+          </div>
         </div>
-      </main>
-    </section>
-  </div>
 
-  <!-- Legacy users modal (styrd av admin/freezer.js) -->
+        <div id="freezerViewMenu" class="tabs" aria-label="Router-meny" style="margin-top:10px;"></div>
+        <div id="freezerViewRoot" style="margin-top:10px;"></div>
+      </section>
+
+      <section id="viewDashboard" class="panel" role="tabpanel" aria-labelledby="tabDashboard">
+        <div class="grid2">
+          <div>
+            <h2 style="margin:0 0 8px 0;">Översikt</h2>
+            <div class="muted" style="margin-bottom:12px;">Snabbvy för admin/inköp.</div>
+            <div id="frzDashCards" class="grid2"></div>
+          </div>
+
+          <div>
+            <h2 style="margin:0 0 8px 0;">Noteringar</h2>
+            <div class="muted" id="frzDashNotes">—</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="viewSaldo" class="panel" role="tabpanel" aria-labelledby="tabSaldo" hidden>
+        <div class="row" style="margin-bottom:10px;">
+          <h2 style="margin:0;">Lagersaldo</h2>
+          <div class="spacer"></div>
+          <div class="pill"><span class="muted">Artiklar:</span> <b id="frzSaldoCount">0</b></div>
+        </div>
+        <div id="frzSaldoTableWrap" class="panel" style="background:#fafafa;"></div>
+      </section>
+
+      <section id="viewHistorik" class="panel" role="tabpanel" aria-labelledby="tabHistorik" hidden>
+        <div class="row" style="margin-bottom:10px;">
+          <h2 style="margin:0;">Historik</h2>
+          <div class="spacer"></div>
+          <div class="pill"><span class="muted">Händelser:</span> <b id="frzHistoryCount">0</b></div>
+        </div>
+        <div id="frzHistoryList" class="panel" style="background:#fafafa;"></div>
+      </section>
+
+      <footer class="muted">Freezer • Admin</footer>
+    </div>
+  </main>
+
+  <!-- Legacy users modal (styrs av admin/freezer.js) -->
   <div id="frzUserModalOverlay" class="modalOverlay" hidden aria-hidden="true">
     <div class="modalCard" role="dialog" aria-modal="true" aria-labelledby="frzUserModalTitle">
       <div class="modalHead">
@@ -683,38 +205,30 @@ POLICY:
       </div>
 
       <div class="modalBody">
-        <div id="frzUsersMsg" class="panel warn flat" hidden>
+        <div id="frzUsersMsg" class="panel danger" hidden>
           <b id="frzUsersMsgTitle">Fel</b>
           <div class="muted" id="frzUsersMsgText">—</div>
         </div>
 
-        <div class="panel flat" style="background: var(--card2);">
-          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+        <div class="panel" style="background:#fafafa;">
+          <div class="row" style="margin-bottom:10px;">
             <b id="frzUserFormTitle">Skapa användare</b>
             <div class="spacer"></div>
             <span class="muted" id="frzUserFormMode">—</span>
           </div>
 
-          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+          <div class="row" style="margin-bottom:10px;">
             <label class="pill" for="frzUserFirstName">
               <span class="muted">Förnamn:</span>
               <input id="frzUserFirstName" type="text" placeholder="t.ex. Anna" maxlength="32" />
             </label>
           </div>
 
-          <div style="display:flex; gap:12px; flex-wrap:wrap;" aria-label="Behörigheter">
-            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
-              <input id="perm_users_manage" type="checkbox" /> users_manage
-            </label>
-            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
-              <input id="perm_inventory_write" type="checkbox" /> inventory_write
-            </label>
-            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
-              <input id="perm_history_write" type="checkbox" /> history_write
-            </label>
-            <label style="display:flex; gap:6px; align-items:center; font-size:13px;">
-              <input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view
-            </label>
+          <div class="row" style="gap:10px; flex-wrap:wrap;" aria-label="Behörigheter">
+            <label><input id="perm_users_manage" type="checkbox" /> users_manage</label>
+            <label><input id="perm_inventory_write" type="checkbox" /> inventory_write</label>
+            <label><input id="perm_history_write" type="checkbox" /> history_write</label>
+            <label><input id="perm_dashboard_view" type="checkbox" checked /> dashboard_view</label>
           </div>
 
           <input id="frzUserEditingId" type="hidden" value="" />
@@ -729,59 +243,27 @@ POLICY:
     </div>
   </div>
 
-  <!-- Scripts (behåll ordning) -->
+  <!-- Bas: core/contract/store måste in före render + controller -->
   <script src="../UI/pages/freezer/02-core.js"></script>
   <script src="../UI/pages/freezer/04-contract.js"></script>
   <script src="../UI/pages/freezer/03-store.js"></script>
 
+  <!-- Render + dashboard helpers (måste finnas => annars redirectar controller) -->
   <script src="../UI/freezer-render.js"></script>
   <script src="../UI/freezer-dashboard.js"></script>
 
+  <!-- Modal shell (om du har den) -->
   <script src="../UI/pages/freezer/05-modal-shell.js"></script>
 
+  <!-- View-registry (moduler) -->
   <script type="module" src="../UI/pages/freezer/00-view-interface.js"></script>
   <script type="module" src="../UI/pages/freezer/01-view-registry.js"></script>
 
+  <!-- Admin-vyer (moduler) -->
   <script type="module" src="../UI/pages/freezer/admin/admin-dashboard.js"></script>
   <script type="module" src="../UI/pages/freezer/admin/admin-items.js"></script>
 
+  <!-- Controller sist -->
   <script src="./freezer.js"></script>
-
-  <!-- Minimal UI glue: sidomeny -> befintliga tabs -->
-  <script>
-    (function(){
-      "use strict";
-      function byId(id){ return document.getElementById(id); }
-      function setCurrent(btn){
-        try{
-          document.querySelectorAll("[data-frz-tab]").forEach(function(b){
-            b.removeAttribute("aria-current");
-          });
-          btn.setAttribute("aria-current", "page");
-        }catch{}
-      }
-      function clickTab(key){
-        var map = { dashboard: "tabDashboard", saldo: "tabSaldo", history: "tabHistorik" };
-        var id = map[String(key||"")] || "";
-        var el = id ? byId(id) : null;
-        if (el && typeof el.click === "function") el.click();
-      }
-
-      document.querySelectorAll("[data-frz-tab]").forEach(function(btn){
-        btn.addEventListener("click", function(){
-          var key = btn.getAttribute("data-frz-tab");
-          setCurrent(btn);
-          clickTab(key);
-        });
-      });
-    })();
-  </script>
-
-  <!-- ÄNDRINGSLOGG (≤8)
-  1) Ny modern layout (sidomeny + topbar + kort) men behåller alla kritiska DOM-id/hookar.
-  2) P0 fix kvar: .modalOverlay[hidden]{display:none !important;} så modal aldrig låser sidan.
-  3) Tabs + view-sektioner kvar exakt (tabDashboard/tabSaldo/tabHistorik + viewDashboard/viewSaldo/viewHistorik).
-  4) Router hooks kvar: freezerViewMenu + freezerViewRoot.
-  -->
 </body>
 </html>
