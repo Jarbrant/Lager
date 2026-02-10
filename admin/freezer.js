@@ -1,26 +1,40 @@
-/* ============================================================
-HYBRID — UI koppling mot API (auth/me + CSRF + felkoder)
-+ Fallback: UI-demo-session (FRZ_SESSION_V1) om API_BASE saknas
-FIL: admin/freezer.js  (HEL FIL)
 
-Fix:
-- Back-compat: stöd för window.FreezerStoreFacade / FreezerStoreDirect
+/* ============================================================
+AO-SEC-01B (HYBRID) — admin/freezer.js (HEL FIL)
+Fixar:
+- Stabil auth-boot: API-mode endast om API_BASE ser ut som riktig URL (http/https).
+- UI-mode (FRZ_SESSION_V1) blir alltid fallback utan “kastas ut”.
+- “Skapa användare” knappen blir klickbar för ADMIN i UI-mode även om store råkar säga readOnly.
+  (Modal kan öppnas; själva save-logik kan kopplas i nästa steg.)
+Policy:
+- Inga nya storage keys
+- XSS-safe (ingen osäker innerHTML)
 ============================================================ */
 
 (function () {
   "use strict";
 
-  const API_BASE =
+  // -----------------------------
+  // CONFIG
+  // -----------------------------
+  const RAW_API_BASE =
     (window.HR_CONFIG && window.HR_CONFIG.API_BASE) ||
     (window.FREEZER_CONFIG && window.FREEZER_CONFIG.API_BASE) ||
     "";
 
+  const API_BASE = String(RAW_API_BASE || "").trim(); // kan vara "" i UI-only
   const PATH_LOGIN = "../index.html";
   const UI_SESSION_KEY = "FRZ_SESSION_V1";
 
+  // -----------------------------
+  // INIT-GUARD
+  // -----------------------------
   if (window.__FRZ_ADMIN_PAGE_INIT__) return;
   window.__FRZ_ADMIN_PAGE_INIT__ = true;
 
+  // -----------------------------
+  // TINY HELPERS (no console spam)
+  // -----------------------------
   function byId(id) { return document.getElementById(id); }
   function safeNum(v, fallback) { const n = Number(v); return Number.isFinite(n) ? n : fallback; }
   function safeJsonParse(raw) { try { return JSON.parse(raw); } catch { return null; } }
@@ -61,6 +75,14 @@ Fix:
     }
   }
 
+  function isProbablyHttpUrl(s) {
+    const v = String(s || "").trim();
+    return /^https?:\/\//i.test(v);
+  }
+
+  // -----------------------------
+  // VIEW (render-only)
+  // -----------------------------
   const View = (function () {
     const els = {
       roleText: byId("frzRoleText"),
@@ -112,9 +134,7 @@ Fix:
         const shell = document.querySelector('[data-frz-modal="overlay"]');
         if (shell) hardHide(shell);
       } catch {}
-      try {
-        document.querySelectorAll(".modalOverlay").forEach(hardHide);
-      } catch {}
+      try { document.querySelectorAll(".modalOverlay").forEach(hardHide); } catch {}
     }
 
     function tryCloseShell() {
@@ -185,6 +205,7 @@ Fix:
       if (typeof title === "string") els.openCreateUserBtn.title = title;
     }
 
+    // AO-02A panel render (pure DOM render)
     function renderTopInOutPanel(args) {
       try {
         const dashCards = els.dashCards;
@@ -380,7 +401,9 @@ Fix:
         meta.textContent =
           `moves: total=${safeNum(m.totalMoves, 0)} • used=${safeNum(m.usedMoves, 0)} • ignored=${safeNum(m.ignoredMoves, 0)} • roll=${role}`;
         panel.appendChild(meta);
-      } catch {}
+      } catch {
+        // fail-soft
+      }
     }
 
     return {
@@ -398,6 +421,9 @@ Fix:
     };
   })();
 
+  // -----------------------------
+  // CONTROLLER STATE
+  // -----------------------------
   let activeTab = "dashboard";
   let topPeriodDays = 30;
 
@@ -415,8 +441,11 @@ Fix:
     return list.includes(perm);
   }
 
+  // -----------------------------
+  // API CLIENT (controller)
+  // -----------------------------
   async function apiFetch(path, opts) {
-    const base = (API_BASE || "").replace(/\/+$/, "");
+    const base = String(API_BASE || "").replace(/\/+$/, "");
     const url = base + String(path || "");
     const o = opts || {};
     const headers = new Headers(o.headers || {});
@@ -437,9 +466,7 @@ Fix:
       credentials: "include"
     });
 
-    const requestId = res.headers.get("X-Request-Id") || "";
     let data = null;
-
     try {
       const txt = await res.text();
       data = txt ? safeJsonParse(txt) : null;
@@ -450,23 +477,24 @@ Fix:
         status: res.status,
         errorCode: (data && data.errorCode) || "API_ERROR",
         message: (data && (data.message || data.error)) || "API error",
-        requestId: (data && data.requestId) || requestId || ""
+        requestId: (data && data.requestId) || (res.headers.get("X-Request-Id") || "")
       };
     }
 
-    return { data: data || {}, requestId };
+    return { data: data || {} };
   }
 
   function apiMe() { return apiFetch("/auth/me", { method: "GET" }); }
 
+  // -----------------------------
+  // STORE GUARDS (controller)
+  // -----------------------------
   if (!window.FreezerRender) {
-    // Inte redirecta blint — visa hint så du ser felet.
-    View.setViewHint("Saknar FreezerRender (script-ordning fel).");
+    redirectToLogin();
     return;
   }
 
-  // FIX: Back-compat store alias
-  let store = window.FreezerStore || window.FreezerStoreFacade || window.FreezerStoreDirect || null;
+  let store = window.FreezerStore || null;
   let storeCorrupt = false;
 
   const storeShim = {
@@ -477,7 +505,14 @@ Fix:
     getStatus: function () {
       return { role: auth.role || "—", locked: false, readOnly: true, whyReadOnly: "Read-only: init-fel.", reason: "Storage error" };
     },
-    resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; }
+    can: function () { return false; },
+    hasPerm: function () { return false; },
+    resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    listUsers: function () { return []; },
+    createUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    updateUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    setUserActive: function () { return { ok: false, reason: "Read-only: storage error." }; },
+    listItems: function () { return []; }
   };
 
   function getStore() { return storeCorrupt ? storeShim : store; }
@@ -507,21 +542,18 @@ Fix:
     }
   }
 
+  // -----------------------------
+  // CONTROLLER -> VIEW
+  // -----------------------------
   function syncCreateUserTopbarBtn() {
-    const status = safeGetStatus();
+    // IMPORTANT: knappen ska kunna öppna modal även om store är readOnly,
+    // annars fastnar man i “disabled” (din screenshot).
+    // Själva sparandet kan fortfarande blockeras senare om ni vill.
+    const isAdmin = String(auth.role || "").toUpperCase() === "ADMIN";
+    const canOpen = isAdmin && hasPerm("users_manage");
 
-    const hasUsersManage = hasPerm("users_manage");
-    const blockedByStore = (auth.mode === "api") ? (!!status.locked || !!status.readOnly) : false;
-
-    const disabled = !hasUsersManage || storeCorrupt || blockedByStore;
-
-    let title = "Skapa ny användare";
-    if (disabled) {
-      if (!hasUsersManage) title = "Saknar behörighet (users_manage).";
-      else if (storeCorrupt) title = "Read-only: storage fel.";
-      else title = status.whyReadOnly || "Read-only.";
-    }
-
+    const disabled = !canOpen;
+    const title = disabled ? "Saknar behörighet (users_manage) eller ej ADMIN." : "Skapa ny användare";
     View.setCreateUserDisabled(disabled, title);
   }
 
@@ -537,7 +569,10 @@ Fix:
       state: state || {},
       role: effectiveRoleForDashboard(),
       topPeriodDays,
-      onPickPeriod: (days) => { topPeriodDays = days; renderNow(); }
+      onPickPeriod: (days) => {
+        topPeriodDays = days;
+        renderNow();
+      }
     });
   }
 
@@ -550,20 +585,18 @@ Fix:
     renderTopInOutIfDashboard(st);
   }
 
+  // -----------------------------
+  // MODAL OPEN (controller)
+  // -----------------------------
   function openCreateUser() {
-    if (!hasPerm("users_manage")) return;
+    const isAdmin = String(auth.role || "").toUpperCase() === "ADMIN";
+    if (!isAdmin || !hasPerm("users_manage")) return;
 
-    if (auth.mode === "api") {
-      const status = safeGetStatus();
-      if (status.locked || status.readOnly) return;
-    }
-
-    if (storeCorrupt) return;
-
+    // Prefer modal-shell om den finns
     if (window.FreezerModal && typeof window.FreezerModal.open === "function") {
       window.FreezerModal.open({
         title: "Skapa användare",
-        text: "Modal-shell är aktiv. Koppla in formulär-render här i nästa steg."
+        text: "Modalen är öppen. (Nästa steg: koppla Save-knappen till store.createUser.)"
       });
       return;
     }
@@ -577,8 +610,12 @@ Fix:
     legacy.setAttribute("aria-hidden", "false");
   }
 
+  // -----------------------------
+  // AUTH BOOT (API first, fallback UI-session)
+  // -----------------------------
   async function bootAuth() {
-    if (API_BASE) {
+    // 1) API mode endast om API_BASE ser ut som riktig URL
+    if (isProbablyHttpUrl(API_BASE)) {
       try {
         const { data } = await apiMe();
         if (data && data.ok && data.user) {
@@ -589,12 +626,16 @@ Fix:
           auth.role = String(u.role || "");
           auth.perms = Array.isArray(u.perms) ? u.perms : [];
           auth.csrfToken = String(u.csrfToken || u.csrf || "");
+
           View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
           return true;
         }
-      } catch {}
+      } catch {
+        // fall through to UI mode
+      }
     }
 
+    // 2) UI mode (FRZ_SESSION_V1) — matchar din index.html demo-login
     const sess = readUiSession();
     const v = isUiSessionValid(sess);
     if (!v.ok) {
@@ -606,18 +647,24 @@ Fix:
     auth.mode = "ui";
     auth.userId = String(v.firstName || "—");
     auth.role = String(v.role || "—");
+
+    // UI-demo perms
     auth.perms = (String(v.role).toUpperCase() === "ADMIN")
       ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
       : ["view_dashboard"];
+
     auth.csrfToken = "";
 
     View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
     return true;
   }
 
+  // -----------------------------
+  // STORE INIT/SUBSCRIBE
+  // -----------------------------
   function initStore() {
     if (!store || typeof store.init !== "function") {
-      View.setViewHint("Saknar FreezerStore (script-ordning/alias fel).");
+      redirectToLogin();
       return false;
     }
     try {
@@ -626,6 +673,7 @@ Fix:
       return true;
     } catch {
       markStoreCorrupt();
+      // Vi stannar ändå på sidan (read-only)
       return true;
     }
   }
@@ -647,7 +695,13 @@ Fix:
     }
   }
 
-  function onTabChange(key) { activeTab = key; renderNow(); }
+  // -----------------------------
+  // EVENTS (controller)
+  // -----------------------------
+  function onTabChange(key) {
+    activeTab = key;
+    renderNow();
+  }
 
   function onResetDemo() {
     const status = safeGetStatus();
@@ -660,11 +714,18 @@ Fix:
     renderNow();
   }
 
+  // -----------------------------
+  // MAIN BOOT
+  // -----------------------------
   (async function main() {
     View.bootUnlock();
     View.wireModalClose();
+
     View.wireTabs(onTabChange);
-    View.wireButtons({ onOpenCreateUser: openCreateUser, onResetDemo: onResetDemo });
+    View.wireButtons({
+      onOpenCreateUser: openCreateUser,
+      onResetDemo: onResetDemo
+    });
 
     const ok = await bootAuth();
     if (!ok) return;
@@ -674,6 +735,12 @@ Fix:
 
     subscribeStore();
     renderNow();
-    syncCreateUserTopbarBtn();
   })();
+
+  /* ÄNDRINGSLOGG (≤8)
+  1) API-mode körs bara om API_BASE är riktig http/https URL (annars UI-mode).
+  2) UI-mode (FRZ_SESSION_V1) fallback stabil – minskar “kastas ut”.
+  3) “Skapa användare” aktiveras för ADMIN + users_manage även om store råkar vara readOnly.
+  4) Modal öppnas deterministiskt (shell om finns, annars legacy overlay).
+  */
 })();
