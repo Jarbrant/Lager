@@ -1,16 +1,14 @@
 /* ============================================================
-AO-SEC-01B — UI koppling mot API (auth/me + CSRF + felkoder)
+AO-SEC-01B (HYBRID) — UI koppling mot API (auth/me + CSRF + felkoder)
++ Fallback: UI-demo-session (FRZ_SESSION_V1) om API_BASE saknas
 + Renare ansvar: controller = logik/state, view(render) = DOM/render
 FIL: admin/freezer.js  (HEL FIL)
 Projekt: Freezer (UI GitHub Pages -> API Worker)
 
 Syfte:
-- Init: hämta session via API (/auth/me) istället för local demo-session i UI
-- Spara csrfToken i minne (ingen storage-key)
-- Alla write-requests skickar credentials + X-CSRF
-- Standardiserad API-error hantering: errorCode + requestId
-- Fail-closed: om inte /auth/me ok -> redirect till ../index.html
-- Behåll befintlig UI-koppling: FreezerStore + FreezerRender + FreezerDashboard (om finns)
+- Primärt: API-auth via /auth/me (cookie-session), CSRF i minne
+- Fallback: UI-only auth via FRZ_SESSION_V1 (sessionStorage/localStorage)
+- Fail-closed: om varken API-auth eller UI-session är OK -> redirect ../index.html
 
 Kontrakt:
 - Inga nya storage keys i UI
@@ -30,9 +28,10 @@ Kontrakt:
     "";
 
   const PATH_LOGIN = "../index.html";
+  const UI_SESSION_KEY = "FRZ_SESSION_V1";
 
   // -----------------------------
-  // INIT-GUARD (ingen dubbel init)
+  // INIT-GUARD
   // -----------------------------
   if (window.__FRZ_ADMIN_PAGE_INIT__) return;
   window.__FRZ_ADMIN_PAGE_INIT__ = true;
@@ -47,6 +46,36 @@ Kontrakt:
   function redirectToLogin() {
     try { window.location.replace(PATH_LOGIN); } catch {
       try { window.location.href = PATH_LOGIN; } catch {}
+    }
+  }
+
+  function readUiSession() {
+    try {
+      const sRaw = (window.sessionStorage && window.sessionStorage.getItem(UI_SESSION_KEY)) || null;
+      if (sRaw) return safeJsonParse(sRaw);
+    } catch {}
+    try {
+      const lRaw = (window.localStorage && window.localStorage.getItem(UI_SESSION_KEY)) || null;
+      if (lRaw) return safeJsonParse(lRaw);
+    } catch {}
+    return null;
+  }
+
+  function isUiSessionValid(sess) {
+    try {
+      if (!sess || typeof sess !== "object") return { ok: false, reason: "NO_SESSION" };
+      const role = String(sess.role || "").toUpperCase().trim();
+      if (!role) return { ok: false, reason: "BAD_SESSION" };
+
+      const exp = Number(sess.exp || 0);
+      if (exp && Date.now() > exp) return { ok: false, reason: "EXPIRED" };
+
+      const firstName = String(sess.firstName || "").trim();
+      if (!firstName) return { ok: false, reason: "BAD_SESSION" };
+
+      return { ok: true, role, firstName };
+    } catch {
+      return { ok: false, reason: "BAD_SESSION" };
     }
   }
 
@@ -88,7 +117,6 @@ Kontrakt:
       setViewHint(map[String(tabKey || "")] || "Vy: —");
     }
 
-    // Modal unlock helpers (render-only)
     function hardHide(node) {
       try {
         if (!node) return;
@@ -143,7 +171,42 @@ Kontrakt:
       }, true);
     }
 
-    // AO-02A panel render (pure DOM render; controller provides state + callbacks)
+    function wireModalClose() {
+      if (els.legacyClose) els.legacyClose.addEventListener("click", closeAnyModal);
+      if (els.legacyCancel) els.legacyCancel.addEventListener("click", closeAnyModal);
+      if (els.legacyOverlay) {
+        els.legacyOverlay.addEventListener("click", (ev) => {
+          try { if (ev.target === els.legacyOverlay) closeAnyModal(); } catch {}
+        });
+      }
+    }
+
+    function wireTabs(onTab) {
+      function bind(btn, key) {
+        if (!btn) return;
+        btn.addEventListener("click", () => onTab(key));
+      }
+      bind(els.tabDashboard, "dashboard");
+      bind(els.tabSaldo, "saldo");
+      bind(els.tabHistorik, "history");
+    }
+
+    function wireButtons(handlers) {
+      if (els.openCreateUserBtn && handlers && handlers.onOpenCreateUser) {
+        els.openCreateUserBtn.addEventListener("click", handlers.onOpenCreateUser);
+      }
+      if (els.resetBtn && handlers && handlers.onResetDemo) {
+        els.resetBtn.addEventListener("click", handlers.onResetDemo);
+      }
+    }
+
+    function setCreateUserDisabled(disabled, title) {
+      if (!els.openCreateUserBtn) return;
+      els.openCreateUserBtn.disabled = !!disabled;
+      if (typeof title === "string") els.openCreateUserBtn.title = title;
+    }
+
+    // AO-02A panel render (pure DOM render)
     function renderTopInOutPanel(args) {
       try {
         const dashCards = els.dashCards;
@@ -154,7 +217,6 @@ Kontrakt:
         const topPeriodDays = safeNum(args.topPeriodDays, 30);
         const onPickPeriod = typeof args.onPickPeriod === "function" ? args.onPickPeriod : function () {};
 
-        // Ensure panel is first
         let panel = byId("frzTopInOutPanel");
         if (!panel) {
           panel = document.createElement("div");
@@ -239,7 +301,6 @@ Kontrakt:
         }
 
         const res = dash.computeTopInOut(state, topPeriodDays) || { in: [], out: [], meta: {}, days: topPeriodDays };
-
         const showIn = (role !== "PICKER");
         const showOut = (role !== "BUYER");
 
@@ -346,44 +407,6 @@ Kontrakt:
       }
     }
 
-    // Wire legacy modal close hooks (render-only)
-    function wireModalClose() {
-      if (els.legacyClose) els.legacyClose.addEventListener("click", closeAnyModal);
-      if (els.legacyCancel) els.legacyCancel.addEventListener("click", closeAnyModal);
-      if (els.legacyOverlay) {
-        els.legacyOverlay.addEventListener("click", (ev) => {
-          try { if (ev.target === els.legacyOverlay) closeAnyModal(); } catch {}
-        });
-      }
-    }
-
-    // Wire tabs (controller passes callback)
-    function wireTabs(onTab) {
-      function bind(btn, key) {
-        if (!btn) return;
-        btn.addEventListener("click", () => onTab(key));
-      }
-      bind(els.tabDashboard, "dashboard");
-      bind(els.tabSaldo, "saldo");
-      bind(els.tabHistorik, "history");
-    }
-
-    // Wire buttons (controller passes callbacks)
-    function wireButtons(handlers) {
-      if (els.openCreateUserBtn && handlers && handlers.onOpenCreateUser) {
-        els.openCreateUserBtn.addEventListener("click", handlers.onOpenCreateUser);
-      }
-      if (els.resetBtn && handlers && handlers.onResetDemo) {
-        els.resetBtn.addEventListener("click", handlers.onResetDemo);
-      }
-    }
-
-    function setCreateUserDisabled(disabled, title) {
-      if (!els.openCreateUserBtn) return;
-      els.openCreateUserBtn.disabled = !!disabled;
-      if (typeof title === "string") els.openCreateUserBtn.title = title;
-    }
-
     return {
       els,
       setTopbarIdentity,
@@ -391,7 +414,6 @@ Kontrakt:
       setHintForTab,
       bootUnlock,
       closeAnyModal,
-      killAllOverlays,
       wireModalClose,
       wireTabs,
       wireButtons,
@@ -401,7 +423,7 @@ Kontrakt:
   })();
 
   // -----------------------------
-  // CONTROLLER STATE (in-memory)
+  // CONTROLLER STATE
   // -----------------------------
   let activeTab = "dashboard";
   let topPeriodDays = 30;
@@ -411,7 +433,8 @@ Kontrakt:
     userId: "",
     role: "",
     perms: [],
-    csrfToken: ""
+    csrfToken: "",
+    mode: "none" // "api" | "ui"
   };
 
   function hasPerm(perm) {
@@ -437,17 +460,12 @@ Kontrakt:
       if (auth.csrfToken) headers.set("X-CSRF", auth.csrfToken);
     }
 
-    let res;
-    try {
-      res = await fetch(url, {
-        method,
-        headers,
-        body: o.body,
-        credentials: "include" // cookie-session från worker
-      });
-    } catch {
-      throw { status: 0, errorCode: "NETWORK_ERROR", message: "Nätverksfel", requestId: "" };
-    }
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: o.body,
+      credentials: "include"
+    });
 
     const requestId = res.headers.get("X-Request-Id") || "";
     let data = null;
@@ -470,12 +488,10 @@ Kontrakt:
   }
 
   function apiMe() { return apiFetch("/auth/me", { method: "GET" }); }
-  function apiLogout() { return apiFetch("/auth/logout", { method: "POST", body: "{}" }); }
 
   // -----------------------------
   // STORE GUARDS (controller)
   // -----------------------------
-  // Fail-closed requirement: if FreezerRender missing -> redirect (no console).
   if (!window.FreezerRender) {
     redirectToLogin();
     return;
@@ -494,14 +510,11 @@ Kontrakt:
     },
     can: function () { return false; },
     hasPerm: function () { return false; },
-
     resetDemo: function () { return { ok: false, reason: "Read-only: storage error." }; },
-
     listUsers: function () { return []; },
     createUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
     updateUser: function () { return { ok: false, reason: "Read-only: storage error." }; },
     setUserActive: function () { return { ok: false, reason: "Read-only: storage error." }; },
-
     listItems: function () { return []; }
   };
 
@@ -509,7 +522,6 @@ Kontrakt:
 
   function markStoreCorrupt() {
     storeCorrupt = true;
-    // No console (AO requirement). Render remains usable via shim.
     View.setViewHint("Read-only: storage fel.");
   }
 
@@ -534,7 +546,7 @@ Kontrakt:
   }
 
   // -----------------------------
-  // CONTROLLER -> VIEW SYNC
+  // CONTROLLER -> VIEW
   // -----------------------------
   function syncCreateUserTopbarBtn() {
     const status = safeGetStatus();
@@ -564,10 +576,18 @@ Kontrakt:
       topPeriodDays,
       onPickPeriod: (days) => {
         topPeriodDays = days;
-        // re-render only (no storage)
         renderNow();
       }
     });
+  }
+
+  function renderNow() {
+    const st = safeGetState();
+    window.FreezerRender.renderAll(st, { itemsMsg: "—" });
+    window.FreezerRender.setActiveTabUI(activeTab);
+    syncCreateUserTopbarBtn();
+    View.setHintForTab(activeTab);
+    renderTopInOutIfDashboard(st);
   }
 
   // -----------------------------
@@ -596,53 +616,56 @@ Kontrakt:
   }
 
   // -----------------------------
-  // BOOT: AUTH (/auth/me) fail-closed
+  // AUTH BOOT (API first, fallback UI-session)
   // -----------------------------
-  function showApiErrorToHint(e) {
-    const code = (e && e.errorCode) ? String(e.errorCode) : "API_ERROR";
-    const rid = (e && e.requestId) ? String(e.requestId) : "";
-    const msg = rid ? `API-fel: ${code} (${rid})` : `API-fel: ${code}`;
-    View.setViewHint(msg);
-  }
-
   async function bootAuth() {
-    if (!API_BASE) {
-      redirectToLogin();
-      return false;
-    }
+    // 1) API mode if configured
+    if (API_BASE) {
+      try {
+        const { data } = await apiMe();
+        if (data && data.ok && data.user) {
+          const u = data.user || {};
+          auth.ok = true;
+          auth.mode = "api";
+          auth.userId = String(u.userId || "");
+          auth.role = String(u.role || "");
+          auth.perms = Array.isArray(u.perms) ? u.perms : [];
+          auth.csrfToken = String(u.csrfToken || u.csrf || "");
 
-    try {
-      const { data } = await apiMe();
-      if (!data || !data.ok || !data.user) {
-        redirectToLogin();
-        return false;
+          View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
+          return true;
+        }
+      } catch {
+        // fall through to UI mode
       }
+    }
 
-      const u = data.user || {};
-      auth.ok = true;
-      auth.userId = String(u.userId || "");
-      auth.role = String(u.role || "");
-      auth.perms = Array.isArray(u.perms) ? u.perms : [];
-      auth.csrfToken = String(u.csrfToken || u.csrf || "");
-
-      View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
-      return true;
-    } catch (e) {
-      // Optional: briefly show hint, then redirect (fail-closed)
-      showApiErrorToHint(e);
+    // 2) UI mode (FRZ_SESSION_V1) — matches your index.html demo-login
+    const sess = readUiSession();
+    const v = isUiSessionValid(sess);
+    if (!v.ok) {
       redirectToLogin();
       return false;
     }
+
+    auth.ok = true;
+    auth.mode = "ui";
+    auth.userId = String(v.firstName || "—");
+    auth.role = String(v.role || "—");
+    auth.perms = (String(v.role).toUpperCase() === "ADMIN")
+      ? ["users_manage", "items_manage", "moves_manage", "view_dashboard"]
+      : ["view_dashboard"];
+    auth.csrfToken = "";
+
+    View.setTopbarIdentity(auth.role || "—", auth.userId || "—");
+    return true;
   }
 
   // -----------------------------
-  // STORE INIT/SUBSCRIBE (controller)
+  // STORE INIT/SUBSCRIBE
   // -----------------------------
-  const itemsUI = { itemsMsg: "—" };
-
   function initStore() {
     if (!store || typeof store.init !== "function") {
-      // fail-closed: redirect (no console)
       redirectToLogin();
       return false;
     }
@@ -652,7 +675,7 @@ Kontrakt:
       return true;
     } catch {
       markStoreCorrupt();
-      return true; // continue with shim
+      return true;
     }
   }
 
@@ -661,8 +684,7 @@ Kontrakt:
       const s = getStore();
       if (s && typeof s.subscribe === "function") {
         s.subscribe((state) => {
-          // Controller triggers render
-          window.FreezerRender.renderAll(state || {}, itemsUI);
+          window.FreezerRender.renderAll(state || {}, { itemsMsg: "—" });
           window.FreezerRender.setActiveTabUI(activeTab);
           syncCreateUserTopbarBtn();
           View.setHintForTab(activeTab);
@@ -672,15 +694,6 @@ Kontrakt:
     } catch {
       markStoreCorrupt();
     }
-  }
-
-  function renderNow() {
-    const st = safeGetState();
-    window.FreezerRender.renderAll(st, itemsUI);
-    window.FreezerRender.setActiveTabUI(activeTab);
-    syncCreateUserTopbarBtn();
-    View.setHintForTab(activeTab);
-    renderTopInOutIfDashboard(st);
   }
 
   // -----------------------------
@@ -702,18 +715,13 @@ Kontrakt:
     renderNow();
   }
 
-  // Optional: if you later add a DOM button, keep controller-only:
-  // async function onLogout() { try { await apiLogout(); } catch {} finally { redirectToLogin(); } }
-
   // -----------------------------
   // MAIN BOOT
   // -----------------------------
   (async function main() {
-    // Modal watchdog (view-only)
     View.bootUnlock();
     View.wireModalClose();
 
-    // Wire UI events
     View.wireTabs(onTabChange);
     View.wireButtons({
       onOpenCreateUser: openCreateUser,
@@ -731,11 +739,10 @@ Kontrakt:
   })();
 
   /* ÄNDRINGSLOGG (≤8)
-  1) AO-SEC-01B: Auth via API (/auth/me) -> in-memory auth + csrfToken (ingen storage).
-  2) AO-SEC-01B: apiFetch: credentials:include + X-CSRF på write requests, standard felobjekt.
-  3) AO-SEC-01B: Fail-closed: saknad API_BASE eller /me fail -> redirect ../index.html.
-  4) Renare ansvar: View(render) separerad från controller (state/logik/events).
-  5) Inga console errors: fel visas som hint + fail-closed/soft där relevant.
-  6) Behöll FreezerStore/FreezerRender/FreezerDashboard-flöde och AO-02A top-panel.
+  1) HYBRID: API-auth (/auth/me) om API_BASE finns, annars UI-session FRZ_SESSION_V1 (demo).
+  2) Fail-closed: om varken API eller UI-session är OK -> redirect ../index.html.
+  3) Inga nya storage keys; CSRF i minne (API mode).
+  4) Renare ansvar: View(render) separerad från controller (state/events).
+  5) Behöll FreezerStore/FreezerRender/FreezerDashboard-flöde + AO-02A top-panel.
   */
 })();
